@@ -460,8 +460,8 @@ Risks:
 
 **PR-18 · P2-05a ring layout and `SeatPlate`**
 
-- **Files:** new `src/components/table/SeatPlate.tsx` and a ring component (imported only from the `LiveApp` path); slot = `(seat−you+6)%6`; CSS in `src/net/live.css`. No `lib/atlas` or `lib/scripted` imports (`src/net/imports.test.ts:9-22`).
-- **Tests (red):** `Table.test.tsx › six seats render names, stacks, bets and the active timer`; `role=group` and `aria-label` per seat.
+- **Files:** new `src/net/SeatPlate.tsx` and the ring, `src/net/SixRing.tsx` (imported only from the `LiveApp` path); slot = `(seat−you+6)%6`; CSS in `src/net/live.css`. No `lib/atlas` or `lib/scripted` imports (`src/net/imports.test.ts:9-22`).
+- **Tests (red):** `src/net/SixRing.test.tsx › six seats render names, stacks, bets and the active timer`; `role=group` and `aria-label` per seat.
 - **Risk:** check-bundle must keep the entry chunk flat; record its output in the PR.
 
 **PR-19 · P2-05b wire six-casual into `LiveTable`, keyboard, phone fit**
@@ -475,6 +475,10 @@ Risks:
   - `mobile.spec › a six-seat table fits 320 px without horizontal scroll`
   - `live.spec › keyboard loop at a six-seat table`
 - **Risk:** the board is already 260 px against about 242 px of felt at 320 px; it needs `--card-md-w:40px`.
+- **From the PR-18 review:**
+  - The board also overflows the oval's middle column from 681 px to about 860 px: about 239 px wide at 681 px, while five cards at the default `--card-md-w: 60px` need about 316 px. Set `--card-md-w` to 40–44 px inside `.six-ring` below about 860 px, or move the breakpoint.
+  - Which slot is the bottom, and which way is clockwise, lives only in the grid areas in `live.css`; the unit test checks only `data-slot`. `mobile.spec` asserts that the slot 0 plate is the lowest and that slot 1 is to its left.
+  - Add a test that no file outside `src/net` imports `SixRing` or `SeatPlate`, so the ring stays in the online chunk.
 
 **PR-20 · P2-05c (optional) move the heads-up live table onto the ring and take `toHeroGame` out of the live path**
 
