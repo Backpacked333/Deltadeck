@@ -290,6 +290,13 @@ export class TableDO extends DurableObject<WorkerEnv> {
    * table holds them from the moment it asks (liveness).
    */
   private claiming = new Map<string, number>()
+  /**
+   * Six-casual: releases still on their way to the lobby, by account. Two
+   * calls from here are not ordered on the way, so a release that landed
+   * after a later sit's claim would delete that claim: the account would
+   * be seated here with the lobby thinking it free. A sit waits for these.
+   */
+  private releasing = new Map<string, Promise<void>>()
 
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env)
@@ -530,6 +537,10 @@ export class TableDO extends DurableObject<WorkerEnv> {
     // A retry of the action we already applied: acknowledge it again.
     if (this.ackOf(userId)?.reqId === msg.reqId)
       return this.send(ws, this.frame('state', userId))
+    // A player who stood folds when the action reaches them; they make no
+    // more decisions in this hand, whatever reaches the table first.
+    if (this.match!.players.some((p) => p.userId === userId && p.standing))
+      return this.reject(ws, 'not_your_turn', 'You have stood up', msg.reqId)
     const hand = this.hand
     if (
       !hand ||
@@ -586,6 +597,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
         ...cooldown,
       })
     if (this.seatFor(ws, userId, wanted) === null) return
+    // A release of this account from here still on its way would land
+    // after this claim and delete it.
+    await this.releasing.get(userId)
     // Held from here until the account is seated below, or not (liveness).
     this.claiming.set(userId, (this.claiming.get(userId) ?? 0) + 1)
     let elsewhere: string | null
@@ -735,9 +749,21 @@ export class TableDO extends DurableObject<WorkerEnv> {
 
   /**
    * Frees the accounts that left for their next table. If this is lost, the
-   * lobby finds them unseated the next time it asks (liveness).
+   * lobby finds them unseated the next time it asks (liveness). Until it
+   * lands, a sit by one of them waits (releasing).
    */
-  private async releaseSeats(userIds: string[]) {
+  private releaseSeats(userIds: string[]) {
+    const sent = this.sendRelease(userIds)
+    for (const userId of userIds) this.releasing.set(userId, sent)
+    void sent.then(() => {
+      for (const userId of userIds)
+        if (this.releasing.get(userId) === sent) this.releasing.delete(userId)
+    })
+    return sent
+  }
+
+  /** The lobby call itself; it never throws. */
+  private async sendRelease(userIds: string[]) {
     try {
       await lobbyStub(this.env).release(userIds, this.match!.id)
     } catch (error) {

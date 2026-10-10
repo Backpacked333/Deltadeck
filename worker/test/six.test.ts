@@ -24,7 +24,7 @@ import { CashController } from '../src/controller'
 import type { TableController } from '../src/controller'
 import { lobbyStub } from '../src/lobby'
 import type { LobbyDO } from '../src/lobby'
-import { NEXT_HAND_MS } from '../src/table'
+import { NEXT_HAND_MS, SIT_COOLDOWN_MS } from '../src/table'
 import type { InitBody, TableDO } from '../src/table'
 import { analysisKeys, checkFrames, FLOW_TYPES } from './frames'
 import {
@@ -1192,6 +1192,92 @@ describe('standing up at a six table', () => {
     })
     expect(other.frames.map((f) => f.t)).not.toContain('matched')
     expect(await claims()).toEqual({ qs: matchId })
+  })
+
+  it("a sit waits for the account's release from this table to reach the lobby", async () => {
+    // Two calls from one table to the lobby are not ordered on the way. A
+    // release that landed after the same account's next claim from here
+    // would delete that claim, and another table could then seat them too.
+    const matchId = await sixTable()
+    let held: Promise<void> = Promise.resolve()
+    let letGo = () => {}
+    const calls: string[] = []
+    await runInDurableObject(stub(matchId), (instance: TableDO) => {
+      const real = env.LOBBY
+      const lobbyOf = (id: DurableObjectId) => {
+        const lobby = real.get(id, { locationHint: 'enam' })
+        return {
+          claim: (userId: string, table: string) => {
+            calls.push('claim')
+            return lobby.claim(userId, table)
+          },
+          release: async (userIds: string[], table: string) => {
+            calls.push('release')
+            await held
+            await lobby.release(userIds, table)
+            calls.push('released')
+          },
+        }
+      }
+      ;(instance as unknown as { env: typeof env }).env = {
+        ...env,
+        LOBBY: {
+          idFromName: (name: string) => real.idFromName(name),
+          get: lobbyOf,
+        } as unknown as typeof env.LOBBY,
+      }
+    })
+    const client = await sitDown(matchId, 'late')
+    expect(await claims()).toEqual({ late: matchId })
+    held = new Promise((resolve) => (letGo = resolve))
+    expect(await standUp(client)).toMatchObject({ seat: null })
+    // Past the cooldown, as for a sit refused after its claim (no cooldown).
+    await runInDurableObject(stub(matchId), (instance: TableDO) => {
+      const base = instance.clock
+      instance.clock = () => base() + SIT_COOLDOWN_MS
+    })
+    const from = client.frames.length
+    client.send({ t: 'sit' })
+    // Every chance for the sit's claim to overtake the held release.
+    for (let i = 0; i < 40 && calls.at(-1) !== 'claim'; i++)
+      await new Promise((r) => setTimeout(r, 5))
+    letGo()
+    await client.next((f) => f.t === 'welcome' && f.seat !== null, from)
+    await eventually(async () => calls.includes('released'))
+    expect(calls).toEqual(['claim', 'release', 'released', 'claim'])
+    expect(await claims()).toEqual({ late: matchId })
+  })
+
+  it('a player who stood makes no more decisions in the hand', async () => {
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2, 4], 'sg')
+    await clients[0].next(isState(1))
+    const { hand } = await peek(matchId)
+    const seat = hand!.toAct! as SeatId
+    // A stand on their turn folds them in the same handler, and the turn
+    // reaching a player who stood folds them in the same write: nothing
+    // can come between. Mark them standing without that fold, as a decision
+    // racing it would find them, and send the decision anyway.
+    await runInDurableObject(stub(matchId), (instance: TableDO) => {
+      const { match } = instance as unknown as {
+        match: { players: { userId: string; standing?: boolean }[] }
+      }
+      match.players.find((p) => p.userId === `sg-${seat}`)!.standing = true
+    })
+    const from = clients[seat].frames.length
+    clients[seat].send({
+      t: 'act',
+      reqId: 'sg-1',
+      handNo: 1,
+      actionIndex: hand!.actions.length,
+      action: { type: 'call' },
+    })
+    expect(
+      await clients[seat].next((f) => f.t === 'error', from),
+    ).toMatchObject({ code: 'not_your_turn', reqId: 'sg-1' })
+    expect((await peek(matchId)).hand!.actions).toHaveLength(
+      hand!.actions.length,
+    )
   })
 
   it('stand frames carry only allowed keys', async () => {
