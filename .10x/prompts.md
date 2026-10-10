@@ -1,28 +1,28 @@
 # 10x prompts for what is left
 
-Rewritten 2026-10-10 against `main` at `a3b9aed` (PR #26), refreshed the same day at `13fe865` (PR #39). It replaces the 2026-10-09 version that lived only on the branch `claude/amazing-ride-4vip4x`. That version's Prompts 1–5 are done, its Prompt 6 was written for the same-deck duplicate format that Q1 = B dropped, and most of its Prompts 7 and 8 is built.
+Rewritten 2026-10-10 against `main` at `a3b9aed` (PR #26), refreshed the same day at `13fe865` (PR #39) and again at `a91da97` (PR #45). It replaces the 2026-10-09 version that lived only on the branch `claude/amazing-ride-4vip4x`. That version's Prompts 1–5 are done, its Prompt 6 was written for the same-deck duplicate format that Q1 = B dropped, and most of its Prompts 7 and 8 is built.
 
 Order: **finish Phase 0 → Phase 1 → Phase 2 → Later.** One prompt per fresh Claude Code session, top to bottom, except where "Runs after" allows two at once. Each prompt names the tickets it closes; the acceptance tests under those tickets in `.10x/tickets.md` are the definition of done.
 
-| #   | Phase | Prompt                                         | Tickets             | Header                          | Runs after                       |
-| --- | ----- | ---------------------------------------------- | ------------------- | ------------------------------- | -------------------------------- |
-| 0   | all   | Operating contract (after the header)          | —                   | —                               | —                                |
-| 1   | 0     | Production proof of the rated pipeline         | S7-11               | `/10x-Team:sre`                 | U-4 (your Supabase key)          |
-| 2   | 0     | Queue wait, ack latency and a build marker     | S7-05               | `/10x-Team:sde`                 | nothing; can run beside 3        |
-| 3   | 1     | Live table keyboard, sounds and quality gates  | P1-07               | `/10x-Team:sde`                 | nothing; can run beside 2        |
-| 4   | 1     | Your own review of a finished match            | P1-05, P1-06        | `/10x-Team:sde`                 | 3 (both edit `src/App.tsx`)      |
-| 5   | 1     | ~~The ladder~~ (done, PR #27)                  | P1-14               | —                               | —                                |
-| 6   | 1     | Count profile views and shares (rest of P1-16) | P1-16               | `/10x-Team:sde`                 | nothing; can run beside 2 or 3   |
-| 7   | 1     | Reports, sanctions and appeals                 | P1-17, P1-18        | `/10x-Team:sde`                 | 4                                |
-| 8   | 1     | Mistakes to lessons, and what to review first  | P1-19, P1-20        | `/10x-Team:sde`                 | 4; can run beside 7              |
-| 9   | 1     | Metrics pack and ladder launch                 | P1-21, P1-22        | `/10x-Team:sre`                 | 1–8                              |
-| 10  | 2     | Finish the 6-max engine, pairwise results      | P2-02b/c, P2-12     | `/10x-Team:sde`                 | nothing; pure code, any time     |
-| 11  | 2     | Casual 6-max table service                     | P2-03, P2-04        | `/10x-Team:sde`                 | 10                               |
-| 12  | 2     | Six-seat table UI, side pots and table list    | P2-05, P2-06, P2-08 | `/10x-Team:sde`                 | 11 (the UI spike can start now)  |
-| 13  | 2     | 6-max review, stats, bots, acceptance          | P2-07, P2-09–P2-11  | `/10x-Team:sde`                 | 12, and S7-05 (prompt 2)         |
-| 14  | 2     | Arenas and the 6-max rating                    | P2-13, P2-14, P2-15 | `/10x-Team:principal-architect` | 13, and 1,000 human casual hands |
-| 15  | Later | Integrity v2 (only when triggered)             | —                   | `/10x-Team:security-engineer`   | a trigger                        |
-| 16  | Later | Optional: port the AI coach                    | —                   | `/10x-Team:sde`                 | nothing                          |
+| #   | Phase | Prompt                                         | Tickets              | Header                          | Runs after                       |
+| --- | ----- | ---------------------------------------------- | -------------------- | ------------------------------- | -------------------------------- |
+| 0   | all   | Operating contract (after the header)          | —                    | —                               | —                                |
+| 1   | 0     | Production proof of the rated pipeline         | S7-11                | `/10x-Team:sre`                 | U-4 (your Supabase key)          |
+| 2   | 0     | Queue wait, ack latency and a build marker     | S7-05                | `/10x-Team:sde`                 | nothing; can run beside 3        |
+| 3   | 1     | Live table keyboard, sounds and quality gates  | P1-07                | `/10x-Team:sde`                 | nothing; can run beside 2        |
+| 4   | 1     | Your own review of a finished match            | P1-05, P1-06         | `/10x-Team:sde`                 | 3 (both edit `src/App.tsx`)      |
+| 5   | 1     | ~~The ladder~~ (done, PR #27)                  | P1-14                | —                               | —                                |
+| 6   | 1     | Count profile views and shares (rest of P1-16) | P1-16                | `/10x-Team:sde`                 | nothing; can run beside 2 or 3   |
+| 7   | 1     | Reports, sanctions and appeals                 | P1-17, P1-18         | `/10x-Team:sde`                 | 4                                |
+| 8   | 1     | Mistakes to lessons, and what to review first  | P1-19, P1-20         | `/10x-Team:sde`                 | 4; can run beside 7              |
+| 9   | 1     | Metrics pack and ladder launch                 | P1-21, P1-22         | `/10x-Team:sre`                 | 1–8                              |
+| 10  | 2     | Multiway luck and pairwise results             | P2-12                | `/10x-Team:sde`                 | nothing; pure code, any time     |
+| 11  | 2     | Casual 6-max table service (rest)              | P2-03d–f, P2-04      | `/10x-Team:sde`                 | nothing; PR-09–PR-11 are merged  |
+| 12  | 2     | Six-seat table UI, side pots and table list    | P2-05b, P2-06, P2-08 | `/10x-Team:sde`                 | can start now; PR-23+ need PR-13 |
+| 13  | 2     | 6-max review, stats, bots, acceptance          | P2-07, P2-09–P2-11   | `/10x-Team:sde`                 | 12, and S7-05 (prompt 2)         |
+| 14  | 2     | Arenas and the 6-max rating                    | P2-13, P2-14, P2-15  | `/10x-Team:principal-architect` | 13, and 1,000 human casual hands |
+| 15  | Later | Integrity v2 (only when triggered)             | —                    | `/10x-Team:security-engineer`   | a trigger                        |
+| 16  | Later | Optional: port the AI coach                    | —                    | `/10x-Team:sde`                 | nothing                          |
 
 P2-16 (the trainer onto `src/engine`) stays cut, as the tickets recommend.
 
@@ -303,40 +303,37 @@ DO NOT: seed fake data into production, run load against production, or claim on
 
 # PHASE 2: 6-max (`six-max-tables` casual, then rated arenas)
 
-Every Phase 2 prompt follows `.10x/decisions/engineering-manager/six-max-casual.md` (the PR plan, PR-01…PR-26) and the ADR's "Amendment 2026-10-10: Phase 2 casual 6-max" (the rules). Where they differ from the P2 tickets, they win. Done: PR-01, PR-02 (P2-01), PR-03 (the amendment), PR-04 (P2-02a), PR-07, PR-08 (frame allowlists).
+Every Phase 2 prompt follows `.10x/decisions/engineering-manager/six-max-casual.md` (the PR plan, PR-01…PR-26) and the ADR's "Amendment 2026-10-10: Phase 2 casual 6-max" (the rules). Where they differ from the P2 tickets, they win. Done: PR-01, PR-02 (P2-01), PR-03 (the amendment), PR-04 (P2-02a), PR-05, PR-06 (P2-02b/c, PR #40), PR-07, PR-08 (frame allowlists), PR-09 to PR-11 (P2-03a–c: the archive migration, CashController, sit and play, PRs #41, #43, #44) and PR-18 (P2-05a, the six-seat ring, PR #45).
 
-## 10. Finish the 6-max engine, and pairwise results (P2-02b, P2-02c, P2-12)
+## 10. Multiway luck and pairwise results (P2-12)
 
-**Header:** `/10x-Team:sde`. Pure code, so it can run any time, beside Phase 1 work.
+**Header:** `/10x-Team:sde`. Pure code, so it can run any time. PR-05 and PR-06 (P2-02b/c) merged as PR #40.
 
 ```
-MISSION. The engine already plays 2 to 6 seats with the dead button and explicit blind seats (P2-01, P2-02a). Two pure pieces are missing before a table service can use it: how the blinds move between hands as players come and go, and the carry-over and rebuy rule. Add the pure luck-adjusted pairwise results the 6-max rating and stats will need.
+MISSION. The 6-max rating (Prompt 14) and the luck-adjusted bb/100 stat (Prompt 13) need two pure pieces that do not exist: all-in luck settled at equity when three or more players are all in, and luck-adjusted results turned into pairwise results per opponent.
 
-READ: the PR plan's PR-05 and PR-06; the ADR amendment's rows on blinds and button, joining, standing up, and stacks and rebuy; .10x/tickets.md P2-02 and P2-12; .10x/decisions/sde/six-max-tables.md (P2-01, P2-02a); src/engine/{positions,positions.test,types,hand,testing}.ts; src/engine/luck.ts and its test (heads-up only today); src/rating/glicko2.ts.
+READ: .10x/tickets.md P2-12; src/engine/luck.ts and its test (heads-up only today); src/rating/glicko2.ts; the six-max-tables and rating-and-leaderboard PM files (§6-max).
 
-BUILD (each red first, as the plan names it):
-1. PR-05, P2-02b: nextBlinds as the amendment defines it (the big blind moves to the next seat with a player dealt in; the small blind goes to the seat that had the big blind, dead if empty; joiners dealt in without posting). The plan's test names, including the 10k random join and leave sequences, with the amendment's interpretation written into them.
-2. PR-06, P2-02c: the carry-over and rebuy rule as pure functions (top up to exactly 100 bb, only below 100 bb, only between hands, never an amount from the client).
-3. P2-12 as ticketed: extend src/engine/luck.ts to multiway all-ins (bench a 3-way preflop all-in first; if exact enumeration is too slow, use a fixed Monte Carlo budget and say so), and src/rating/pairwise.ts. Heads-up results must not change: the existing luck tests stay green, bit for bit.
+BUILD (red first): P2-12 as ticketed. Extend src/engine/luck.ts to multiway all-ins: bench a 3-way preflop all-in first, and if exact enumeration is too slow, use a fixed Monte Carlo budget with a fixed seed and say so. Add src/rating/pairwise.ts. Heads-up results must not change: the existing luck tests stay green, bit for bit.
 
-DONE WHEN: the tests named for PR-05, PR-06 and P2-12 pass; gates green; each PR merged and verified.
+DONE WHEN: P2-12's acceptance tests pass under their names; gates green; merged and verified.
 
-DO NOT: touch worker/src/table.ts, the UI, or the ratings tables.
+DO NOT: touch worker code, the UI, or the ratings tables.
 ```
 
-## 11. Casual 6-max table service (P2-03, P2-04)
+## 11. Casual 6-max table service, the rest (P2-03d–f, P2-04)
 
 **Header:** `/10x-Team:sde`. The lane-W work in `worker/src/table.ts`, one PR at a time, in the plan's order.
 
 ```
 MISSION. A casual 6-max table that never ends: players sit, stand and rebuy, the clock and sit-out rules keep it moving, sessions archive cleanly, and no seat ever sees another's cards, including through a seat reused after a hand. Server only; the six-seat UI is Prompt 12.
 
-PRE-CHECK: Prompt 10 is merged. If not, stop. You gave the go-ahead for casual 6-max on 2026-10-10, so this does not wait for the ladder launch.
+PRE-CHECK: PR-09 to PR-11 are merged (PRs #41, #43, #44): six-casual sessions archive, CashController plans hands, and players can sit and play. Start from the newest main. You gave the go-ahead for casual 6-max on 2026-10-10, so this does not wait for the ladder launch.
 
 READ: the PR plan's §(1) for worker/src and supabase, PR-09 to PR-17, §(3) contradictions and §(4) security points (seat reuse is the main new leak path); the ADR amendment in full, including its failure matrix; .10x/tickets.md P2-03 and P2-04; worker/src/{table,controller,deadlines,lobby,rated}.ts; src/shared/protocol.ts; worker/test/frames.ts, leaks.test.ts and rated-leak.test.ts; the latest record_match and record_hand migrations.
 
 BUILD, in the plan's order, one PR each, red first:
-- PR-09 (P2-03a) six-casual kind and archive schema; PR-10 (P2-03b) CashController; PR-11 (P2-03c) sit, play and carry-over; PR-12 (P2-03d) stand up and seat reuse; PR-13 (P2-03e) the session lifecycle; PR-14 (P2-03f) rebuy, the cut line.
+- Done: PR-09 (P2-03a), PR-10 (P2-03b), PR-11 (P2-03c). Next: PR-12 (P2-03d) stand up and seat reuse; PR-13 (P2-03e) the session lifecycle; PR-14 (P2-03f) rebuy, the cut line.
 - PR-15 (P2-04a) the orbit bank; PR-16 (P2-04b) sit-out and removal; PR-17 (P2-04c) the 60 s reconnect.
 Every new frame or field gets its allowlist and redaction test through worker/test/frames.ts, and the leak tests loop over every (viewer, other) pair by seat. A frame about a hand is built from that hand's seat-to-user map, never from the socket's stored seat.
 
@@ -352,12 +349,12 @@ DO NOT: build the six-seat UI, add bots, grade or rate casual hands (R-23; apply
 ```
 MISSION. The user's bar is "highest quality, especially 6-max". Give six seats the trainer's card art, chips and choreography, readable on a phone and playable by keyboard, with side pots that visibly pay out in order, and a lobby list that finds a table in one click.
 
-PRE-CHECK: PR-11 (sit and play) is merged; PR-19 also needs it. The ring-layout spike (PR-18) can start any time after PR-09.
+PRE-CHECK: PR-11 (sit and play) and PR-18 (the ring and SeatPlate, PR #45) are merged. The table list (PR-23 to PR-25) also needs PR-13's session lifecycle from Prompt 11; build it last.
 
 READ: the PR plan's §(1) UI section and PR-18 to PR-25; the ADR amendment's rows on the table UI and on the table list and quick-sit; .10x/tickets.md P2-05, P2-06 and P2-08; the six-max-tables PM file; src/components/table/*; src/motion.ts; src/net/{LiveTable,Lobby}.tsx; e2e/{live,mobile,motion}.spec.ts.
 
 BUILD, in the plan's order, red first:
-- PR-18 (P2-05a) the ring layout and SeatPlate in the lazy online chunk; Table.tsx stays as it is, so the entry bundle is untouched. Spike six plates at 320 px first and record what you chose.
+- Done: PR-18 (P2-05a) the ring layout and SeatPlate in the lazy online chunk (PR #45).
 - PR-19 (P2-05b) six-casual in LiveTable, with keyboard parity (P1-07, Prompt 3) and phone fit. PR-20 (moving heads-up onto the ring) is optional; skip it unless it is free.
 - PR-21 (P2-06a) side-pot stacks without animation, the cut line; PR-22 (P2-06b) per-seat chip motion and the 3-way all-in frame gate. Run the existing frame-time test at six seats first.
 - PR-23 to PR-25 (P2-08) the table registry (counts only, at most every 30 s), quick-sit (fullest table with a free seat; on table_full or sit_cooldown try the next) and TableList.
