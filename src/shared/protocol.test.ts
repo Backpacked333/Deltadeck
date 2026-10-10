@@ -39,6 +39,7 @@ describe('parseClientMsg', () => {
         t: 'sit',
         seat,
       })
+    expect(parseClientMsg(frame({ t: 'stand' }))).toEqual({ t: 'stand' })
   })
 
   it('rejects malformed messages', () => {
@@ -72,6 +73,11 @@ describe('parseClientMsg', () => {
       frame({ t: 'sit', userId: 'u1' }),
       frame({ t: 'sit', seat: 2, username: 'u1' }),
       frame({ t: 'sit', seat: 2, stack: 4000 }),
+      // A stand names nothing: the seat is the socket account's own.
+      frame({ t: 'stand', seat: 2 }),
+      frame({ t: 'stand', userId: 'u1' }),
+      frame({ t: 'stand', x: 1 }),
+      frame({ t: 'stand', stack: 0 }),
       frame({ t: 'hello' }),
       frame({ ...act, reqId: 'a'.repeat(MAX_FRAME) }),
     ])
@@ -103,6 +109,7 @@ describe('parseClientMsg', () => {
           'raise',
           'hu-casual',
           'sit',
+          'stand',
           'r1',
           5,
           6,
@@ -140,6 +147,7 @@ describe('parseClientMsg', () => {
           'dequeue',
           'rematch',
           'sit',
+          'stand',
         ]).toContain(msg.t)
     }
   })
@@ -174,5 +182,28 @@ describe('parseClientMsg', () => {
     // Both shapes come through: no seat, and a seat 0..5.
     expect(accepted.none).toBeGreaterThan(100)
     expect(accepted.seat).toBeGreaterThan(20)
+  })
+
+  it('accepts a stand only bare, whatever else it carries', () => {
+    const random = lcg(10)
+    const pick = <T>(xs: T[]) => xs[Math.floor(random() * xs.length)]
+    const values = [0, 1, 5, -1, '', 'k0', null, true, [], {}]
+    let bare = 0
+    for (let i = 0; i < 5000; i++) {
+      const extra = ['seat', 'userId', 'username', 'stack', 'x'].filter(
+        () => random() < 0.3,
+      )
+      const sent = {
+        t: 'stand',
+        ...Object.fromEntries(extra.map((k) => [k, pick(values)])),
+      }
+      const msg = parseClientMsg(frame(sent))
+      // Anything beyond the type is refused, never ignored.
+      expect(msg, JSON.stringify(sent)).toEqual(
+        extra.length ? null : { t: 'stand' },
+      )
+      if (msg) bare++
+    }
+    expect(bare).toBeGreaterThan(500)
   })
 })

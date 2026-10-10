@@ -80,6 +80,12 @@ export type ClientMsg =
    * socket's account and the stack is the buy-in: the frame names neither.
    */
   | { t: 'sit'; seat?: SeatId }
+  /**
+   * At a six table: leave the seat. During a hand the player was dealt into,
+   * they fold when the action next reaches them and the seat frees when the
+   * hand ends; otherwise it frees at once.
+   */
+  | { t: 'stand' }
 
 /** A seated six-casual player: dealt in, or sitting out (P2-04). */
 export type SeatStatus = 'playing' | 'sitting_out'
@@ -99,6 +105,13 @@ export type ErrorCode =
   | 'seat_taken'
   /** Six tables: every seat has a player. */
   | 'table_full'
+  /**
+   * Six tables: this account stood up here too recently to sit again; the
+   * error says how many more hands, or until when (whichever comes first).
+   */
+  | 'sit_cooldown'
+  /** Six tables: a seat-only message from a socket without a seat. */
+  | 'not_seated'
 
 /**
  * Everything one seat may know about the table. There is deliberately no
@@ -292,7 +305,18 @@ export type ServerMsg = { seq: number; matchId: string } & (
         outcomeBySeat?: Record<SeatId, Outcome>
       }
     }
-  | { t: 'error'; code: ErrorCode; reqId?: string; message: string }
+  | {
+      t: 'error'
+      code: ErrorCode
+      reqId?: string
+      message: string
+      /**
+       * sit_cooldown only: hands still to be dealt here before this account
+       * may sit again, and the server epoch milliseconds when it may anyway.
+       */
+      handsLeft?: number
+      until?: number
+    }
   | {
       t: 'rating'
       /** Rated, after the match: each seat's change, once it is applied. */
@@ -384,6 +408,7 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case 'resync':
     case 'dequeue':
     case 'rematch':
+    case 'stand':
       return onlyKeys(v, ['t']) ? { t: v.t } : null
     case 'sit':
       if (!onlyKeys(v, ['t', 'seat'])) return null

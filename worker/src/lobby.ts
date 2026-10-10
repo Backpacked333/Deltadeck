@@ -455,7 +455,7 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
       | undefined
     if (!matchId) return null
     if (matchId === unless) return matchId
-    const state: Liveness = await tableStub(this.env, matchId).liveness()
+    const state: Liveness = await tableStub(this.env, matchId).liveness(userId)
     if (state === 'playing' || state === 'starting') return matchId
     await this.ctx.storage.delete(`active:${userId}`)
     return null
