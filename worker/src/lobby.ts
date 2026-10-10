@@ -88,6 +88,13 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    */
   private requests = new Map<string, number>()
   private lastRequest = 0
+  /**
+   * Each account's claims run one at a time (forUsers). A claim asks the
+   * recorded table about the account before it writes, and the lobby takes
+   * other calls during that await: two claims for one account at once
+   * would both find it free, and both seat it.
+   */
+  private userLocks = new Map<string, Promise<unknown>>()
 
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env)
@@ -296,7 +303,7 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
       }
       if (
         best &&
-        (await this.startMatch(a, best.b, best.key, best.count, kind))
+        (await this.startPaired(a, best.b, best.key, best.count, kind))
       ) {
         taken.add(a.userId)
         taken.add(best.b.userId)
@@ -317,7 +324,40 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
     if (old.size) await this.ctx.storage.delete([...old.keys()])
   }
 
-  /** A paired table with `a` in seat 0; its id, or null if not made. */
+  /**
+   * A paired table for two queued players, unless either is at a table by
+   * now: they queued free, but a claim (a six table, an invite) may have
+   * seated them since, or another pairing may have paired them meanwhile.
+   * In line with both accounts' claims, so none lands in between.
+   */
+  private startPaired(
+    a: Waiting,
+    b: Waiting,
+    pairs: string,
+    count: number,
+    kind: MatchKind,
+  ) {
+    return this.forUsers([a.userId, b.userId], async () => {
+      for (const { userId } of [a, b]) {
+        const active = await this.liveActive(userId)
+        if (!active) continue
+        // Still queued: sent back to that table, as a queue request would be.
+        if (await this.ctx.storage.get(`queue:${userId}`)) {
+          this.requests.delete(userId)
+          await this.ctx.storage.delete(`queue:${userId}`)
+          for (const ws of this.ctx.getWebSockets(userId))
+            this.send(ws, { t: 'matched', matchId: active, resumed: true })
+        }
+        return null
+      }
+      return this.startMatch(a, b, pairs, count, kind)
+    })
+  }
+
+  /**
+   * A paired table with `a` in seat 0; its id, or null if not made. Callers
+   * hold both accounts (forUsers).
+   */
   private async startMatch(
     a: Who,
     b: Who,
@@ -367,11 +407,13 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    * Records that `userId` is at `matchId`, unless they are playing at
    * another table: then that table's id comes back and nothing changes.
    */
-  async claim(userId: string, matchId: string): Promise<string | null> {
-    const active = await this.liveActive(userId, matchId)
-    if (active && active !== matchId) return active
-    await this.ctx.storage.put(`active:${userId}`, matchId)
-    return null
+  claim(userId: string, matchId: string): Promise<string | null> {
+    return this.forUsers([userId], async () => {
+      const active = await this.liveActive(userId, matchId)
+      if (active && active !== matchId) return active
+      await this.ctx.storage.put(`active:${userId}`, matchId)
+      return null
+    })
   }
 
   /**
@@ -380,29 +422,31 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    * comes back) or have made MATCH_CREATES_PER_DAY tables today (seconds
    * until the next UTC day come back). Only a table that is made counts.
    */
-  async createMatch(
+  createMatch(
     userId: string,
     matchId: string,
   ): Promise<{ active?: string; retryAfter?: number }> {
-    const active = await this.liveActive(userId)
-    if (active) return { active }
-    const t = this.clock()
-    const today = day(t)
-    const key = `creates:${today}:${userId}`
-    const made = ((await this.ctx.storage.get(key)) as number) ?? 0
-    if (made >= MATCH_CREATES_PER_DAY)
-      return { retryAfter: Math.ceil((DAY_MS - (t % DAY_MS)) / 1000) }
-    await this.ctx.storage.put({
-      [key]: made + 1,
-      [`active:${userId}`]: matchId,
+    return this.forUsers([userId], async () => {
+      const active = await this.liveActive(userId)
+      if (active) return { active }
+      const t = this.clock()
+      const today = day(t)
+      const key = `creates:${today}:${userId}`
+      const made = ((await this.ctx.storage.get(key)) as number) ?? 0
+      if (made >= MATCH_CREATES_PER_DAY)
+        return { retryAfter: Math.ceil((DAY_MS - (t % DAY_MS)) / 1000) }
+      await this.ctx.storage.put({
+        [key]: made + 1,
+        [`active:${userId}`]: matchId,
+      })
+      // Earlier days' counts are no longer needed.
+      const old = await this.ctx.storage.list({
+        prefix: 'creates:',
+        end: `creates:${today}`,
+      })
+      if (old.size) await this.ctx.storage.delete([...old.keys()])
+      return {}
     })
-    // Earlier days' counts are no longer needed.
-    const old = await this.ctx.storage.list({
-      prefix: 'creates:',
-      end: `creates:${today}`,
-    })
-    if (old.size) await this.ctx.storage.delete([...old.keys()])
-    return {}
   }
 
   /** For a finished rated table: how often this pair may still meet today. */
@@ -419,17 +463,19 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    * the pair met PAIRS_PER_DAY times today (R-9), or when either player is
    * at another table by now.
    */
-  async rematch(players: Who[], from: string): Promise<RematchAnswer> {
+  rematch(players: Who[], from: string): Promise<RematchAnswer> {
     const [a, b] = players
-    for (const p of players)
-      if (await this.liveActive(p.userId)) return { refused: 'busy' }
-    const key = pairKey(day(this.clock()), a.userId, b.userId)
-    const count = ((await this.ctx.storage.get(key)) as number) ?? 0
-    if (count >= PAIRS_PER_DAY) return { refused: 'limit' }
-    const matchId = await this.startMatch(a, b, key, count, 'hu-rated', from)
-    if (!matchId) return { refused: 'busy' }
-    await this.presence()
-    return { matchId }
+    return this.forUsers([a.userId, b.userId], async () => {
+      for (const p of players)
+        if (await this.liveActive(p.userId)) return { refused: 'busy' }
+      const key = pairKey(day(this.clock()), a.userId, b.userId)
+      const count = ((await this.ctx.storage.get(key)) as number) ?? 0
+      if (count >= PAIRS_PER_DAY) return { refused: 'limit' }
+      const matchId = await this.startMatch(a, b, key, count, 'hu-rated', from)
+      if (!matchId) return { refused: 'busy' }
+      await this.presence()
+      return { matchId }
+    })
   }
 
   /** Called by a table when its match ends. */
@@ -457,8 +503,30 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
     if (matchId === unless) return matchId
     const state: Liveness = await tableStub(this.env, matchId).liveness(userId)
     if (state === 'playing' || state === 'starting') return matchId
-    await this.ctx.storage.delete(`active:${userId}`)
+    // Only the entry just checked: a claim may have written a newer one
+    // during the await.
+    const key = `active:${userId}`
+    if ((await this.ctx.storage.get(key)) === matchId)
+      await this.ctx.storage.delete(key)
     return null
+  }
+
+  /**
+   * Runs `fn` once every earlier call for any of `userIds` has settled, and
+   * holds those accounts until it settles. Each call waits only on calls
+   * made before it, so two accounts taken together never deadlock; `fn`
+   * must not itself wait on forUsers for the same accounts.
+   */
+  private forUsers<T>(userIds: string[], fn: () => Promise<T>): Promise<T> {
+    const before = userIds.map((userId) => this.userLocks.get(userId))
+    const run = Promise.all(before).then(fn)
+    const done = run.catch(() => undefined)
+    for (const userId of userIds) this.userLocks.set(userId, done)
+    void done.then(() => {
+      for (const userId of userIds)
+        if (this.userLocks.get(userId) === done) this.userLocks.delete(userId)
+    })
+    return run
   }
 
   // ---- Frames --------------------------------------------------------------------

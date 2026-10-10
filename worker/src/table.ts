@@ -283,6 +283,13 @@ export class TableDO extends DurableObject<WorkerEnv> {
   private budget = new FrameBudget(() => this.clock())
   /** Illegal frames per account in the current hand. */
   private illegalCount = new Map<string, { handNo: number; n: number }>()
+  /**
+   * Six-casual: accounts whose sit waits on the lobby's claim, with how
+   * many sits. The lobby may grant the claim and weigh another table's
+   * claim for the same account before the grant gets back here, so this
+   * table holds them from the moment it asks (liveness).
+   */
+  private claiming = new Map<string, number>()
 
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env)
@@ -383,7 +390,10 @@ export class TableDO extends DurableObject<WorkerEnv> {
     // A six table holds whoever has a seat, dealt in or not, and nobody
     // else: a player alone at it is still at it, one who stood is not.
     if (match.config.kind === 'six-casual')
-      return userId !== undefined && this.atTable(userId) ? 'playing' : 'open'
+      return userId !== undefined &&
+        (this.claiming.has(userId) || this.atTable(userId))
+        ? 'playing'
+        : 'open'
     if (match.status === 'playing') return 'playing'
     return match.players.length === 2 ? 'starting' : 'open'
   }
@@ -576,7 +586,16 @@ export class TableDO extends DurableObject<WorkerEnv> {
         ...cooldown,
       })
     if (this.seatFor(ws, userId, wanted) === null) return
-    const elsewhere = await lobbyStub(this.env).claim(userId, match.id)
+    // Held from here until the account is seated below, or not (liveness).
+    this.claiming.set(userId, (this.claiming.get(userId) ?? 0) + 1)
+    let elsewhere: string | null
+    try {
+      elsewhere = await lobbyStub(this.env).claim(userId, match.id)
+    } finally {
+      const left = this.claiming.get(userId)! - 1
+      if (left) this.claiming.set(userId, left)
+      else this.claiming.delete(userId)
+    }
     if (elsewhere) {
       ws.close(CLOSE_ELSEWHERE, elsewhere)
       return this.socketGone(ws)
@@ -694,7 +713,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
 
   /**
    * Takes `gone` off the table, each with a cooldown before they may sit
-   * here again. Cooldowns already over are dropped, so the list stays short.
+   * here again. It runs from now, when the seat frees, not from the stand:
+   * a player who stood mid-hand held the seat until that hand ended.
+   * Cooldowns already over are dropped, so the list stays short.
    */
   private unseat(gone: Player[]) {
     const match = this.match!

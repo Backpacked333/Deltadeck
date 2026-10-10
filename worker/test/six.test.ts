@@ -1104,6 +1104,96 @@ describe('standing up at a six table', () => {
     expect(all.sort()).toEqual(['drift', 'roam'])
   })
 
+  it('two sits sent at once to two six tables seat the account at one', async () => {
+    // A stale claim: an invite the account made and nobody joined. Each
+    // sit's claim asks that invite (it holds nobody) before writing its
+    // own, so two claims at once both find the account free unless the
+    // lobby takes them one at a time.
+    expect((await createMatch('racer')).status).toBe(201)
+    const tables = [await sixTable(), await sixTable()]
+    const sockets = await Promise.all(tables.map((id) => connect(id, 'racer')))
+    for (const client of sockets) await client.next((f) => f.t === 'welcome')
+    const from = sockets.map((client) => client.frames.length)
+    for (const client of sockets) client.send({ t: 'sit' })
+    // Each sit ends seated, or closed with the table that seated them.
+    const settled = (i: number) =>
+      sockets[i].closed !== null ||
+      sockets[i].frames
+        .slice(from[i])
+        .some((f) => f.t === 'welcome' && f.seat !== null)
+    await eventually(async () => settled(0) && settled(1))
+    const holding: string[] = []
+    for (const id of tables)
+      if ((await seated(id)).some((p) => p.userId === 'racer')) holding.push(id)
+    expect(holding).toHaveLength(1)
+    const held = tables.indexOf(holding[0])
+    expect(sockets[held].closed).toBeNull()
+    expect(sockets[1 - held].closed).toEqual({
+      code: 4409,
+      reason: tables[held],
+    })
+    expect(await claims()).toEqual({ racer: tables[held] })
+  })
+
+  it('a six table holds the account while the lobby grants its sit', async () => {
+    // The lobby can grant a sit's claim and weigh another table's claim for
+    // the same account before the grant gets back to this table: asked in
+    // that gap, the table must say it holds the account.
+    const matchId = await sixTable()
+    const asked: string[] = []
+    await runInDurableObject(stub(matchId), (instance: TableDO) => {
+      const real = env.LOBBY
+      const lobbyOf = (id: DurableObjectId) => {
+        const lobby = real.get(id, { locationHint: 'enam' })
+        return {
+          claim: async (userId: string, table: string) => {
+            const granted = await lobby.claim(userId, table)
+            asked.push(await instance.liveness(userId))
+            return granted
+          },
+          release: (userIds: string[], table: string) =>
+            lobby.release(userIds, table),
+        }
+      }
+      ;(instance as unknown as { env: typeof env }).env = {
+        ...env,
+        LOBBY: {
+          idFromName: (name: string) => real.idFromName(name),
+          get: lobbyOf,
+        } as unknown as typeof env.LOBBY,
+      }
+    })
+    const before = await stub(matchId).liveness('gap')
+    await sitDown(matchId, 'gap')
+    expect({
+      before,
+      asked,
+      after: await stub(matchId).liveness('gap'),
+    }).toEqual({ before: 'open', asked: ['playing'], after: 'playing' })
+  })
+
+  it('a player queued for heads-up who sits at a six table is not paired as well', async () => {
+    const matchId = await sixTable()
+    const queued = await lobby('qs')
+    queued.send({ t: 'queue', kind: 'hu-casual' })
+    await queued.next((f) => f.t === 'queued')
+    await sitDown(matchId, 'qs')
+    expect(await claims()).toEqual({ qs: matchId })
+    // The next player to queue would be paired with qs, who is seated here
+    // now: qs is sent back to this table, and the other keeps waiting.
+    const other = await lobby('qs-other')
+    other.send({ t: 'queue', kind: 'hu-casual' })
+    expect(await queued.next((f) => f.t === 'matched')).toMatchObject({
+      matchId,
+      resumed: true,
+    })
+    expect(await other.next((f) => f.t === 'queued')).toMatchObject({
+      position: 1,
+    })
+    expect(other.frames.map((f) => f.t)).not.toContain('matched')
+    expect(await claims()).toEqual({ qs: matchId })
+  })
+
   it('stand frames carry only allowed keys', async () => {
     const matchId = await sixTable()
     const watcher = await connect(matchId, 'sf-w')
