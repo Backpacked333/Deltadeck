@@ -101,6 +101,17 @@ export const NEXT_HAND_MS = 3000
 export const SIT_COOLDOWN_HANDS = 6
 export const SIT_COOLDOWN_MS = 120_000
 /**
+ * Six-casual sessions (ADR amendment 2026-10-10, "Sessions in the
+ * archive"): a session ends after this many hands, once its outbox is
+ * empty, and the next deal starts a new one.
+ */
+export const SESSION_HANDS = 1000
+/**
+ * A session whose calls are still queued deals no hand past this many, so
+ * its hands and its end always fit under the outbox's 4-digit keys.
+ */
+export const SESSION_DEAL_LIMIT = 9000
+/**
  * Refusals for bad data after which an archive call is set aside (about half
  * an hour of retries; S7-13). Outages and key errors never count.
  */
@@ -165,10 +176,30 @@ type Match = {
    * whoever sits in a seat later gets nothing of the hand.
    */
   dealt?: Dealt[]
-  /** Six-casual: the hand whose final stacks are in `players`. */
+  /**
+   * Six-casual: hands dealt at this table, across sessions. Cooldowns and
+   * stack settling count in these, since a session's handNo restarts.
+   */
+  tableHands?: number
+  /** Six-casual: the table hand (tableHands) whose final stacks are in `players`. */
   settled?: number
   /** Six-casual: accounts that stood here recently, by account. */
   cooldowns?: Record<string, Cooldown>
+  /**
+   * Six-casual, from the second session on: the session's own matchId and
+   * its number (the first session is the table id, number 1). Frames and
+   * the archive carry the session's id; the lobby knows the table's.
+   */
+  sessionId?: string
+  session?: number
+  /** Six-casual: the session has ended; the next deal starts another. */
+  sessionOver?: boolean
+  /** Six-casual: missed decisions this session, by account. */
+  sessionTimeouts?: Record<string, number>
+  /**
+   * Six-casual: dealing waits for the outbox to drain (SESSION_DEAL_LIMIT).
+   */
+  dealsHeld?: boolean
   endReason?: MatchEndReason
   forfeit?: SeatId
   noShow?: SeatId[]
@@ -253,12 +284,9 @@ export type Liveness = 'playing' | 'starting' | 'open' | 'over'
 const OPEN = 1
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const json = (body: unknown, status = 200) => Response.json(body, { status })
-/** Outbox keys sort in the order Postgres needs them: match, hands, end. */
-const outboxKey = (n: number, what: string) =>
-  `outbox:${String(n).padStart(4, '0')}:${what}`
+const pad = (n: number) => String(n).padStart(4, '0')
 /** A rated hand's calls wait here until its luck is settled (settleLuck). */
-const heldKey = (n: number, what: string) =>
-  `held:${String(n).padStart(4, '0')}:${what}`
+const heldKey = (n: number, what: string) => `held:${pad(n)}:${what}`
 /** Void endings: nobody wins or loses a rated match that ends so. */
 const VOID: MatchEndReason[] = ['no_show', 'engine_fault', 'abandoned']
 
@@ -274,6 +302,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
   private flushing = false
   /** A call was queued while a flush was under way: that flush goes again. */
   private flushAgain = false
+  /**
+   * A deal is under way. Work that is not an event (a flush finishing)
+   * still runs during its awaits, and must not end its session meanwhile.
+   */
+  private dealing = false
   controller: TableController = new LocalController()
   /** Six-casual tables deal from their roster (tests replace it). */
   sixController: TableController = new CashController()
@@ -366,7 +399,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
       players: [],
       handNo: 0,
       net: six ? {} : { 0: 0, 1: 0 },
-      ...(six ? { netByUser: {}, blinds: null } : {}),
+      ...(six
+        ? { netByUser: {}, blinds: null, tableHands: 0, sessionTimeouts: {} }
+        : {}),
       ...(rated ? { adjusted: { 0: 0, 1: 0 }, adjustedThrough: 0 } : {}),
       ...(rated && body.rematchOf ? { rematchOf: body.rematchOf } : {}),
     }
@@ -591,7 +626,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
       return this.send(ws, {
         t: 'error',
         seq: this.seq,
-        matchId: match.id,
+        matchId: this.matchId(),
         code: 'sit_cooldown',
         message: 'You stood up here a moment ago',
         ...cooldown,
@@ -676,7 +711,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const match = this.match!
     const cooldown = match.cooldowns?.[userId]
     if (!cooldown) return null
-    const handsLeft = cooldown.hands - match.handNo
+    const handsLeft = cooldown.hands - (match.tableHands ?? 0)
     if (handsLeft <= 0 || this.clock() >= cooldown.until) return null
     return { handsLeft, until: cooldown.until }
   }
@@ -698,8 +733,17 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const seat = this.handSeat(userId)
     if (!this.hand || isOver(this.hand) || seat === null) {
       this.unseat([player])
+      // The last player left a table that deals nothing: it deletes itself
+      // after IDLE_MS from now (its session ending first, if open).
+      if (!match.players.length && match.status === 'waiting')
+        this.setGameDeadline({ kind: 'idle', at: this.clock() + IDLE_MS })
       this.seq++
-      await this.ctx.storage.put({ match, seq: this.seq })
+      await this.ctx.storage.put({
+        match,
+        seq: this.seq,
+        deadlines: this.deadlines,
+      })
+      await this.armAlarm()
       this.send(ws, this.frame('welcome', userId))
       this.broadcast('state', { skip: ws, roster: true })
       return this.releaseSeats([userId])
@@ -741,7 +785,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     )
     for (const p of gone)
       cooldowns[p.userId] = {
-        hands: match.handNo + SIT_COOLDOWN_HANDS,
+        hands: (match.tableHands ?? 0) + SIT_COOLDOWN_HANDS,
         until: this.clock() + SIT_COOLDOWN_MS,
       }
     match.cooldowns = cooldowns
@@ -1010,6 +1054,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
     if (!awayTurn)
       player.bankMs = bankAfter(player.bankMs, took, match.config.decisionMs)
     player.timeouts = source === 'timeout' ? player.timeouts + 1 : 0
+    if (source === 'timeout' && match.sessionTimeouts)
+      match.sessionTimeouts[player.userId] =
+        (match.sessionTimeouts[player.userId] ?? 0) + 1
     current.timing.push({
       atMs: t - current.startedAt,
       decisionMs: took,
@@ -1049,6 +1096,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     this.expectArchive(writes)
     await this.ctx.storage.put(writes)
     await this.armAlarm()
+    if (isOver(next)) await this.dropDeckIfUnqueued(writes)
     // A seat that freed changes the table for sockets without a seat too.
     this.broadcast('state', { roster: stood.length > 0 })
     if (isOver(next)) for (const ws of this.openSockets()) this.sendEnded(ws)
@@ -1074,14 +1122,28 @@ export class TableDO extends DurableObject<WorkerEnv> {
   }
 
   private startNextHand() {
-    return this.ctx.blockConcurrencyWhile(() => this.startNextHandNow())
+    return this.ctx.blockConcurrencyWhile(async () => {
+      this.dealing = true
+      try {
+        await this.startNextHandNow()
+      } finally {
+        this.dealing = false
+      }
+    })
   }
 
   private async startNextHandNow() {
     const match = this.match!
     const six = match.config.kind === 'six-casual'
     await this.settleLuck()
-    if (six) this.settleStacks()
+    if (six) {
+      this.settleStacks()
+      // At the hand cap the session ends at the first deal that finds its
+      // outbox empty; until then play goes on, up to a limit.
+      if (await this.sessionDue(true)) await this.endSession()
+      else if (!match.sessionOver && match.handNo >= SESSION_DEAL_LIMIT)
+        return this.holdDealing()
+    }
     // A six table deals only to people who are there: with fewer than two
     // funded, connected players it waits, and a reconnect or a sit deals
     // again (the 60 s grace and sitting out come with PR-16/17).
@@ -1093,14 +1155,14 @@ export class TableDO extends DurableObject<WorkerEnv> {
       ).length < 2
     )
       return this.waitForPlayers()
+    const handNo = six && match.sessionOver ? 1 : match.handNo + 1
     const plan = six
-      ? this.sixController.nextHandPlan(
-          match.handNo + 1,
-          match.config,
-          this.roster(),
-        )
-      : this.controller.nextHandPlan(match.handNo + 1, match.config)
+      ? this.sixController.nextHandPlan(handNo, match.config, this.roster())
+      : this.controller.nextHandPlan(handNo, match.config)
     if (!plan) return six ? this.waitForPlayers() : this.finish('complete')
+    // A session starts at its first dealt hand.
+    const fresh = six && !!match.sessionOver
+    if (fresh) this.newSession()
     let hand: HandState
     try {
       // A six hand's frames and archive read who was dealt in from its
@@ -1122,6 +1184,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const t = this.clock()
     match.handNo = plan.config.handNo
     if (six) {
+      match.tableHands = (match.tableHands ?? 0) + 1
       match.blinds = plan.blinds!
       match.dealt = plan.users!.map(({ seat, userId }) => ({
         seat,
@@ -1152,14 +1215,15 @@ export class TableDO extends DurableObject<WorkerEnv> {
       current: this.current,
       deadlines: this.deadlines,
       seq: this.seq,
+      ...(fresh ? { lastAck: this.lastAck } : {}),
       // Kept for the match: the reveal opens it, Phase 1 replays decks.
-      [`deck:${match.handNo}`]: {
+      [this.deckKey(match.handNo)]: {
         deck: plan.deck,
         secret: toBase64(plan.secret),
       },
     }
     if (match.handNo === 1 && this.recordable())
-      writes[outboxKey(0, 'match')] = this.matchCall()
+      writes[this.outboxKey(0, 'match')] = this.matchCall()
     this.expectArchive(writes)
     await this.ctx.storage.put(writes)
     await this.armAlarm()
@@ -1170,7 +1234,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
         this.send(ws, {
           t: 'hand_start',
           seq: this.seq,
-          matchId: match.id,
+          matchId: this.matchId(),
           handNo: match.handNo,
           commitment,
           button: hand.config.button,
@@ -1190,7 +1254,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     this.broadcast('state')
     if (match.handNo === 1)
       logEvent('match_start', {
-        matchId: match.id,
+        matchId: this.matchId(),
         userIds: match.players.map((p) => p.userId),
       })
     // A hand that is over at the deal (blinds all in) still needs its end.
@@ -1215,13 +1279,14 @@ export class TableDO extends DurableObject<WorkerEnv> {
     this.expectArchive(writes)
     await this.ctx.storage.put(writes)
     await this.armAlarm()
+    await this.dropDeckIfUnqueued(writes)
     for (const ws of this.openSockets()) this.sendEnded(ws)
     void this.flushOutbox()
   }
 
   private logHandEnd(hand: HandState, ms: number) {
     logEvent('hand_end', {
-      matchId: this.match!.id,
+      matchId: this.matchId(),
       handNo: hand.config.handNo,
       reason: hand.result!.showdown ? 'showdown' : 'fold',
       ms,
@@ -1235,7 +1300,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     writes: Record<string, unknown>,
   ): Promise<Ended> {
     const match = this.match!
-    const stored = (await this.ctx.storage.get(`deck:${match.handNo}`)) as {
+    const stored = (await this.ctx.storage.get(this.deckKey(match.handNo))) as {
       deck: number[]
       secret: string
     }
@@ -1245,7 +1310,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
       .map((p) => ({ seat: p.seat, cards: p.cards! }))
     const record: HandRecordV1 = {
       v: 1,
-      matchId: match.id,
+      matchId: this.matchId(),
       handNo: match.handNo,
       segment: 1,
       config: hand.config,
@@ -1285,7 +1350,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
       )
     if (this.recordable()) {
       // A rated hand's record waits for its luck (settleLuck).
-      const key = match.adjusted ? heldKey : outboxKey
+      const key = match.adjusted
+        ? heldKey
+        : (n: number, what: string) => this.outboxKey(n, what)
       const holes = Object.fromEntries(
         hand.players.map((p) => [
           p.seat,
@@ -1296,8 +1363,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
         rpc: 'record_hand',
         attempts: 0,
         body: {
-          id: `${match.id}:${match.handNo}`,
-          matchId: match.id,
+          id: `${this.matchId()}:${match.handNo}`,
+          matchId: this.matchId(),
           handNo: match.handNo,
           segment: 1,
           button: hand.config.button,
@@ -1324,7 +1391,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
       // Postgres has the hand: the consumer never races the archive.
       writes[key(match.handNo, 'verify')] = {
         send: {
-          matchId: match.id,
+          matchId: this.matchId(),
           handNo: match.handNo,
           ...(match.config.kind === 'hu-rated' ? { rated: true as const } : {}),
         },
@@ -1420,13 +1487,15 @@ export class TableDO extends DurableObject<WorkerEnv> {
   private settleStacks() {
     const match = this.match!
     const hand = this.hand
-    if (!hand || !isOver(hand) || (match.settled ?? 0) >= hand.config.handNo)
-      return
+    // The hand on the table is always the table's latest (tableHands);
+    // counted across sessions, since each session's handNo restarts.
+    const latest = match.tableHands ?? 0
+    if (!hand || !isOver(hand) || (match.settled ?? 0) >= latest) return
     for (const p of hand.players) {
       const player = this.playerIn(p.seat)
       if (player) player.stack = p.stack
     }
-    match.settled = hand.config.handNo
+    match.settled = latest
   }
 
   /** A finished hand's net: per seat heads-up, per account at a six table. */
@@ -1449,7 +1518,15 @@ export class TableDO extends DurableObject<WorkerEnv> {
   private async waitForPlayers() {
     const match = this.match!
     match.status = 'waiting'
-    this.setGameDeadline(null)
+    // The idle check (PR-11 left none after the first deal): it ends the
+    // session once no hand has started for IDLE_MS, and deletes a table
+    // nobody sits at by then.
+    const t = this.clock()
+    const started = this.sessionOpen() ? this.current?.startedAt : undefined
+    this.setGameDeadline({
+      kind: 'idle',
+      at: started === undefined ? t + IDLE_MS : Math.max(t, started + IDLE_MS),
+    })
     this.seq++
     await this.ctx.storage.put({
       match,
@@ -1458,6 +1535,125 @@ export class TableDO extends DurableObject<WorkerEnv> {
     })
     await this.armAlarm()
     this.broadcast('state', { roster: true })
+  }
+
+  // ---- Six-casual sessions ---------------------------------------------------
+
+  /** Whether a six table's session is open: it has dealt, and not ended. */
+  private sessionOpen() {
+    const match = this.match
+    return (
+      match?.config.kind === 'six-casual' &&
+      match.status !== 'finished' &&
+      match.handNo > 0 &&
+      !match.sessionOver
+    )
+  }
+
+  /**
+   * Whether the open session ends now (ADR amendment 2026-10-10, "Sessions
+   * in the archive"): between hands, once SESSION_HANDS have been dealt or
+   * no hand has started for IDLE_MS, and only with its outbox empty. A deal
+   * under way decides for itself (`fromDeal`).
+   */
+  private async sessionDue(fromDeal = false) {
+    if (!this.sessionOpen() || (this.dealing && !fromDeal)) return false
+    if (this.hand && !isOver(this.hand)) return false
+    const idle = this.clock() - (this.current?.startedAt ?? 0) >= IDLE_MS
+    if (this.match!.handNo < SESSION_HANDS && !idle) return false
+    const queued = await this.ctx.storage.list({ prefix: 'outbox:', limit: 1 })
+    return queued.size === 0
+  }
+
+  /**
+   * Ends the session in the archive, and only there: no frame, no lobby
+   * release, no rematch, no deletion. Seats, stacks, statuses, blinds,
+   * banks and cooldowns stay as they are; the next deal starts a session.
+   * Marked first, before any await, so nothing ends it twice.
+   */
+  private async endSession() {
+    const match = this.match!
+    match.sessionOver = true
+    const writes: Record<string, unknown> = { match }
+    if (this.recordable())
+      writes[this.outboxKey(9999, 'end')] = this.matchCall('complete')
+    logEvent('match_end', {
+      matchId: this.matchId(),
+      reason: 'complete',
+      handNo: match.handNo,
+    })
+    this.expectArchive(writes)
+    await this.ctx.storage.put(writes)
+    await this.armAlarm()
+    void this.flushOutbox()
+  }
+
+  /**
+   * The next session: its own matchId, hands from 1, its own timeouts. Acks
+   * start over with it: a request id is only ever retried within a hand,
+   * and the last session's would match this one's hand numbers.
+   */
+  private newSession() {
+    const match = this.match!
+    match.session = (match.session ?? 1) + 1
+    match.sessionId = crypto.randomUUID()
+    match.handNo = 0
+    match.sessionTimeouts = {}
+    delete match.sessionOver
+    this.lastAck = {}
+  }
+
+  /**
+   * SESSION_DEAL_LIMIT hands with calls still queued: no hand until they
+   * drain, so the session's end still fits under outbox:9999. The flush
+   * that empties the outbox deals again (afterDrain).
+   */
+  private async holdDealing() {
+    const match = this.match!
+    match.dealsHeld = true
+    this.setGameDeadline(null)
+    await this.ctx.storage.put({ match, deadlines: this.deadlines })
+    await this.armAlarm()
+  }
+
+  /**
+   * Six-casual, once everything queued is archived: held dealing resumes
+   * (the deal ends the session first), and a session idle past IDLE_MS
+   * ends, since no hand will come to check it.
+   */
+  private async afterDrain() {
+    const match = this.match
+    if (match?.config.kind !== 'six-casual') return
+    if (match.dealsHeld) {
+      delete match.dealsHeld
+      return this.startNextHand()
+    }
+    if (await this.sessionDue()) await this.endSession()
+  }
+
+  /**
+   * Missed decisions this session by account, every seated player named
+   * (record_match v6 reads six-casual timeouts by user id). A player who
+   * left keeps their count.
+   */
+  private sessionTimeouts() {
+    const match = this.match!
+    return {
+      ...Object.fromEntries(match.players.map((p) => [p.userId, 0])),
+      ...match.sessionTimeouts,
+    }
+  }
+
+  /**
+   * Six-casual: a finished hand's deck is kept only until its record_hand
+   * is stored (flushPass drops it then); a hand nothing archives drops it
+   * now. Runs once the hand's end is written, which no longer needs it.
+   */
+  private async dropDeckIfUnqueued(writes: Record<string, unknown>) {
+    const match = this.match!
+    if (match.config.kind !== 'six-casual') return
+    if (this.outboxKey(match.handNo, 'hand') in writes) return
+    await this.ctx.storage.delete(this.deckKey(match.handNo))
   }
 
   /**
@@ -1513,7 +1709,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
   private engineFault(error: unknown, handNo: number, evidence: unknown) {
     const detail = error instanceof Error ? error.message : describeError(error)
     logEvent('error', {
-      matchId: this.match?.id,
+      matchId: this.matchId(),
       handNo,
       reason: 'engine_fault',
       detail,
@@ -1521,11 +1717,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
     // The evidence goes where only the service role can read it. Written
     // before finish() so its flush sends it.
     if (this.recordable())
-      void this.ctx.storage.put(outboxKey(handNo, 'incident'), {
+      void this.ctx.storage.put(this.outboxKey(handNo, 'incident'), {
         rpc: 'record_incident',
         attempts: 0,
         body: {
-          matchId: this.match!.id,
+          matchId: this.matchId(),
           handNo,
           kind: 'engine_fault',
           detail: { error: detail, evidence },
@@ -1540,10 +1736,15 @@ export class TableDO extends DurableObject<WorkerEnv> {
    * again later. True when the table is gone.
    */
   private async idle() {
-    // A six table stays while anyone sits at it, and looks again later.
-    if (this.match?.config.kind === 'six-casual' && this.match.players.length) {
-      this.deadlines.push({ kind: 'idle', at: this.clock() + IDLE_MS })
-      return false
+    const match = this.match
+    if (match?.config.kind === 'six-casual' && match.status !== 'finished') {
+      // No hand for IDLE_MS: the session ends (once its outbox is empty).
+      if (await this.sessionDue()) await this.endSession()
+      // The table stays while anyone sits at it, and looks again later.
+      if (match.players.length) {
+        this.deadlines.push({ kind: 'idle', at: this.clock() + IDLE_MS })
+        return false
+      }
     }
     if (this.match?.status === 'playing') return false
     const pending = await this.ctx.storage.list({ prefix: 'outbox:', limit: 1 })
@@ -1584,6 +1785,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     abandoned?: SeatId[],
   ) {
     const match = this.match!
+    const six = match.config.kind === 'six-casual'
     await this.settleLuck()
     match.status = 'finished'
     match.endReason = reason
@@ -1609,11 +1811,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
       deadlines: this.deadlines,
     }
     if (this.recordable()) {
-      writes[outboxKey(9999, 'end')] = this.matchCall()
+      writes[this.outboxKey(9999, 'end')] = this.matchCall()
       // Rated with a result (not void): rated once the match is archived;
       // 'rate' sorts after 'end', and the flush stops at a failure.
       if (match.outcome)
-        writes[outboxKey(9999, 'rate')] = {
+        writes[this.outboxKey(9999, 'rate')] = {
           rpc: 'apply_rating',
           body: {
             matchId: match.id,
@@ -1631,13 +1833,15 @@ export class TableDO extends DurableObject<WorkerEnv> {
     await this.ctx.storage.put(writes)
     await this.armAlarm()
     this.broadcast('state')
+    // A six table that ends (an engine fault) tells only its seats.
     for (const ws of this.openSockets())
-      this.send(ws, {
-        t: 'match_end',
-        seq: this.seq,
-        matchId: match.id,
-        result: this.result(),
-      })
+      if (!six || this.atTable(this.userOf(ws)))
+        this.send(ws, {
+          t: 'match_end',
+          seq: this.seq,
+          matchId: this.matchId(),
+          result: this.result(),
+        })
     void this.flushOutbox()
     // Free both accounts for their next table. If this is lost, the lobby
     // finds the table over the next time it asks.
@@ -1781,10 +1985,14 @@ export class TableDO extends DurableObject<WorkerEnv> {
   private sendMatchEnd(ws: WebSocket) {
     const match = this.match
     if (match?.status !== 'finished') return
+    // Six tables: never to a socket without a seat (ADR "Sockets without a
+    // seat").
+    if (match.config.kind === 'six-casual' && !this.atTable(this.userOf(ws)))
+      return
     this.send(ws, {
       t: 'match_end',
       seq: this.seq,
-      matchId: match.id,
+      matchId: this.matchId(),
       result: this.result(),
     })
     if (match.rating) this.send(ws, this.ratingFrame(match.rating))
@@ -1831,7 +2039,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
       })
     for (const seat of noShow ?? [])
       logEvent('no_show', { matchId: match.id, seat, userId: userOf(seat) })
-    logEvent('match_end', { matchId: match.id, reason, handNo: match.handNo })
+    logEvent('match_end', {
+      matchId: this.matchId(),
+      reason,
+      handNo: match.handNo,
+    })
   }
 
   // ---- Archive ---------------------------------------------------------------
@@ -1844,28 +2056,35 @@ export class TableDO extends DurableObject<WorkerEnv> {
     )
   }
 
-  private matchCall(): Outbox {
+  /**
+   * The match's (or session's) record_match call: its start, or with its
+   * result once it is over. `ended` closes a six-casual session whose
+   * table plays on.
+   */
+  private matchCall(ended?: MatchEndReason): Outbox {
     const match = this.match!
     return {
       rpc: 'record_match',
       attempts: 0,
       body: {
-        id: match.id,
+        id: this.matchId(),
         kind: match.config.kind,
         config: match.config,
         players: match.players.map(({ seat, userId }) => ({ seat, userId })),
         ...(match.rematchOf ? { rematchOf: match.rematchOf } : {}),
-        ...(match.status === 'finished'
+        ...(match.status === 'finished' || ended
           ? {
               handNo: match.handNo,
-              // Six tables count timeouts per account (record_match v6).
-              timeouts: Object.fromEntries(
-                match.players.map((p) => [
-                  match.config.kind === 'six-casual' ? p.userId : p.seat,
-                  p.timeouts,
-                ]),
-              ),
-              result: this.result(),
+              // Six tables send session totals by account (record_match v6).
+              timeouts:
+                match.config.kind === 'six-casual'
+                  ? this.sessionTimeouts()
+                  : Object.fromEntries(
+                      match.players.map((p) => [p.seat, p.timeouts]),
+                    ),
+              result: ended
+                ? { netBySeat: { ...match.net }, reason: ended }
+                : this.result(),
             }
           : {}),
       },
@@ -1912,6 +2131,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     } finally {
       this.flushing = false
     }
+    await this.afterDrain()
   }
 
   /** One pass over the outbox. False when a failure armed a retry. */
@@ -1932,7 +2152,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
             ? await this.rate(call.body as RateCall)
             : await archive(this.env, call)
       if (outcome.ok) {
-        await this.ctx.storage.delete(key)
+        await this.ctx.storage.delete([key, ...this.deckOf(key, call)])
         continue
       }
       const attempts = call.attempts + 1
@@ -1985,7 +2205,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const rest = key.slice('outbox:'.length)
     const [n, what] = rest.split(':')
     await this.ctx.storage.put(`parked:${rest}`, call)
-    await this.ctx.storage.delete(key)
+    // The parked call carries the deck and secret itself.
+    await this.ctx.storage.delete([key, ...this.deckOf(key, call)])
     const alongside: string[] = []
     if (call.rpc === 'record_hand') {
       const verify = `outbox:${n}:verify`
@@ -2003,11 +2224,17 @@ export class TableDO extends DurableObject<WorkerEnv> {
       detail: outcome.code,
     })
     const handNo = (call.body as { handNo?: unknown }).handNo
+    const body = call.body as { id?: unknown; matchId?: unknown }
+    const callMatch = [body.matchId, body.id].find(
+      (id): id is string => typeof id === 'string',
+    )
     await this.ctx.storage.put(`${key}:parked`, {
       rpc: 'record_incident',
       attempts: 0,
       body: {
-        matchId: this.match!.id,
+        // The parked call's own match: at a six table, maybe a session
+        // that has ended since.
+        matchId: callMatch ?? this.matchId(),
         handNo:
           call.rpc === 'record_hand' && typeof handNo === 'number'
             ? handNo
@@ -2054,6 +2281,49 @@ export class TableDO extends DurableObject<WorkerEnv> {
 
   private userOf(ws: WebSocket) {
     return (ws.deserializeAttachment() as Attachment).userId
+  }
+
+  /**
+   * The matchId frames and the archive carry: the session's at a six table
+   * (the table id for its first session), the match's otherwise.
+   */
+  private matchId() {
+    return this.match?.sessionId ?? this.match?.id ?? ''
+  }
+
+  /**
+   * Hand `n`'s part of its storage keys. A six table's lead with the
+   * session number, so two sessions' keys never collide and sort session by
+   * session; heads-up keys are as they always were.
+   */
+  private handTag(n: number) {
+    const match = this.match!
+    return match.config.kind === 'six-casual'
+      ? `${pad(match.session ?? 1)}.${pad(n)}`
+      : pad(n)
+  }
+
+  /** Outbox keys sort in the order Postgres needs them: match, hands, end. */
+  private outboxKey(n: number, what: string) {
+    return `outbox:${this.handTag(n)}:${what}`
+  }
+
+  /** Where hand `n`'s deck and secret wait for the reveal and the archive. */
+  private deckKey(n: number) {
+    return this.match!.config.kind === 'six-casual'
+      ? `deck:${this.handTag(n)}`
+      : `deck:${n}`
+  }
+
+  /**
+   * The deck key a six table's record_hand call at `key` makes redundant
+   * once it is stored or parked (that call carries the deck itself), so
+   * decks do not pile up; heads-up keeps every deck for its short match.
+   */
+  private deckOf(key: string, call: Outbox) {
+    if (this.match?.config.kind !== 'six-casual') return []
+    if ('send' in call || call.rpc !== 'record_hand') return []
+    return [`deck:${key.slice('outbox:'.length, key.lastIndexOf(':'))}`]
   }
 
   /** Whether `userId` has a socket open (other than `exclude`). */
@@ -2148,7 +2418,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const view =
       this.hand && seat !== null
         ? seatView(this.hand, this.handSeat(userId), {
-            matchId: match.id,
+            matchId: this.matchId(),
             match: table,
             clock:
               turn && match.status === 'playing'
@@ -2158,7 +2428,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
             commitment: this.current?.commitment ?? null,
           })
         : null
-    const base = { seq: this.seq, matchId: match.id, serverNow: this.clock() }
+    const base = {
+      seq: this.seq,
+      matchId: this.matchId(),
+      serverNow: this.clock(),
+    }
     return kind === 'welcome'
       ? { ...base, t: 'welcome', seat, table, view }
       : { ...base, t: 'state', table, view }
@@ -2236,7 +2510,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     this.send(ws, {
       t: 'error',
       seq: this.seq,
-      matchId: this.match?.id ?? '',
+      matchId: this.matchId(),
       code,
       message,
       ...(reqId ? { reqId } : {}),
