@@ -68,7 +68,12 @@ describe('LocalController', () => {
   })
 })
 
-const SIX: MatchConfig = { ...HEADS_UP, handsTotal: 1 }
+const SIX: MatchConfig = {
+  ...HEADS_UP,
+  kind: 'six-casual',
+  maxSeats: 6,
+  bankMs: 30_000,
+}
 
 /** A seated player who is playing and has been here since the last hand. */
 const at = (seat: number, stack = 2000): RosterSeat => ({
