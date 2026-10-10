@@ -2059,6 +2059,184 @@ describe('six sessions', () => {
     await eventually(async () => a.closed !== null && b.closed !== null)
     expect([a.closed?.code, b.closed?.code]).toEqual([CLOSE_GONE, CLOSE_GONE])
   }, 60_000)
+  /** Whether the table's session has ended (the next deal starts one). */
+  const sessionOver = async (matchId: string) =>
+    !!(
+      (await peek(matchId)).match as unknown as { sessionOver?: boolean } | null
+    )?.sessionOver
+
+  /**
+   * `client` asks to resync; resolves with every frame of the answer. A
+   * second resync's welcome follows all the first one sent.
+   */
+  async function resynced(client: Client) {
+    const from = client.frames.length
+    client.send({ t: 'resync' })
+    const first = await client.next((f) => f.t === 'welcome', from)
+    const after = client.frames.indexOf(first) + 1
+    client.send({ t: 'resync' })
+    const second = await client.next((f) => f.t === 'welcome', after)
+    return client.frames.slice(from, client.frames.indexOf(second))
+  }
+
+  it("a new session's hand 1 never re-sends the last session's hand_end", async () => {
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, 'rs-a', 0)
+    const b = await sitDown(matchId, 'rs-b', 2)
+    await a.next(isState(1))
+    await playOut(matchId, { 0: a, 2: b }, () => ({ type: 'fold' }))
+    await a.next((f) => f.t === 'reveal' && f.handNo === 1)
+    // B stands; the table waits, and its one-hand session ends idle.
+    expect(await standUp(b)).toMatchObject({ seat: null })
+    await elapse(matchId, NEXT_HAND_MS)
+    await elapse(matchId, IDLE_MS)
+    expect(await sessionOver(matchId)).toBe(true)
+    // C sits: the next session deals its own hand 1, which is under way.
+    const from = a.frames.length
+    await sitDown(matchId, 'rs-c', 4)
+    const start = await a.next((f) => f.t === 'hand_start', from)
+    expect(start).toMatchObject({ handNo: 1 })
+    expect(start.matchId).not.toBe(matchId)
+    expect((await peek(matchId)).hand!.result).toBeUndefined()
+    // A resyncs, and C opens the table again: neither hears of the last
+    // session's hand 1 (nor sees its own opening of it again).
+    const stale = (frames: ServerMsg[]) =>
+      frames.filter((f) => f.t === 'hand_end' || f.t === 'reveal')
+    expect(stale(await resynced(a))).toEqual([])
+    const back = await connect(matchId, 'rs-c')
+    await back.next((f) => f.t === 'welcome')
+    await resynced(back)
+    expect(stale(back.frames)).toEqual([])
+    // Once the new hand 1 is over, its own end comes back on a resync.
+    await playOut(matchId, { 0: a, 4: back }, () => ({ type: 'fold' }))
+    const ended = stale(await resynced(a))
+    expect(ended.map((f) => [f.t, f.matchId])).toEqual([
+      ['hand_end', start.matchId],
+      ['reveal', start.matchId],
+    ])
+  })
+
+  it('the last stand at a waiting table neither delays its session end nor deletes it early', async () => {
+    // Dev accounts: nothing is archived, so no queued call holds the table.
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, 'ls-a', 0)
+    const b = await sitDown(matchId, 'ls-b', 2)
+    await a.next(isState(1))
+    await playOut(matchId, { 0: a, 2: b }, () => ({ type: 'fold' }))
+    await standUp(b)
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).match.status).toBe('waiting')
+    // Five minutes on, the last player stands too.
+    const stoodAfter = NEXT_HAND_MS + 300_000
+    await elapse(matchId, 300_000)
+    expect(await standUp(a)).toMatchObject({ seat: null })
+    // The session still ends IDLE_MS after its last hand started.
+    await elapse(matchId, IDLE_MS - stoodAfter - 1)
+    expect(await sessionOver(matchId)).toBe(false)
+    await elapse(matchId, 1)
+    expect(await sessionOver(matchId)).toBe(true)
+    // Its hands were never archived (dev accounts), nor is its end, though
+    // nobody sits there to say so.
+    expect(await outbox(matchId)).toEqual([])
+    // The table, empty since the stand, stays for IDLE_MS after it.
+    await elapse(matchId, stoodAfter - 1)
+    expect((await storageOf(matchId)).keys).toContain('match')
+    await elapse(matchId, IDLE_MS)
+    expect(await storageOf(matchId)).toEqual({ keys: [], alarm: null })
+  })
+
+  it('a table never deletes itself with its session open', async () => {
+    const { calls } = stubArchive()
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, A, 1)
+    const b = await sitDown(matchId, B, 4)
+    await a.next(isState(1))
+    await playOut(matchId, { 1: a, 4: b }, () => ({ type: 'fold' }))
+    await standUp(a)
+    await standUp(b)
+    await drained(matchId)
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).match.status).toBe('waiting')
+    // An idle check that finds the session not due (as when a flush was
+    // still draining the outbox as it looked), then nobody seated and
+    // nothing queued: the table stays, its session still to be archived.
+    const deleted = await runInDurableObject(stub(matchId), (t: TableDO) =>
+      (t as unknown as { idle(): Promise<boolean> }).idle(),
+    )
+    expect(deleted).toBe(false)
+    expect((await storageOf(matchId)).keys).toContain('match')
+    // The session ends on time and is archived; then the table goes.
+    await elapse(matchId, IDLE_MS)
+    await eventually(async () => ends(calls).length === 1)
+    await drained(matchId)
+    await elapse(matchId, IDLE_MS)
+    expect(await storageOf(matchId)).toEqual({ keys: [], alarm: null })
+  })
+
+  it('a session ends once, whoever finds it due', async () => {
+    const { calls } = stubArchive()
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, A, 0)
+    const b = await sitDown(matchId, B, 2)
+    await a.next(isState(1))
+    await playOut(matchId, { 0: a, 2: b }, () => ({ type: 'fold' }))
+    await standUp(b)
+    await drained(matchId)
+    await elapse(matchId, NEXT_HAND_MS)
+    await elapse(matchId, IDLE_MS)
+    await eventually(async () => ends(calls).length === 1)
+    await drained(matchId)
+    // The idle check and a flush that drains the outbox each await their
+    // outbox check, so both can find it due: the second ends nothing.
+    await runInDurableObject(stub(matchId), (t: TableDO) =>
+      (t as unknown as { endSession(): Promise<void> }).endSession(),
+    )
+    await drained(matchId)
+    expect(ends(calls)).toHaveLength(1)
+  })
+
+  it("a session's archive and nets name only the accounts dealt into it", async () => {
+    const { calls } = stubArchive()
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, A, 0)
+    const b = await sitDown(matchId, B, 2)
+    await a.next(isState(1))
+    // C sits during hand 1, so is dealt into none of the session's hands.
+    const c = await sitDown(matchId, C, 4)
+    await playOut(matchId, { 0: a, 2: b }, () => ({ type: 'fold' }))
+    await standUp(a)
+    await standUp(b)
+    await drained(matchId)
+    await elapse(matchId, NEXT_HAND_MS)
+    await elapse(matchId, IDLE_MS)
+    await eventually(async () => ends(calls).length === 1)
+    // Seated at the end, but never dealt in: not named, so no row for a
+    // session C never played (A and B have theirs from record_hand).
+    const { id, players, timeouts } = ends(calls)[0].p
+    expect({ id, players, timeouts }).toEqual({
+      id: matchId,
+      players: [],
+      timeouts: {},
+    })
+    await drained(matchId)
+    // The next session: its own players, and nets for its accounts only.
+    const from = c.frames.length
+    const d = await sitDown(matchId, D, 1)
+    const start = await c.next((f) => f.t === 'hand_start', from)
+    await playOut(matchId, { 1: d, 4: c }, () => ({ type: 'fold' }))
+    await drained(matchId)
+    const opened = calls.find(
+      (x) => x.rpc === 'record_match' && x.p.id === start.matchId,
+    )!
+    expect(opened.p.players).toEqual([
+      { seat: 1, userId: D },
+      { seat: 4, userId: C },
+    ])
+    const { netByUser } = (await peek(matchId)).match as unknown as {
+      netByUser: Record<string, number>
+    }
+    expect(Object.keys(netByUser).sort()).toEqual([C, D].sort())
+  })
 })
 
 describe('a six table that halts', () => {

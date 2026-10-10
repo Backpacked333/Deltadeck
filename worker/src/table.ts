@@ -163,7 +163,11 @@ type Match = {
   handNo: number
   /** Running result per seat over the match (heads-up). */
   net: Record<SeatId, number>
-  /** Six-casual: running result per account, since seats change hands. */
+  /**
+   * Six-casual: the session's running result per account, since seats
+   * change hands. It starts over with each session, so it holds only the
+   * accounts of one session, not every account that ever sat here.
+   */
   netByUser?: Record<string, number>
   /**
    * Six-casual: the last deal's blinds, whole (the small blind's seat even
@@ -196,6 +200,8 @@ type Match = {
   sessionOver?: boolean
   /** Six-casual: missed decisions this session, by account. */
   sessionTimeouts?: Record<string, number>
+  /** Six-casual: the accounts dealt into the session's hands so far. */
+  sessionUsers?: string[]
   /**
    * Six-casual: dealing waits for the outbox to drain (SESSION_DEAL_LIMIT).
    */
@@ -733,10 +739,12 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const seat = this.handSeat(userId)
     if (!this.hand || isOver(this.hand) || seat === null) {
       this.unseat([player])
-      // The last player left a table that deals nothing: it deletes itself
-      // after IDLE_MS from now (its session ending first, if open).
+      // The last player left a table that deals nothing. An open session
+      // still ends IDLE_MS after its last hand started, as waitForPlayers
+      // armed it (idle keeps the table IDLE_MS after that); with none open,
+      // the table deletes itself IDLE_MS from now.
       if (!match.players.length && match.status === 'waiting')
-        this.setGameDeadline({ kind: 'idle', at: this.clock() + IDLE_MS })
+        this.setGameDeadline(this.idleDeadline())
       this.seq++
       await this.ctx.storage.put({
         match,
@@ -1193,6 +1201,12 @@ export class TableDO extends DurableObject<WorkerEnv> {
       }))
       for (const p of match.players)
         if (match.dealt.some((d) => d.userId === p.userId)) p.justSat = false
+      match.sessionUsers = [
+        ...new Set([
+          ...(match.sessionUsers ?? []),
+          ...match.dealt.map((d) => d.userId),
+        ]),
+      ]
     }
     // Rated: each half of the match has its own bank; what is left of the
     // last one does not carry over.
@@ -1521,12 +1535,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     // The idle check (PR-11 left none after the first deal): it ends the
     // session once no hand has started for IDLE_MS, and deletes a table
     // nobody sits at by then.
-    const t = this.clock()
-    const started = this.sessionOpen() ? this.current?.startedAt : undefined
-    this.setGameDeadline({
-      kind: 'idle',
-      at: started === undefined ? t + IDLE_MS : Math.max(t, started + IDLE_MS),
-    })
+    this.setGameDeadline(this.idleDeadline())
     this.seq++
     await this.ctx.storage.put({
       match,
@@ -1535,6 +1544,20 @@ export class TableDO extends DurableObject<WorkerEnv> {
     })
     await this.armAlarm()
     this.broadcast('state', { roster: true })
+  }
+
+  /**
+   * A waiting six table's next idle check: IDLE_MS after the open session's
+   * last hand started, so the session ends on time; IDLE_MS from now when
+   * no session is open.
+   */
+  private idleDeadline(): Deadline {
+    const t = this.clock()
+    const started = this.sessionOpen() ? this.current?.startedAt : undefined
+    return {
+      kind: 'idle',
+      at: started === undefined ? t + IDLE_MS : Math.max(t, started + IDLE_MS),
+    }
   }
 
   // ---- Six-casual sessions ---------------------------------------------------
@@ -1569,10 +1592,13 @@ export class TableDO extends DurableObject<WorkerEnv> {
    * Ends the session in the archive, and only there: no frame, no lobby
    * release, no rematch, no deletion. Seats, stacks, statuses, blinds,
    * banks and cooldowns stay as they are; the next deal starts a session.
-   * Marked first, before any await, so nothing ends it twice.
+   * Callers check sessionDue first, which awaits its outbox read, so two of
+   * them (idle and a flush's afterDrain) can both find it due: marked
+   * before any await, and the second ends nothing.
    */
   private async endSession() {
     const match = this.match!
+    if (match.sessionOver) return
     match.sessionOver = true
     const writes: Record<string, unknown> = { match }
     if (this.recordable())
@@ -1589,9 +1615,10 @@ export class TableDO extends DurableObject<WorkerEnv> {
   }
 
   /**
-   * The next session: its own matchId, hands from 1, its own timeouts. Acks
-   * start over with it: a request id is only ever retried within a hand,
-   * and the last session's would match this one's hand numbers.
+   * The next session: its own matchId, hands from 1, its own timeouts,
+   * nets and dealt accounts. Acks start over with it: a request id is only
+   * ever retried within a hand, and the last session's would match this
+   * one's hand numbers.
    */
   private newSession() {
     const match = this.match!
@@ -1599,6 +1626,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
     match.sessionId = crypto.randomUUID()
     match.handNo = 0
     match.sessionTimeouts = {}
+    match.sessionUsers = []
+    match.netByUser = {}
     delete match.sessionOver
     this.lastAck = {}
   }
@@ -1632,16 +1661,29 @@ export class TableDO extends DurableObject<WorkerEnv> {
   }
 
   /**
-   * Missed decisions this session by account, every seated player named
-   * (record_match v6 reads six-casual timeouts by user id). A player who
-   * left keeps their count.
+   * Missed decisions this session by account, every player the call names
+   * included (record_match v6 reads six-casual timeouts by user id). A
+   * player who left keeps their count.
    */
   private sessionTimeouts() {
     const match = this.match!
     return {
-      ...Object.fromEntries(match.players.map((p) => [p.userId, 0])),
+      ...Object.fromEntries(this.namedPlayers().map((p) => [p.userId, 0])),
       ...match.sessionTimeouts,
     }
+  }
+
+  /**
+   * The players a record_match call names: heads-up, both seats. At a six
+   * table, the seated accounts dealt in during the session: record_match
+   * gives each a match_players row, and one who sat after the session's
+   * last hand never played it. Those who left have theirs from record_hand.
+   */
+  private namedPlayers() {
+    const match = this.match!
+    if (match.config.kind !== 'six-casual') return match.players
+    const dealt = new Set(match.sessionUsers)
+    return match.players.filter((p) => dealt.has(p.userId))
   }
 
   /**
@@ -1739,9 +1781,14 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const match = this.match
     if (match?.config.kind === 'six-casual' && match.status !== 'finished') {
       // No hand for IDLE_MS: the session ends (once its outbox is empty).
-      if (await this.sessionDue()) await this.endSession()
-      // The table stays while anyone sits at it, and looks again later.
-      if (match.players.length) {
+      // The table stays at least IDLE_MS more: its end is still to be
+      // archived, and whoever stood last may be back.
+      const due = await this.sessionDue()
+      if (due) await this.endSession()
+      // It stays while anyone sits at it, or while its session is open: a
+      // flush may have drained the outbox after sessionDue looked, and the
+      // session must be archived as ended before the table goes.
+      if (due || match.players.length || this.sessionOpen()) {
         this.deadlines.push({ kind: 'idle', at: this.clock() + IDLE_MS })
         return false
       }
@@ -2050,10 +2097,16 @@ export class TableDO extends DurableObject<WorkerEnv> {
 
   /** Real accounts and a configured key; local dev tables are not archived. */
   private recordable() {
-    return (
-      !!this.env.SUPABASE_SECRET_KEY &&
-      !!this.match?.players.every((p) => UUID.test(p.userId))
-    )
+    const match = this.match
+    if (!this.env.SUPABASE_SECRET_KEY || !match) return false
+    // A six table asks of the accounts its session dealt in, not of who
+    // sits there now: nobody, when an idle session ends, and every() of
+    // nobody would archive the end of a session never archived.
+    const accounts =
+      match.config.kind === 'six-casual'
+        ? (match.sessionUsers ?? [])
+        : match.players.map((p) => p.userId)
+    return accounts.every((userId) => UUID.test(userId))
   }
 
   /**
@@ -2070,7 +2123,10 @@ export class TableDO extends DurableObject<WorkerEnv> {
         id: this.matchId(),
         kind: match.config.kind,
         config: match.config,
-        players: match.players.map(({ seat, userId }) => ({ seat, userId })),
+        players: this.namedPlayers().map(({ seat, userId }) => ({
+          seat,
+          userId,
+        })),
         ...(match.rematchOf ? { rematchOf: match.rematchOf } : {}),
         ...(match.status === 'finished' || ended
           ? {
@@ -2445,7 +2501,16 @@ export class TableDO extends DurableObject<WorkerEnv> {
    */
   private sendEnded(ws: WebSocket) {
     const ended = this.ended
-    if (!ended || !this.hand || ended.record.handNo !== this.hand.config.handNo)
+    // Only the end of the hand on the table, once it is over. A six table's
+    // sessions repeat hand numbers, so the number alone would tie the last
+    // session's end (and its openings) to a new session's hand under way.
+    if (
+      !ended ||
+      !this.hand ||
+      !isOver(this.hand) ||
+      ended.record.handNo !== this.hand.config.handNo ||
+      ended.record.matchId !== this.matchId()
+    )
       return
     const userId = this.userOf(ws)
     const dealt = ended.record.seats.some((s) => s.userId === userId)
