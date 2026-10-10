@@ -3,10 +3,10 @@
 // empty seat offers "Sit here". It takes no cards, so a plate can never show
 // a hole card the viewer may not see; cards stay with the live table.
 // Generic on purpose: Atlas's avatar is for Atlas only (P2-05).
-import { useEffect, useState } from 'react'
 import type { SeatId } from '../engine/types'
 import type { SeatView } from '../shared/protocol'
 import { clockParts } from './clockParts'
+import { useNow } from './useNow'
 
 const chips = (n: number) => Math.round(n).toLocaleString('en-US')
 
@@ -142,11 +142,7 @@ function Marker({
  * without the name the plate already shows.
  */
 function PlateClock({ clock, offset }: { clock: SeatClock; offset: number }) {
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 250)
-    return () => window.clearInterval(timer)
-  }, [])
+  const now = useNow(250)
   const { phase, seconds } = clockParts(clock, now + offset)
   const bank = phase === 'bank'
   return (
