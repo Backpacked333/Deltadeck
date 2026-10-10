@@ -62,6 +62,14 @@ describe('the six-seat ring', () => {
     }
     expect(seat(2)).toHaveTextContent('12,400 chips')
 
+    // The button and the live blinds on their own seats, and one SB. This
+    // is the control for the dead-SB test: its "no SB" means something
+    // only because a live SB is drawn here.
+    expect(within(seat(4)).getByText('Small blind')).toBeInTheDocument()
+    expect(screen.getAllByText('Small blind')).toHaveLength(1)
+    expect(within(seat(3)).getByText('Dealer button')).toBeInTheDocument()
+    expect(within(seat(5)).getByText('Big blind')).toBeInTheDocument()
+
     // One clock, on the seat to act, counting down into the bank.
     const timer = within(seat(2)).getByRole('timer')
     expect(screen.getAllByRole('timer')).toEqual([timer])
@@ -80,6 +88,12 @@ describe('the six-seat ring', () => {
     expect(seat(4)).toHaveAttribute('data-slot', '1')
     expect(seat(0)).toHaveAttribute('data-slot', '3')
     expect(seat(2)).toHaveAttribute('data-slot', '5')
+    // The button and blinds stay on their seats when the ring turns. With
+    // the viewer in seat 1 (id 0) slot equals seat, so only a turned ring
+    // catches markers placed by slot instead of by seat.
+    expect(within(seat(3)).getByText('Dealer button')).toBeInTheDocument()
+    expect(within(seat(4)).getByText('Small blind')).toBeInTheDocument()
+    expect(within(seat(5)).getByText('Big blind')).toBeInTheDocument()
     // Reading and tab order go clockwise from the viewer.
     expect(
       screen.getAllByRole('group').map((g) => g.getAttribute('data-slot')),
