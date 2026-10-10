@@ -208,6 +208,52 @@ describe('one active table per account', () => {
       position: 1,
     })
   })
+
+  it('a stale table it asks about never costs a claim made meanwhile', async () => {
+    const created = await SELF.fetch(`${ORIGIN}/api/matches`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token('alice')}` },
+    })
+    const { matchId: invite } = (await created.json()) as { matchId: string }
+    // The lobby takes other calls while it waits on a table: during its
+    // first question to the invite (which holds nobody), alice sits at
+    // another table and the claim lands.
+    await runInDurableObject(lobbyStub(env), (instance: LobbyDO) => {
+      const real = env.TABLE
+      let first = true
+      const tableOf = (id: DurableObjectId) => {
+        const table = real.get(id)
+        return {
+          liveness: async (userId: string) => {
+            if (first) {
+              first = false
+              await instance.claim(userId, 'elsewhere')
+            }
+            return table.liveness(userId)
+          },
+        }
+      }
+      ;(instance as unknown as { env: typeof env }).env = {
+        ...env,
+        TABLE: {
+          idFromName: (name: string) => real.idFromName(name),
+          get: tableOf,
+        } as unknown as typeof env.TABLE,
+      }
+    })
+    try {
+      expect(await lobbyStub(env).activeFor('alice')).toBeNull()
+      const claimed = await runInDurableObject(
+        lobbyStub(env),
+        (_: LobbyDO, state) => state.storage.get('active:alice'),
+      )
+      expect({ invite, claimed }).toEqual({ invite, claimed: 'elsewhere' })
+    } finally {
+      // The lobby object outlives the test: the next one gets a fresh one,
+      // without the stand-in tables.
+      await abortAllDurableObjects()
+    }
+  })
 })
 
 describe('the pair limiter', () => {

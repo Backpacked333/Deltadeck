@@ -87,6 +87,8 @@ export const FRAME_KEYS: Record<ServerMsg['t'], string[]> = {
     'own',
   ]),
   match_end: keysOf<Msg<'match_end'>>()(['t', 'seq', 'matchId', 'result']),
+  // A six table's sit_cooldown says how long the account still waits
+  // (hands left and an epoch time); no other error carries either key.
   error: keysOf<Msg<'error'>>()([
     't',
     'seq',
@@ -94,6 +96,8 @@ export const FRAME_KEYS: Record<ServerMsg['t'], string[]> = {
     'code',
     'message',
     'reqId?',
+    'handsLeft?',
+    'until?',
   ]),
   // After a rated match: public ratings only (RATING_CHANGE_KEYS per seat).
   rating: keysOf<Msg<'rating'>>()(['t', 'seq', 'matchId', 'change']),
@@ -314,6 +318,14 @@ export function checkFrame(f: ServerMsg, kind: MatchKind = 'hu-casual') {
   if (f.t === 'hand_start')
     for (const s of f.seats ?? [])
       expectKeys(s, HAND_START_SEAT_KEYS, 'hand_start.seats')
+  if (f.t === 'error') {
+    // Both wait fields on a sit_cooldown, as counts; neither on any other.
+    const cooldown = f.code === 'sit_cooldown'
+    for (const key of ['handsLeft', 'until'] as const) {
+      expect(key in f, `error ${f.code}: ${key}`).toBe(cooldown)
+      if (cooldown) expect(Number.isSafeInteger(f[key]), key).toBe(true)
+    }
+  }
   if (f.t === 'hand_end') expectKeys(f.record, RECORD_KEYS, 'hand_end.record')
   if (f.t === 'match_end') expectKeys(f.result, RESULT_KEYS, 'match_end.result')
   if (f.t === 'reveal') {
@@ -391,4 +403,9 @@ export const FLOW_TYPES = {
   six: ['welcome', 'state', 'hand_start', 'hand_end', 'reveal'],
   /** six.test.ts: seven accounts sit at one six table, seatless ones too. */
   sit: ['welcome', 'state', 'hand_start', 'error'],
+  /**
+   * six.test.ts: stands mid-hand and between hands, a re-sit refused for
+   * its cooldown, and a stand from a socket without a seat.
+   */
+  stand: ['welcome', 'state', 'hand_start', 'hand_end', 'reveal', 'error'],
 } satisfies Record<string, ServerMsg['t'][]>

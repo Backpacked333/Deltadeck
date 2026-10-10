@@ -128,6 +128,14 @@ Rated heads-up is unchanged; every rule below applies to `kind: 'six-casual'` on
 - **Supabase down:** the outbox holds the session's calls and play continues. A session ends only once they drain, and no new hand is dealt past 9,000 hands with calls still queued.
 - **A call refused for its data:** parked, as S7-13 does.
 
+**Clarifications from PR-12 (stand and lobby claims).**
+
+- **The hand a player stood from is still theirs.** Until the next deal, a player who stood still gets that hand's `hand_end` and their own `reveal.own`, including on `resync`. That is the "Who a socket is" rule: they were dealt into that hand. "Sockets without a seat" only means they get no frames from hands they were not dealt into.
+- **No wire marker for a pending stand.** Only the player who stood needs to see "leaving after this hand", and their client knows it sent `stand`. Everyone else sees the seat free when the hand ends.
+- **The cooldown runs from when the seat frees, not from the `stand`.** A player who stands mid-hand holds the seat until that hand ends. It also applies to a player who sat and stood without being dealt in.
+- **One table per account at sit:** a sit from an account seated at another table closes the socket with 4409 and that table's id, as an invite does. Quick-sit (P2-08) may add a typed error code for it.
+- **Claims are taken one account at a time in the lobby.** A table holds an account in `liveness` from the moment its sit asks the lobby. Without both, two sits sent at once to two tables could each find the account free.
+
 ## Context and constraints (brief; reference the PM files rather than repeating them)
 
 - Requirements: `.10x/decisions/product-manager/multiplayer-platform.md` (P0 list, metrics), `heads-up-duplicate-ladder.md` (format Phase 0 must not block), `six-max-tables.md` (N-player engine required now), `integrity-and-trust.md` (v1 protections), `_index.md` (principles; `[DISCOVERED]` state of the code).
