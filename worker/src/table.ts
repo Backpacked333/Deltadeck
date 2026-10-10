@@ -2382,7 +2382,6 @@ export class TableDO extends DurableObject<WorkerEnv> {
     return [`deck:${key.slice('outbox:'.length, key.lastIndexOf(':'))}`]
   }
 
-  /** Whether `userId` has a socket open (other than `exclude`). */
   /**
    * The last ack for `userId`. Heads-up objects stored before acks were
    * keyed by account kept them by seat; a retry across that deploy still
@@ -2401,6 +2400,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     return this.match?.players.find((p) => p.userId === userId)?.seat
   }
 
+  /** Whether `userId` has a socket open (other than `exclude`). */
   private connected(userId: string, exclude?: WebSocket) {
     return this.openSockets(exclude).some((ws) => this.userOf(ws) === userId)
   }
