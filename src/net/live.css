@@ -565,8 +565,10 @@
 }
 .six-seat[data-active] .six-plate {
   border-color: var(--accent);
+  /* Mixed from the token, not a fixed rgb, so the halo follows the theme
+     (the dark accent is #b2e08c, not the light #c4e6a8). */
   box-shadow:
-    0 0 0 3px rgb(196 230 168 / 0.22),
+    0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent),
     0 8px 18px rgb(0 0 0 / 0.28);
 }
 /* A slow glow on the seat to act; it stops under reduced motion below. */
@@ -665,6 +667,19 @@
   }
   .six-seat {
     width: 100%;
+  }
+  /* A seat grows when its plate shows "Sitting out" and the clock, or its
+     bet wraps; centred, it would sit off its neighbours. Pin each row to
+     its rail edge instead: the top row to its top, the bottom to its end. */
+  .six-seat[data-slot='2'],
+  .six-seat[data-slot='3'],
+  .six-seat[data-slot='4'] {
+    align-self: start;
+  }
+  .six-seat[data-slot='0'],
+  .six-seat[data-slot='1'],
+  .six-seat[data-slot='5'] {
+    align-self: end;
   }
   .six-plate {
     padding: 6px 8px;
