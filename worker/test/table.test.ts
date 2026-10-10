@@ -158,12 +158,12 @@ describe('a heads-up table', () => {
     ] as const) {
       const seen = views(client.frames).filter((v) => v.handNo === 1)
       for (const view of seen) {
-        expect(view.players[view.you].cards).toEqual(own)
-        const opponent = view.players[1 - view.you]
+        expect(view.players[view.you!].cards).toEqual(own)
+        const opponent = view.players[1 - view.you!]
         expect(opponent.cards).toEqual(opponent.shown ? other : null)
         expect(JSON.stringify(view)).not.toContain('"deck"')
       }
-      expect(seen.at(-1)!.players[1 - seen.at(-1)!.you].shown).toBe(true)
+      expect(seen.at(-1)!.players[1 - seen.at(-1)!.you!].shown).toBe(true)
     }
   })
 
@@ -226,6 +226,37 @@ describe('a heads-up table', () => {
     ).toMatchObject({
       code: 'illegal',
     })
+  })
+
+  it('re-acks a retry whose ack was stored by seat before acks were keyed by account', async () => {
+    const { matchId, clients } = await seatBoth()
+    const { hand, match } = await peek(matchId)
+    const actor = hand!.toAct!
+    const base = { t: 'act' as const, handNo: 1, actionIndex: 0 }
+    let from = clients[actor].frames.length
+    clients[actor].send({ ...base, reqId: 'old1', action: { type: 'call' } })
+    await clients[actor].next(isState(1, 1), from)
+    // The object as an earlier deploy left it: the ack under the seat.
+    const { players } = match as unknown as {
+      players: { seat: number; userId: string }[]
+    }
+    const userId = players.find((p) => p.seat === actor)!.userId
+    await runInDurableObject(stub(matchId), (instance) => {
+      const t = instance as unknown as {
+        lastAck: Record<string, { reqId: string; seq: number }>
+      }
+      t.lastAck[String(actor)] = t.lastAck[userId]
+      delete t.lastAck[userId]
+    })
+    from = clients[actor].frames.length
+    clients[actor].send({ ...base, reqId: 'old1', action: { type: 'call' } })
+    const again = await clients[actor].next(
+      (f) => f.t === 'state' || f.t === 'error',
+      from,
+    )
+    expect(again.t).toBe('state')
+    expect(again.t === 'state' && again.view?.lastReqId).toBe('old1')
+    expect((await peek(matchId)).hand!.actions).toHaveLength(1)
   })
 
   it('deals the next hand with the button moved, and ends the match', async () => {

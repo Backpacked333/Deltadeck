@@ -1,6 +1,6 @@
 // The only serializer of table state for a client. Every frame a seat receives
 // is built here, so card privacy is one function with one test suite.
-import type { SeatView } from '../shared/protocol'
+import type { SeatedView, SeatView } from '../shared/protocol'
 import { legalActions, potTotal } from './hand'
 import type { HandState, SeatId } from './types'
 
@@ -12,18 +12,33 @@ export type ViewExtras = Pick<
 /**
  * What `viewer` may see: their own cards, cards shown at showdown, and public
  * betting. Other hole cards, the deck and the engine's bookkeeping
- * (raiseSeq, actedSeq, actedBet) never appear.
+ * (raiseSeq, actedSeq, actedBet) never appear. A null viewer was not dealt
+ * into the hand: it sees what every seat sees of the others, and no moves.
  */
 export function seatView(
   state: HandState,
   viewer: SeatId,
   extras: ViewExtras,
+): SeatedView
+export function seatView(
+  state: HandState,
+  viewer: SeatId | null,
+  extras: ViewExtras,
+): SeatView
+export function seatView(
+  state: HandState,
+  viewer: SeatId | null,
+  extras: ViewExtras,
 ): SeatView {
+  const { sb, bb } = state.config
   const view: SeatView = {
     matchId: extras.matchId,
     handNo: state.config.handNo,
     you: viewer,
     button: state.config.button,
+    // Six-casual hands name their blind seats; heads-up views keep their
+    // exact keys and bytes without them.
+    ...(bb !== undefined ? { sb: sb ?? null, bb } : {}),
     street: state.street,
     board: [...state.board],
     commitment: extras.commitment,
@@ -36,7 +51,8 @@ export function seatView(
       })),
     },
     toAct: state.toAct,
-    legal: state.toAct === viewer ? legalActions(state) : null,
+    legal:
+      viewer !== null && state.toAct === viewer ? legalActions(state) : null,
     lastRaise: state.lastRaise,
     actions: state.actions.map((a) => ({
       seat: a.seat,
