@@ -136,6 +136,14 @@ Rated heads-up is unchanged; every rule below applies to `kind: 'six-casual'` on
 - **One table per account at sit:** a sit from an account seated at another table closes the socket with 4409 and that table's id, as an invite does. Quick-sit (P2-08) may add a typed error code for it.
 - **Claims are taken one account at a time in the lobby.** A table holds an account in `liveness` from the moment its sit asks the lobby. Without both, two sits sent at once to two tables could each find the account free.
 
+**Clarifications from PR-13 (sessions).**
+
+- **Session 1's matchId is the table id; later sessions get a fresh UUID.** Each session is still its own `matches` row. Keeping the first id leaves every archive id from before PR-13 valid.
+- **Acks reset at each new session.** Hand numbers restart at 1, and real clients use random request ids, so an old ack can never match a new request.
+- **Only six tables delete decks.** A six table drops a hand's deck once its `record_hand` is stored or parked, or when the hand ends if nothing archives it. Heads-up keeps its up-to-100 decks for the short match, as before.
+- **A session ends at the next deal if the previous hand ran longer than 600 s.** That is the idle rule read literally, and it is harmless.
+- **Verify sends and incidents still hold a session open.** The amendment says a session ends only once its outbox is empty. Leaving them out of that check would be safe, because the flush already moves past them, but it is a change to the rule. Revisit if one ever sticks in production.
+
 ## Context and constraints (brief; reference the PM files rather than repeating them)
 
 - Requirements: `.10x/decisions/product-manager/multiplayer-platform.md` (P0 list, metrics), `heads-up-duplicate-ladder.md` (format Phase 0 must not block), `six-max-tables.md` (N-player engine required now), `integrity-and-trust.md` (v1 protections), `_index.md` (principles; `[DISCOVERED]` state of the code).
