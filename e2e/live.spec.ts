@@ -202,6 +202,21 @@ test('keyboard loop at a six-seat table', async ({ browser }) => {
   await page.keyboard.press('f')
   await page.waitForTimeout(300)
   expect(acts()).toHaveLength(4)
+  // The page refuses a move out of turn anyway, so that holds even with the
+  // keys bound. This does not: with no listener, no key is taken.
+  const taken = await page.evaluate(() =>
+    ['c', 'f', 'r', 'b', '1', '2', '3', '4'].filter(
+      (key) =>
+        !document.body.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key,
+            bubbles: true,
+            cancelable: true,
+          }),
+        ),
+    ),
+  )
+  expect(taken).toEqual([])
   await me.close()
 })
 

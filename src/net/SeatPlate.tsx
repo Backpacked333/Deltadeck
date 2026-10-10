@@ -71,6 +71,9 @@ export function SeatPlate({
       data-slot={slot}
       data-state={state}
       data-active={active && player ? '' : undefined}
+      // The viewer's own seat takes focus when the live table moves it off
+      // a control that went away (Sit here, the action bar).
+      tabIndex={you ? -1 : undefined}
     >
       {player ? (
         <div className="six-plate">

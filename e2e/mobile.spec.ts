@@ -174,3 +174,32 @@ test('a six-seat table fits 320 px without horizontal scroll', async ({
     expect(next.x + next.width, `${width} px`).toBeLessThanOrEqual(you.x)
   }
 })
+
+test('the space under a six-seat ring keeps its height from turn to turn', async ({
+  page,
+}) => {
+  await devSignIn(page, 'steady_under_the_ring')
+  // The others wait after the viewer's move, so the page shows one of them
+  // to act where the action bar was.
+  const table = await fakeSixTable(page, { hold: true })
+  await page.goto(`/#play/${SIX_TABLE}`)
+  const ring = page.getByRole('region', { name: 'Poker table' })
+  const column = page.locator('.six-table')
+  /** From the bottom of the ring to the bottom of the table's column. */
+  const under = async () => {
+    const r = (await ring.boundingBox())!
+    const c = (await column.boundingBox())!
+    return c.y + c.height - (r.y + r.height)
+  }
+  for (const width of [320, 360, 412]) {
+    await page.setViewportSize({ width, height: 800 })
+    await expect(page.getByRole('button', { name: /^Fold/ })).toBeVisible()
+    const turn = await under()
+    // A phone scrolled down to the bar would jump if the page got shorter
+    // under it as the bar gave way to the one-line status.
+    await page.getByRole('button', { name: /^(Call|Check)/ }).click()
+    await expect(page.getByText(/ to act$/)).toBeVisible()
+    expect(await under(), `${width} px`).toBeCloseTo(turn, 0)
+    table.release()
+  }
+})

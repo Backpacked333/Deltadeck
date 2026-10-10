@@ -5,7 +5,8 @@
 // hand), seated but not dealt into the hand on the table (that hand as
 // nobody's seat sees it), or dealt in (their own cards, and the action bar
 // while it is their move). Every card drawn here is one the frame carried.
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { ActionBar } from '../components/table/ActionBar'
 import { PlayingCard } from '../components/PlayingCard'
 import type { LegalActions, PlayerAction, SeatId } from '../engine/types'
@@ -74,13 +75,48 @@ export function SixTable({
     return () => window.clearTimeout(timer)
   }, [state.error])
 
+  // "Sit here" and the action bar unmount under the keyboard: the welcome
+  // takes the one away, our own move the other. Focus would fall to <body>
+  // and the next Tab start again from the top of the page, so it goes to
+  // our own seat, which stays put, or without a seat to the table status.
+  const root = useRef<HTMLDivElement>(null)
+  const focused = useRef<Element | null>(null)
+  useLayoutEffect(() => {
+    const last = focused.current
+    if (!last || last.isConnected) return
+    focused.current = null
+    const active = document.activeElement
+    if (active && active !== document.body) return
+    root.current
+      ?.querySelector<HTMLElement>(
+        seat !== null ? '.six-seat[data-slot="0"]' : '.six-wait',
+      )
+      ?.focus()
+  })
+
+  // The bar's height while it was last up. On a phone it is several times
+  // the height of the status that replaces it, so the space under the ring
+  // keeps it (live.css): a page scrolled down to the bar would otherwise
+  // jump on every turn.
+  const [dock, setDock] = useState(0)
+
   const canSit =
     seat === null && state.status === 'open' && table.status !== 'finished'
   return (
-    <div className="play-column live-table six-table">
+    <div
+      className="play-column live-table six-table"
+      ref={root}
+      onFocus={(event) => {
+        focused.current = event.target
+      }}
+    >
       <div className="live-matchbar" role="status" aria-live="polite">
         <span>{view ? `6-max · Hand ${view.handNo}` : '6-max'}</span>
         <span>{`${table.players.length} of ${SEATS} seats taken`}</span>
+        {/* The bar's own status mounts with the bar, already saying "Your
+            move", and screen readers do not reliably announce a live
+            region that arrives with its text. This one stays. */}
+        {dealt && legal && <span className="sr-only">Your move</span>}
         {state.status === 'reconnecting' && (
           <span className="live-warn">
             {state.error?.code === 'rate_limited'
@@ -102,11 +138,20 @@ export function SixTable({
       >
         <Middle view={view} />
       </SixRing>
-      {dealt && legal ? (
-        <SixActions view={dealt} legal={legal} act={act} />
-      ) : (
-        <SixStatus table={table} view={view} state={state} nameOf={nameOf} />
-      )}
+      <div
+        className="six-dock"
+        style={
+          seat !== null && dock
+            ? ({ '--dock': `${dock}px` } as CSSProperties)
+            : undefined
+        }
+      >
+        {dealt && legal ? (
+          <SixActions view={dealt} legal={legal} act={act} onHeight={setDock} />
+        ) : (
+          <SixStatus table={table} view={view} state={state} nameOf={nameOf} />
+        )}
+      </div>
       {flash && (
         <p className="live-error" role="alert">
           {flash}
@@ -175,11 +220,23 @@ function SixActions({
   view,
   legal,
   act,
+  onHeight,
 }: {
   view: SeatedView
   legal: LegalActions
   act: (action: PlayerAction) => boolean
+  /** The bar's own height, whenever it changes. */
+  onHeight: (px: number) => void
 }) {
+  const box = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const el = box.current!
+    onHeight(el.offsetHeight)
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => onHeight(el.offsetHeight))
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [onHeight])
   const bets = view.players.map((p) => p.bet)
   const pot = view.pot.total
   const presets = buildPresets(legal, pot, legal.toCall, bets)
@@ -204,29 +261,31 @@ function SixActions({
   }
   useMoveKeys(legal, presets, move, size)
   return (
-    <ActionBar
-      game={{ bets, pot, stacks: view.players.map((p) => p.stack) }}
-      legal={legal}
-      yourTurn
-      heroTurn
-      paused={false}
-      raiseTo={raiseTo}
-      presets={presets}
-      math={{
-        revealed: false,
-        ready: false,
-        breakEven: legal.toCall / (pot + legal.toCall || 1),
-      }}
-      guess={NO_GUESS}
-      shortcuts
-      onRaiseTo={size}
-      onAct={move}
-      onDeal={noop}
-      onReview={noop}
-      // Shown only while the move is not ours, which never happens here:
-      // this bar is mounted for the viewer's turn alone.
-      versus={{ opponent: 'The table', next: '' }}
-    />
+    <div className="six-actions" ref={box}>
+      <ActionBar
+        game={{ bets, pot, stacks: view.players.map((p) => p.stack) }}
+        legal={legal}
+        yourTurn
+        heroTurn
+        paused={false}
+        raiseTo={raiseTo}
+        presets={presets}
+        math={{
+          revealed: false,
+          ready: false,
+          breakEven: legal.toCall / (pot + legal.toCall || 1),
+        }}
+        guess={NO_GUESS}
+        shortcuts
+        onRaiseTo={size}
+        onAct={move}
+        onDeal={noop}
+        onReview={noop}
+        // Shown only while the move is not ours, which never happens here:
+        // this bar is mounted for the viewer's turn alone.
+        versus={{ opponent: 'The table', next: '' }}
+      />
+    </div>
   )
 }
 
@@ -245,6 +304,9 @@ function useMoveKeys(
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return
+      // A key held down repeats, and a key an input method is composing
+      // into text is not a move.
+      if (event.repeat || event.isComposing) return
       const target = event.target
       if (
         target instanceof Element &&
@@ -316,13 +378,17 @@ function SixStatus({
   const caption =
     table.status === 'finished' ? (
       <a href="#lobby">Back to the lobby</a>
-    ) : !seated || (view && view.you === null) ? (
+    ) : seated && view?.you === null ? (
       'You are dealt in from the next hand.'
+    ) : !seated && table.players.length < SEATS ? (
+      'Take a seat to be dealt in from the next hand.'
     ) : result ? (
       'Next hand in a few seconds.'
     ) : null
   return (
-    <div className="six-wait">
+    // Focusable, so focus can land here when the control holding it goes
+    // and there is no seat of our own to land on (SixTable).
+    <div className="six-wait" tabIndex={-1}>
       <div className="action-status" aria-live="polite">
         <span
           className={`status-dot ${net === null || net === 0 ? 'wait' : net > 0 ? 'up' : 'down'}`}
@@ -349,7 +415,11 @@ function SixStatus({
   )
 }
 
-/** "You win · Flush", "carol wins", "bob and carol win · Two pair". */
+/**
+ * "You win · Flush", "carol wins", "bob and carol win · Two pair". Side
+ * pots can go to different hands, so each winner is named with their own:
+ * "You win · Two pair; carol wins · Flush".
+ */
 function resultText(
   view: SeatView,
   result: NonNullable<SeatView['result']>,
@@ -360,13 +430,29 @@ function resultText(
     .filter((s) => (result.netBySeat[s] ?? 0) > 0)
   // Everyone got back what they put in.
   if (!winners.length) return 'Split pot'
-  const names = winners.map((s) => (s === view.you ? 'You' : nameOf(s)))
-  const who =
-    names.length === 1
-      ? names[0]
-      : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
-  const verb = names.length === 1 && winners[0] !== view.you ? 'wins' : 'win'
-  if (!result.showdown) return `${who} ${verb}`
-  const best = Math.max(0, ...result.awards.map((a) => a.score))
-  return `${who} ${verb} · ${categories[categoryOf(best)]}`
+  const phrase = (seats: SeatId[]) => {
+    const names = seats.map((s) => (s === view.you ? 'You' : nameOf(s)))
+    const who =
+      names.length === 1
+        ? names[0]
+        : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
+    return `${who} ${names.length === 1 && seats[0] !== view.you ? 'wins' : 'win'}`
+  }
+  if (!result.showdown) return phrase(winners)
+  // Every award to a seat carries that seat's own hand.
+  const handOf = (seat: SeatId) =>
+    categories[
+      categoryOf(
+        Math.max(
+          0,
+          ...result.awards.filter((a) => a.seat === seat).map((a) => a.score),
+        ),
+      )
+    ]
+  const byHand = new Map<string, SeatId[]>()
+  for (const s of winners)
+    byHand.set(handOf(s), [...(byHand.get(handOf(s)) ?? []), s])
+  return [...byHand]
+    .map(([hand, seats]) => `${phrase(seats)} · ${hand}`)
+    .join('; ')
 }

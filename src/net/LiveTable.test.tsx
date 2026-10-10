@@ -1,4 +1,4 @@
-import { act, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MotionConfig } from 'motion/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -453,20 +453,32 @@ describe('LiveTable at a six-casual table', () => {
   it("the action bar appears only on the viewer's turn", async () => {
     render(<LiveTable matchId={MATCH} identity={alice} />)
     const socket = await opened()
+    // The bar's own status is mounted with it, already holding "Your move",
+    // which screen readers do not reliably announce; the match bar stays
+    // on the page, so it is the one that says so.
+    const matchBar = () =>
+      screen.getByText(/^6-max · Hand/).closest('[role=status]')!
     let hand = sixHand()
     act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
     expect(screen.getByText('dave to act')).toBeInTheDocument()
     expect(moves()).toEqual([])
+    expect(matchBar()).not.toHaveTextContent('Your move')
 
     hand = engineAct(hand, 5, { type: 'call' })
     act(() => socket.emit(sixFrame('state', 2, 2, 2, hand)))
     expect(screen.getByText('bob to act')).toBeInTheDocument()
     expect(moves()).toEqual([])
+    expect(matchBar()).not.toHaveTextContent('Your move')
 
     // Her turn: the bar, from the server's legal moves.
     hand = engineAct(hand, 0, { type: 'call' })
     act(() => socket.emit(sixFrame('state', 3, 2, 2, hand)))
-    expect(screen.getByText('Your move')).toBeInTheDocument()
+    expect(
+      within(document.querySelector<HTMLElement>('.action-bar')!).getByText(
+        'Your move',
+      ),
+    ).toBeInTheDocument()
+    expect(matchBar()).toHaveTextContent('Your move')
     expect(screen.getByRole('button', { name: /^Fold/ })).toBeEnabled()
     // Half the pot after calling by default: 20 + (70 + 10) / 2.
     expect(screen.getByRole('button', { name: /^Raise to 60/ })).toBeEnabled()
@@ -480,6 +492,7 @@ describe('LiveTable at a six-casual table', () => {
     })
     // Sent: the bar waits for the table's answer instead of a second move.
     expect(moves()).toEqual([])
+    expect(matchBar()).not.toHaveTextContent('Your move')
 
     hand = engineAct(hand, 2, { type: 'call' })
     act(() =>
@@ -487,6 +500,7 @@ describe('LiveTable at a six-casual table', () => {
     )
     expect(screen.getByText('carol to act')).toBeInTheDocument()
     expect(moves()).toEqual([])
+    expect(matchBar()).not.toHaveTextContent('Your move')
   })
 
   it("keys size and make the move at a six-seat table, only on the viewer's turn", async () => {
@@ -496,6 +510,10 @@ describe('LiveTable at a six-casual table', () => {
     act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
     await userEvent.keyboard('cfr')
     expect(socket.sent).toEqual([])
+    // The connection refuses a move out of turn anyway, so the check above
+    // holds even with the keys bound. This one does not: off her turn there
+    // is no listener, so no key is taken from the page.
+    expect(keysTaken()).toEqual([])
 
     hand = engineAct(hand, 5, { type: 'call' })
     hand = engineAct(hand, 0, { type: 'call' })
@@ -509,8 +527,157 @@ describe('LiveTable at a six-casual table', () => {
     expect(socket.sent.map((m) => JSON.parse(m))).toMatchObject([
       { t: 'act', actionIndex: 2, action: { type: 'raise', to: 100 } },
     ])
+    // Sent: the keys are let go until her next decision.
+    expect(keysTaken()).toEqual([])
+  })
+
+  it('a held key or a key that composes text makes no move', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    let hand = sixHand()
+    hand = engineAct(hand, 5, { type: 'call' })
+    hand = engineAct(hand, 0, { type: 'call' })
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    expect(moves()).not.toEqual([])
+
+    // Auto-repeat from a key held down, and keys an input method is
+    // composing into text, are not moves.
+    for (const init of [{ repeat: true }, { isComposing: true }])
+      for (const key of ['c', 'f', 'r', '3'])
+        expect(fireEvent.keyDown(window, { key, ...init })).toBe(true)
+    expect(socket.sent).toEqual([])
+    expect(
+      screen.getByRole('button', { name: /^Raise to 60/ }),
+    ).toBeInTheDocument()
+
+    fireEvent.keyDown(window, { key: 'c' })
+    expect(socket.sent.map((m) => JSON.parse(m))).toMatchObject([
+      { t: 'act', action: { type: 'call' } },
+    ])
+  })
+
+  it('a viewer without a seat is asked to take one, unless every seat is taken', async () => {
+    render(<LiveTable matchId={MATCH} identity={identity('erin')} />)
+    const socket = await opened()
+    act(() => socket.emit(sixFrame('welcome', 1, null, null, sixHand())))
+    expect(screen.getByText('Pick an empty seat to play.')).toBeInTheDocument()
+    expect(
+      screen.getByText('Take a seat to be dealt in from the next hand.'),
+    ).toBeInTheDocument()
+    // Only someone already seated is dealt in from the next hand.
+    expect(screen.queryByText(/You are dealt in/)).toBeNull()
+
+    const full = [
+      ...SIX_ROSTER,
+      { seat: 1, username: 'frank', stack: 2000 },
+      { seat: 4, username: 'gina', stack: 2000 },
+    ]
+    act(() =>
+      socket.emit(
+        sixFrame('state', 2, null, null, sixHand(), { table: sixInfo(full) }),
+      ),
+    )
+    expect(screen.getByText('Every seat is taken.')).toBeInTheDocument()
+    expect(screen.queryByText(/dealt in/)).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Sit here/ })).toBeNull()
+  })
+
+  it('focus lands on her own seat when Sit here goes away', async () => {
+    render(<LiveTable matchId={MATCH} identity={identity('erin')} />)
+    const socket = await opened()
+    act(() => socket.emit(sixFrame('welcome', 1, null, null, null)))
+    const sitHere = within(seat(4)).getByRole('button', { name: /^Sit here/ })
+    sitHere.focus()
+    await userEvent.keyboard('{Enter}')
+    expect(JSON.parse(socket.sent.at(-1)!)).toEqual({ t: 'sit', seat: 4 })
+
+    // The welcome takes every Sit here away, the focused one included.
+    const roster = [...SIX_ROSTER, { seat: 4, username: 'erin', stack: 2000 }]
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 2, 4, null, null, { table: sixInfo(roster) }),
+      ),
+    )
+    expect(sitHere).not.toBeInTheDocument()
+    expect(seat(4)).toHaveFocus()
+  })
+
+  it('focus lands on her own seat when the action bar goes away', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    let hand = engineAct(sixHand(), 5, { type: 'call' })
+    hand = engineAct(hand, 0, { type: 'call' })
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+
+    // She moves from the bar by keyboard; the bar goes while it is in flight.
+    screen.getByRole('button', { name: /^Call 10/ }).focus()
+    await userEvent.keyboard('{Enter}')
+    expect(JSON.parse(socket.sent.at(-1)!)).toMatchObject({
+      t: 'act',
+      action: { type: 'call' },
+    })
+    expect(moves()).toEqual([])
+    expect(seat(2)).toHaveFocus()
+
+    // Her plate stays, so focus stays with it as the hand goes on.
+    hand = engineAct(hand, 2, { type: 'call' })
+    act(() => socket.emit(sixFrame('state', 2, 2, 2, hand)))
+    expect(screen.getByText('carol to act')).toBeInTheDocument()
+    expect(seat(2)).toHaveFocus()
+  })
+
+  it('a seat taken from under a focused Sit here leaves focus on the table status', async () => {
+    render(<LiveTable matchId={MATCH} identity={identity('erin')} />)
+    const socket = await opened()
+    act(() => socket.emit(sixFrame('welcome', 1, null, null, null)))
+    within(seat(4))
+      .getByRole('button', { name: /^Sit here/ })
+      .focus()
+
+    // frank sits there first: no seat of her own to land on.
+    const roster = [...SIX_ROSTER, { seat: 4, username: 'frank', stack: 2000 }]
+    act(() =>
+      socket.emit(
+        sixFrame('state', 2, null, null, null, { table: sixInfo(roster) }),
+      ),
+    )
+    expect(seat(4)).toHaveAccessibleName('Seat 5: frank')
+    expect(
+      screen.getByText('Pick an empty seat to play.').closest('.six-wait'),
+    ).toHaveFocus()
+  })
+
+  it('each winner is named with their own hand when a side pot splits the chips', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    // carol is all in for 100 with a flush and takes the main pot; alice's
+    // two pair beats dave's eights for the side pot.
+    let hand = sixHand({
+      stacks: { 3: 100 },
+      holes: { 0: '7d 2h', 2: 'As 9d', 3: 'Kc 2c', 5: '8d 8s' },
+      board: 'Ac 7c 9h Tc 3s',
+    })
+    hand = engineAct(hand, 5, { type: 'call' })
+    hand = engineAct(hand, 0, { type: 'fold' })
+    hand = engineAct(hand, 2, { type: 'raise', to: 2000 })
+    hand = engineAct(hand, 3, { type: 'call' })
+    hand = engineAct(hand, 5, { type: 'call' })
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+
+    expect(
+      screen.getByText('You win · Two pair; carol wins · Flush'),
+    ).toBeInTheDocument()
   })
 })
+
+/**
+ * The move keys the page takes: a key is taken when a listener calls
+ * preventDefault on it, which the six-seat table's does only while bound.
+ */
+const keysTaken = () =>
+  ['c', 'f', 'r', 'b', '1', '2', '3', '4'].filter(
+    (key) => !fireEvent.keyDown(window, { key }),
+  )
 
 describe('Lobby', () => {
   it('opens a table by link and goes to it', async () => {

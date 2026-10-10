@@ -753,6 +753,24 @@
 .six-wait .action-caption {
   margin: 0;
 }
+/* On a phone the action bar is 300 px or more and the status a line or
+   two, and the page usually scrolls to reach the bar. Under the ring the
+   status keeps the height the bar last had (--dock, set by SixTable), so
+   the page does not shrink and jump each time the turn passes. */
+@media (max-width: 680px) {
+  .six-dock {
+    display: grid;
+    min-height: var(--dock, 0);
+  }
+  /* The bar keeps its own height, which is what --dock measures. */
+  .six-actions {
+    align-self: start;
+  }
+  /* The status fills the space, its line where the bar's status was. */
+  .six-dock .six-wait {
+    align-content: start;
+  }
+}
 .six-shown {
   display: flex;
   flex-wrap: wrap;

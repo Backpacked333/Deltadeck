@@ -28,10 +28,15 @@ const SEATS = [
  * posts the small blind; the five others check or call at once. `street`:
  * play check-and-call up to the viewer's first move on that street before
  * the page connects. `received` collects every frame the page sends.
+ * `hold`: after each of the viewer's moves the others wait for `release()`,
+ * so the page shows someone else to act.
  */
 export async function fakeSixTable(
   page: Page,
-  { street = 'preflop' }: { street?: Street } = {},
+  {
+    street = 'preflop',
+    hold = false,
+  }: { street?: Street; hold?: boolean } = {},
 ) {
   const config: HandConfig = {
     handNo: 1,
@@ -88,6 +93,7 @@ export async function fakeSixTable(
   }
 
   const received: ClientMsg[] = []
+  let held: (() => void) | null = null
   await page.routeWebSocket(/\/ws\/table\//, (ws) => {
     const send = (msg: ServerMsg) => ws.send(JSON.stringify(msg))
     send(frame('welcome'))
@@ -119,11 +125,19 @@ export async function fakeSixTable(
       }
       lastReqId = msg.reqId
       send(frame('state'))
-      others()
-      send(frame('state'))
+      const rest = () => {
+        others()
+        send(frame('state'))
+      }
+      if (hold) held = rest
+      else rest()
     })
   })
-  return { received }
+  const release = () => {
+    held?.()
+    held = null
+  }
+  return { received, release }
 }
 
 /** Signed in with a development token, past the trainer's first visit. */

@@ -200,24 +200,29 @@ export const sixInfo = (
  * Hand 1 at the six table: bob (seat 0) has the button, alice (seat 2)
  * posts the small blind and carol (seat 3) the big; dave (seat 5) is first
  * to act. alice holds As Kd; the others' cards must never reach her.
+ * `stacks`, `holes` and `board` replace the roster's stacks and those cards.
  */
-export function sixHand(): HandState {
+export function sixHand({
+  stacks = {},
+  holes = { 0: '7c 2h', 2: 'As Kd', 3: 'Qs Qh', 5: '9d 8d' },
+  board = '2c 7d 9h Tc 3s',
+}: {
+  stacks?: Partial<Record<SeatId, number>>
+  holes?: Record<number, string>
+  board?: string
+} = {}): HandState {
   const cfg: HandConfig = {
     handNo: 1,
-    seats: SIX_ROSTER.map(({ seat, stack }) => ({ seat, stack })),
+    seats: SIX_ROSTER.map(({ seat, stack }) => ({
+      seat,
+      stack: stacks[seat] ?? stack,
+    })),
     button: 0,
     blinds: { sb: 10, bb: 20 },
     sb: 2,
     bb: 3,
   }
-  return startHand(
-    cfg,
-    deckWith(
-      cfg,
-      { 0: '7c 2h', 2: 'As Kd', 3: 'Qs Qh', 5: '9d 8d' },
-      '2c 7d 9h Tc 3s',
-    ),
-  )
+  return startHand(cfg, deckWith(cfg, holes, board))
 }
 
 /**
