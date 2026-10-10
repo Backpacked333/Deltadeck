@@ -487,6 +487,14 @@
   place-items: center;
   gap: 8px;
   min-height: 72px;
+  /* Five 60 px cards need 300 px, more than the middle has on a 320 px
+     phone or just above the phone breakpoint (about 240 px). Cards here
+     take a fifth of the middle, less four 6 px gaps, up to their usual
+     size. */
+  container-type: inline-size;
+  --card-sm-w: clamp(28px, calc((100cqi - 24px) / 5), 46px);
+  --card-md-w: clamp(28px, calc((100cqi - 24px) / 5), 60px);
+  --card-lg-w: clamp(28px, calc((100cqi - 24px) / 5), 72px);
 }
 .six-seat {
   display: flex;
