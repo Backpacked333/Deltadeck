@@ -272,9 +272,17 @@ describe('the luck series', () => {
 })
 
 describe('the migration', () => {
-  it('counts grades written before it, so nobody graded reads "Not graded yet"', async () => {
-    const early = new PGlite()
+  // Booting PGlite (initdb in WebAssembly) costs about 2 s of CPU, and
+  // more while other suites boot theirs: fixture work, so it runs in a hook
+  // like every suite's boot, not inside the test's 5 s.
+  let early: PGlite
+  beforeAll(async () => {
+    early = new PGlite()
     await early.exec(SUPABASE_STUB)
+  })
+  afterAll(() => early.close())
+
+  it('counts grades written before it, so nobody graded reads "Not graded yet"', async () => {
     const files = migrationFiles()
     const accuracy = files.findIndex((f) => f.endsWith('_accuracy.sql'))
     for (const f of files.slice(0, accuracy))
@@ -295,6 +303,5 @@ describe('the migration', () => {
       `select user_id, accuracy, graded, good from public.accuracy`,
     )
     expect(rows).toEqual([{ user_id: ALICE, accuracy: 90, graded: 1, good: 1 }])
-    await early.close()
   })
 })
