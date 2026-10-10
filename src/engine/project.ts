@@ -5,7 +5,7 @@
 import { categories } from '../lib/poker'
 import type { Card, Game, HistoryEntry, Player } from '../lib/poker'
 import { categoryOf, fromId } from '../lib/sim'
-import type { SeatView } from '../shared/protocol'
+import type { SeatedView } from '../shared/protocol'
 import { seatView } from './redact'
 import type { HandState, SeatId } from './types'
 
@@ -18,7 +18,7 @@ export const FACE_DOWN: [Card, Card] = [
 const cardsOf = (ids: [number, number] | null): [Card, Card] =>
   ids ? [fromId(ids[0]), fromId(ids[1])] : [...FACE_DOWN]
 
-export function toHeroGame(view: SeatView, opponentName = 'Opponent'): Game {
+export function toHeroGame(view: SeatedView, opponentName = 'Opponent'): Game {
   if (view.players.length !== 2) throw new Error('toHeroGame is heads-up only')
   const me = view.players.find((p) => p.seat === view.you)!
   const them = view.players.find((p) => p.seat !== view.you)!

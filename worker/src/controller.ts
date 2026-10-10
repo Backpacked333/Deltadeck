@@ -5,7 +5,7 @@ import { shuffleWith } from '../../src/engine/deck'
 import { nextBlinds } from '../../src/engine/positions'
 import type { Blinds } from '../../src/engine/positions'
 import type { HandConfig, SeatId } from '../../src/engine/types'
-import type { MatchConfig } from '../../src/shared/protocol'
+import type { MatchConfig, SeatStatus } from '../../src/shared/protocol'
 import { randomBytes, randomInt } from './shuffle'
 
 export type HandPlan = {
@@ -33,7 +33,7 @@ export type RosterSeat = {
   userId: string
   /** The chips carried from the last hand: stacks are never reset. */
   stack: number
-  status: 'playing' | 'sitting_out'
+  status: SeatStatus
   /**
    * Sat down since the last hand: dealt in without posting, so a small
    * blind that falls on this seat is dead (R-20).
@@ -69,7 +69,8 @@ export class LocalController implements TableController {
   ) {}
 
   nextHandPlan(handNo: number, config: MatchConfig): HandPlan | null {
-    if (handNo > config.handsTotal) return null
+    // Heads-up configs always have a length; only six tables leave it out.
+    if (handNo > config.handsTotal!) return null
     return {
       config: {
         handNo,

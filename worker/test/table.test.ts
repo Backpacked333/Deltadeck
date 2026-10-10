@@ -158,12 +158,12 @@ describe('a heads-up table', () => {
     ] as const) {
       const seen = views(client.frames).filter((v) => v.handNo === 1)
       for (const view of seen) {
-        expect(view.players[view.you].cards).toEqual(own)
-        const opponent = view.players[1 - view.you]
+        expect(view.players[view.you!].cards).toEqual(own)
+        const opponent = view.players[1 - view.you!]
         expect(opponent.cards).toEqual(opponent.shown ? other : null)
         expect(JSON.stringify(view)).not.toContain('"deck"')
       }
-      expect(seen.at(-1)!.players[1 - seen.at(-1)!.you].shown).toBe(true)
+      expect(seen.at(-1)!.players[1 - seen.at(-1)!.you!].shown).toBe(true)
     }
   })
 

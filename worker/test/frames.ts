@@ -1,5 +1,5 @@
 // What each frame type may carry on the wire, shared by the tests that
-// check frames (leaks, rated-leak, rating, rematch, lobby) and by
+// check frames (leaks, rated-leak, rating, rematch, lobby, six) and by
 // frames.test.ts, which checks that every type is covered. The compiler
 // checks every list against src/shared/protocol.ts: a field added to a
 // frame without a line here fails `npm run typecheck:worker`, so no field
@@ -8,6 +8,7 @@ import { expect } from 'vitest'
 import type {
   HandRecordV1,
   LobbyMsg,
+  MatchKind,
   ServerMsg,
 } from '../../src/shared/protocol'
 
@@ -53,6 +54,8 @@ export const FRAME_KEYS: Record<ServerMsg['t'], string[]> = {
     'table',
     'view',
   ]),
+  // Six-casual adds `seats` (each dealt seat's stack, by seat number) and
+  // the blind seats: all public at the deal (six-only, RULES).
   hand_start: keysOf<Msg<'hand_start'>>()([
     't',
     'seq',
@@ -62,6 +65,9 @@ export const FRAME_KEYS: Record<ServerMsg['t'], string[]> = {
     'button',
     'blinds',
     'stacks',
+    'seats?',
+    'sb?',
+    'bb?',
   ]),
   hand_end: keysOf<Msg<'hand_end'>>()([
     't',
@@ -145,6 +151,9 @@ export const VIEW_KEYS = keysOf<View>()([
   'players',
   'lastReqId',
   'result?',
+  // Six-casual: the blind seats, public from the deal (six-only, RULES).
+  'sb?',
+  'bb?',
 ])
 export const VIEW_PLAYER_KEYS = keysOf<View['players'][number]>()([
   'seat',
@@ -156,18 +165,51 @@ export const VIEW_PLAYER_KEYS = keysOf<View['players'][number]>()([
   'cards',
   'shown',
 ])
+// A six table has no length: `handsTotal` is heads-up only (RULES).
 export const TABLE_KEYS = keysOf<View['match']>()([
   'kind',
   'status',
-  'handsTotal',
+  'handsTotal?',
   'players',
 ])
+// Six-casual adds each seat's stack as of the last deal and whether it is
+// playing or sitting out (six-only, RULES).
 export const TABLE_PLAYER_KEYS = keysOf<View['match']['players'][number]>()([
   'seat',
   'username',
   'connected',
   'consecutiveTimeouts',
+  'stack?',
+  'status?',
 ])
+const HAND_START_SEAT_KEYS = keysOf<
+  NonNullable<Msg<'hand_start'>['seats']>[number]
+>()(['seat', 'stack'])
+/**
+ * Per list: keys only a six-casual frame carries (`six`), keys only a
+ * heads-up frame carries (`headsUp`), and keys a six frame may leave out
+ * (`sixOptional`). checkFrame requires each for its own kind and refuses it
+ * for the other, so heads-up frames keep exactly the keys (and bytes) they
+ * had before six tables existed.
+ */
+type KindRules = { six?: string[]; headsUp?: string[]; sixOptional?: string[] }
+const RULES = {
+  hand_start: { six: ['seats', 'sb', 'bb'] },
+  // Always there heads-up, where every seat was dealt in; at a six table an
+  // account that sat down during the hand gets its reveal without `own`.
+  reveal: { sixOptional: ['own'] },
+  table: { headsUp: ['handsTotal'] },
+  tablePlayer: { six: ['stack', 'status'] },
+  view: { six: ['sb', 'bb'] },
+} satisfies Record<string, KindRules>
+const forKind = (keys: string[], six: boolean, rules: KindRules = {}) =>
+  keys.flatMap((k) => {
+    const name = k.replace(/\?$/, '')
+    if (rules.six?.includes(name)) return six ? [name] : []
+    if (rules.headsUp?.includes(name)) return six ? [] : [name]
+    if (rules.sixOptional?.includes(name)) return six ? [`${name}?`] : [k]
+    return [k]
+  })
 // The per-hand luck (equities) stays in the archive and never reaches a
 // frame, so the wire record is the archived one without it.
 export const RECORD_KEYS = keysOf<Omit<HandRecordV1, 'luck'>>()([
@@ -239,20 +281,39 @@ export const forbiddenKeys = (value: unknown) =>
 export const analysisKeys = (value: unknown) =>
   keysMatching(ANALYSIS_KEYS, value)
 
-export function checkFrame(f: ServerMsg) {
-  expectKeys(f, FRAME_KEYS[f.t], f.t)
+/**
+ * Checks one frame against its allowlist. `kind` is the table it came from:
+ * heads-up by default, so every heads-up flow refuses six-only keys without
+ * saying so, and a six flow must name its kind.
+ */
+export function checkFrame(f: ServerMsg, kind: MatchKind = 'hu-casual') {
+  const six = kind === 'six-casual'
+  const rules: KindRules | undefined =
+    f.t === 'hand_start' || f.t === 'reveal' ? RULES[f.t] : undefined
+  expectKeys(f, forKind(FRAME_KEYS[f.t], six, rules), f.t)
   expect(forbiddenKeys(f), `${f.t}: forbidden keys`).toEqual([])
   if (f.t === 'welcome' || f.t === 'state') {
-    expectKeys(f.table, TABLE_KEYS, `${f.t}.table`)
+    expect(f.table.kind === 'six-casual', `${f.t}.table.kind`).toBe(six)
+    // Only a six table has sockets without a seat (welcome.seat null).
+    if (f.t === 'welcome' && !six) expect(f.seat, 'welcome.seat').not.toBeNull()
+    const table = forKind(TABLE_KEYS, six, RULES.table)
+    const tablePlayer = forKind(TABLE_PLAYER_KEYS, six, RULES.tablePlayer)
+    expectKeys(f.table, table, `${f.t}.table`)
     for (const p of f.table.players)
-      expectKeys(p, TABLE_PLAYER_KEYS, `${f.t}.table.players`)
+      expectKeys(p, tablePlayer, `${f.t}.table.players`)
     if (f.view) {
-      expectKeys(f.view, VIEW_KEYS, `${f.t}.view`)
-      expectKeys(f.view.match, TABLE_KEYS, `${f.t}.view.match`)
+      if (!six) expect(f.view.you, `${f.t}.view.you`).not.toBeNull()
+      expectKeys(f.view, forKind(VIEW_KEYS, six, RULES.view), `${f.t}.view`)
+      expectKeys(f.view.match, table, `${f.t}.view.match`)
+      for (const p of f.view.match.players)
+        expectKeys(p, tablePlayer, `${f.t}.view.match.players`)
       for (const p of f.view.players)
         expectKeys(p, VIEW_PLAYER_KEYS, `${f.t}.view.players`)
     }
   }
+  if (f.t === 'hand_start')
+    for (const s of f.seats ?? [])
+      expectKeys(s, HAND_START_SEAT_KEYS, 'hand_start.seats')
   if (f.t === 'hand_end') expectKeys(f.record, RECORD_KEYS, 'hand_end.record')
   if (f.t === 'match_end') expectKeys(f.result, RESULT_KEYS, 'match_end.result')
   if (f.t === 'reveal') {
@@ -275,10 +336,10 @@ export function checkLobbyFrame(f: LobbyMsg) {
 }
 
 /** Runs every frame through checkFrame and returns the types that passed. */
-export function checkFrames(frames: ServerMsg[]) {
+export function checkFrames(frames: ServerMsg[], kind?: MatchKind) {
   const passed = new Set<ServerMsg['t']>()
   for (const f of frames) {
-    checkFrame(f)
+    checkFrame(f, kind)
     passed.add(f.t)
   }
   return passed
@@ -326,4 +387,8 @@ export const FLOW_TYPES = {
     'rating',
     'rematch_state',
   ],
+  /** six.test.ts: six-casual hands at six seats and at seats 0, 2, 5. */
+  six: ['welcome', 'state', 'hand_start', 'hand_end', 'reveal'],
+  /** six.test.ts: seven accounts sit at one six table, seatless ones too. */
+  sit: ['welcome', 'state', 'hand_start', 'error'],
 } satisfies Record<string, ServerMsg['t'][]>
