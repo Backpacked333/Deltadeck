@@ -12,7 +12,9 @@ import {
 } from '../../src/engine/deck'
 import { act, assertInvariants, isOver, startHand } from '../../src/engine/hand'
 import { luckAdjusted } from '../../src/engine/luck'
+import type { Blinds } from '../../src/engine/positions'
 import { seatView } from '../../src/engine/redact'
+import { buyIn } from '../../src/engine/stacks'
 import type { RevealedSlot } from '../../src/engine/deck'
 import { EngineError } from '../../src/engine/types'
 import type { HandState, SeatId } from '../../src/engine/types'
@@ -35,11 +37,12 @@ import type {
   RatingChange,
   RematchState,
   Reveal,
+  SeatStatus,
   ServerMsg,
 } from '../../src/shared/protocol'
 import { now } from './clock'
-import { LocalController } from './controller'
-import type { TableController } from './controller'
+import { CashController, LocalController } from './controller'
+import type { Roster, TableController } from './controller'
 import {
   bankAfter,
   earliest,
@@ -64,13 +67,26 @@ import { applyRating } from './rating'
 import type { RateCall } from './rating'
 import type { HandMessage } from './verify'
 
-export const DEFAULT_CONFIG: MatchConfig = {
+export const DEFAULT_CONFIG: MatchConfig & { handsTotal: number } = {
   kind: 'hu-casual',
   handsTotal: 20,
   startingStack: 2000,
   blinds: { sb: 10, bb: 20 },
   decisionMs: 20_000,
   bankMs: 60_000,
+}
+/**
+ * Casual 6-max (ADR amendment 2026-10-10, Phase 2): six seats, a 100 bb
+ * buy-in at 10/20, 20 s per decision and a 30 s bank. No length: the table
+ * deals while two players can be dealt in.
+ */
+export const SIX_CONFIG: MatchConfig = {
+  kind: 'six-casual',
+  maxSeats: 6,
+  startingStack: buyIn(DEFAULT_CONFIG.blinds.bb),
+  blinds: { ...DEFAULT_CONFIG.blinds },
+  decisionMs: 20_000,
+  bankMs: 30_000,
 }
 /** Pause after a hand so both players see the result. */
 export const NEXT_HAND_MS = 3000
@@ -95,7 +111,17 @@ type Player = {
    * and a turn that began while they were away costs no bank.
    */
   awaySince?: number
+  /**
+   * Six-casual: chips as of the last deal they were dealt into (or the
+   * buy-in until then). The hand in play holds the live stack.
+   */
+  stack?: number
+  status?: SeatStatus
+  /** Six-casual: sat down since the last deal (dealt in without posting). */
+  justSat?: boolean
 }
+/** One seat of a hand and the account dealt into it, fixed at the deal. */
+type Dealt = { seat: SeatId; userId: string; username: string }
 type Match = {
   v: 1
   id: string
@@ -103,8 +129,23 @@ type Match = {
   status: 'waiting' | 'playing' | 'finished'
   players: Player[]
   handNo: number
-  /** Running result per seat over the match. */
+  /** Running result per seat over the match (heads-up). */
   net: Record<SeatId, number>
+  /** Six-casual: running result per account, since seats change hands. */
+  netByUser?: Record<string, number>
+  /**
+   * Six-casual: the last deal's blinds, whole (the small blind's seat even
+   * when it was dead), for the next deal; null before the first.
+   */
+  blinds?: Blinds | null
+  /**
+   * Six-casual: who was dealt into hand `handNo`, fixed at its deal. Every
+   * frame and archive call about that hand reads this, never `players`, so
+   * whoever sits in a seat later gets nothing of the hand.
+   */
+  dealt?: Dealt[]
+  /** Six-casual: the hand whose final stacks are in `players`. */
+  settled?: number
   endReason?: MatchEndReason
   forfeit?: SeatId
   noShow?: SeatId[]
@@ -141,15 +182,19 @@ type Current = {
 }
 /**
  * The last finished hand, re-sent to anyone who (re)joins before the next.
- * `own` holds each seat's opening of its own hole slots; a seat only ever
- * receives its own.
+ * `own` holds the opening of each dealt account's own hole slots, keyed by
+ * account; an account only ever receives its own.
  */
 type Ended = {
   record: HandRecordV1
   reveal: Reveal
-  own?: Record<SeatId, RevealedSlot[]>
+  own?: Record<string, RevealedSlot[]>
 }
-type Attachment = { userId: string; seat: SeatId }
+/**
+ * A socket knows only its account. Its seat, in the hand on the table or at
+ * the table, is looked up for every frame (Dealt, Match.players).
+ */
+type Attachment = { userId: string; username: string }
 type Ack = { reqId: string; seq: number }
 /**
  * A queued call: an archive function, or a hand for the verify queue. Hands
@@ -200,17 +245,20 @@ export class TableDO extends DurableObject<WorkerEnv> {
   private ended: Ended | null = null
   private deadlines: Deadline[] = []
   private seq = 0
-  private lastAck: Record<SeatId, Ack> = {}
+  /** The last applied move per account. */
+  private lastAck: Record<string, Ack> = {}
   private flushing = false
   /** A call was queued while a flush was under way: that flush goes again. */
   private flushAgain = false
   controller: TableController = new LocalController()
+  /** Six-casual tables deal from their roster (tests replace it). */
+  sixController: TableController = new CashController()
   /** The table's clock; tests move it instead of waiting. */
   clock: () => number = now
   /** Frames and connects that do not move the game, per account. */
   private budget = new FrameBudget(() => this.clock())
-  /** Illegal frames per seat in the current hand. */
-  private illegalCount = new Map<SeatId, { handNo: number; n: number }>()
+  /** Illegal frames per account in the current hand. */
+  private illegalCount = new Map<string, { handNo: number; n: number }>()
 
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env)
@@ -234,7 +282,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
       this.ended = (stored.get('ended') as Ended | undefined) ?? null
       this.deadlines = (stored.get('deadlines') as Deadline[]) ?? []
       this.seq = (stored.get('seq') as number | undefined) ?? 0
-      this.lastAck = (stored.get('lastAck') as Record<SeatId, Ack>) ?? {}
+      this.lastAck = (stored.get('lastAck') as Record<string, Ack>) ?? {}
     })
   }
 
@@ -255,6 +303,10 @@ export class TableDO extends DurableObject<WorkerEnv> {
 
   private async init(body: InitBody) {
     if (this.match) return json({ error: 'exists' }, 409)
+    // A six table starts empty and has no start deadline: a paired
+    // opponent or one would make a Player without a stack or status.
+    if (body.kind === 'six-casual' && (body.opponent || body.startWithinMs))
+      return json({ error: 'six tables start empty' }, 400)
     const handsTotal =
       Number.isInteger(body.handsTotal) &&
       body.handsTotal! >= 1 &&
@@ -262,9 +314,12 @@ export class TableDO extends DurableObject<WorkerEnv> {
         ? body.handsTotal!
         : DEFAULT_CONFIG.handsTotal
     const rated = body.kind === 'hu-rated'
+    const six = body.kind === 'six-casual'
     const config = rated
       ? { ...RATED_CONFIG }
-      : { ...DEFAULT_CONFIG, handsTotal }
+      : six
+        ? { ...SIX_CONFIG }
+        : { ...DEFAULT_CONFIG, handsTotal }
     this.match = {
       v: 1,
       id: body.matchId,
@@ -272,18 +327,21 @@ export class TableDO extends DurableObject<WorkerEnv> {
       status: 'waiting',
       players: [],
       handNo: 0,
-      net: { 0: 0, 1: 0 },
+      net: six ? {} : { 0: 0, 1: 0 },
+      ...(six ? { netByUser: {}, blinds: null } : {}),
       ...(rated ? { adjusted: { 0: 0, 1: 0 }, adjustedThrough: 0 } : {}),
       ...(rated && body.rematchOf ? { rematchOf: body.rematchOf } : {}),
     }
-    this.match.players.push(this.newPlayer(0, body.creator))
+    // A six table starts empty: everyone, its creator too, takes a seat
+    // with `sit`.
+    if (!six) this.match.players.push(this.newPlayer(0, body.creator))
     if (body.opponent) this.match.players.push(this.newPlayer(1, body.opponent))
     // A paired table must start soon; an invite waits for its friend, but
-    // not forever.
+    // not forever; a six table nobody sits at closes like a finished one.
     this.deadlines = [
       body.startWithinMs
         ? { kind: 'start', at: this.clock() + body.startWithinMs }
-        : { kind: 'idle', at: this.clock() + INVITE_TTL_MS },
+        : { kind: 'idle', at: this.clock() + (six ? IDLE_MS : INVITE_TTL_MS) },
     ]
     await this.ctx.storage.put({
       match: this.match,
@@ -299,6 +357,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const match = this.match
     if (!match || match.status === 'finished') return 'over'
     if (match.status === 'playing') return 'playing'
+    // Two seated at a six table are already playing; until the lobby asks
+    // per account (PR-12), a six table between hands holds nobody.
+    if (match.config.kind === 'six-casual') return 'open'
     return match.players.length === 2 ? 'starting' : 'open'
   }
 
@@ -323,8 +384,10 @@ export class TableDO extends DurableObject<WorkerEnv> {
       })
       return this.refuse(CLOSE_RATE_LIMITED, 'Too many connections')
     }
+    const six = match.config.kind === 'six-casual'
     let player = match.players.find((p) => p.userId === userId)
-    if (!player) {
+    // At a six table a socket starts without a seat, and sits with `sit`.
+    if (!player && !six) {
       // Invite link: the first other account to open it takes the empty seat.
       if (match.status !== 'waiting' || match.players.length >= 2)
         return json({ error: 'table full' }, 403)
@@ -345,24 +408,35 @@ export class TableDO extends DurableObject<WorkerEnv> {
         await this.ctx.storage.put('match', match)
       }
     }
-    await this.back(player)
+    if (player) await this.back(player)
     // One socket per account: a second tab replaces the first.
     for (const old of this.ctx.getWebSockets(userId))
       old.close(4001, 'replaced')
     const pair = new WebSocketPair()
     const [client, server] = [pair[0], pair[1]]
     this.ctx.acceptWebSocket(server, [userId])
-    server.serializeAttachment({
-      userId,
-      seat: player.seat,
-    } satisfies Attachment)
-    this.send(server, this.frame('welcome', player.seat))
+    server.serializeAttachment({ userId, username } satisfies Attachment)
+    this.send(server, this.frame('welcome', userId))
     this.sendEnded(server)
     this.sendMatchEnd(server)
-    if (match.status === 'waiting' && this.seated(0) && this.seated(1)) {
+    if (
+      !six &&
+      match.status === 'waiting' &&
+      match.players.length === 2 &&
+      match.players.every((p) => this.connected(p.userId))
+    ) {
       match.status = 'playing'
       await this.startNextHand()
-    } else this.broadcast('state', { skip: server })
+    } else if (
+      six &&
+      player &&
+      match.status === 'waiting' &&
+      match.players.length >= 2
+    ) {
+      // A seated player back at a waiting six table: deal if two are here.
+      match.status = 'playing'
+      await this.startNextHand()
+    } else if (player) this.broadcast('state', { skip: server })
     return new Response(null, {
       status: 101,
       webSocket: client,
@@ -390,7 +464,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     // Frames still in flight from a socket we already closed do nothing.
     if (ws.readyState !== OPEN || !this.match) return
-    const { seat, userId } = ws.deserializeAttachment() as Attachment
+    const { userId } = ws.deserializeAttachment() as Attachment
     if (!this.budget.spend(userId))
       return this.cutOff(
         ws,
@@ -404,18 +478,22 @@ export class TableDO extends DurableObject<WorkerEnv> {
     if (size > MAX_FRAME)
       return this.cutOff(ws, CLOSE_ABUSE, 'too_large', 'Message too large')
     const msg = typeof message === 'string' ? parseClientMsg(message) : null
-    if (!msg) return this.illegal(ws, seat, 'Malformed message')
+    if (!msg) return this.illegal(ws, userId, 'Malformed message')
     if (msg.t === 'resync') {
-      this.send(ws, this.frame('welcome', seat))
+      this.send(ws, this.frame('welcome', userId))
       this.sendEnded(ws)
       return this.sendMatchEnd(ws)
     }
-    if (msg.t === 'rematch') return this.pressRematch(ws, seat)
-    if (msg.t !== 'act') return this.illegal(ws, seat, 'Not a table message')
+    if (msg.t === 'rematch') return this.pressRematch(ws, userId)
+    if (msg.t === 'sit') return this.sit(ws, msg.seat)
+    if (msg.t !== 'act') return this.illegal(ws, userId, 'Not a table message')
+    // Nobody without a seat acts, and the reply carries no hand.
+    if (!this.atTable(userId))
+      return this.reject(ws, 'not_your_turn', 'Take a seat to play', msg.reqId)
 
     // A retry of the action we already applied: acknowledge it again.
-    if (this.lastAck[seat]?.reqId === msg.reqId)
-      return this.send(ws, this.frame('state', seat))
+    if (this.ackOf(userId)?.reqId === msg.reqId)
+      return this.send(ws, this.frame('state', userId))
     const hand = this.hand
     if (
       !hand ||
@@ -425,22 +503,67 @@ export class TableDO extends DurableObject<WorkerEnv> {
       msg.actionIndex !== hand.actions.length
     ) {
       this.reject(ws, 'stale', 'That decision has passed', msg.reqId)
-      return this.send(ws, this.frame('state', seat))
+      return this.send(ws, this.frame('state', userId))
     }
-    if (hand.toAct !== seat)
+    // The seat this account was dealt into in this hand, if any.
+    const seat = this.handSeat(userId)
+    if (seat === null || hand.toAct !== seat)
       return this.reject(ws, 'not_your_turn', 'Wait for your turn', msg.reqId)
     let next: HandState
     try {
       next = act(hand, seat, msg.action)
     } catch (error) {
       if (error instanceof EngineError)
-        return this.illegal(ws, seat, error.message, msg.reqId)
+        return this.illegal(ws, userId, error.message, msg.reqId)
       throw error
     }
     await this.applyAction(seat, next, 'client', msg.reqId)
     // A move the table applied is play, not noise: it costs nothing. Moves
     // are paced by the opponent, so they cannot flood.
     this.budget.refund(userId)
+  }
+
+  /**
+   * A six-table socket takes `wanted`, or the lowest free seat, with a
+   * buy-in of 100 bb. Who sits is the socket's account (from its token); a
+   * seat taken during a hand is dealt in from the next one (R-20). With two
+   * or more seated and no hand under way, the next hand deals now.
+   */
+  private async sit(ws: WebSocket, wanted?: SeatId) {
+    const match = this.match!
+    const { userId, username } = ws.deserializeAttachment() as Attachment
+    if (match.config.kind !== 'six-casual' || match.status === 'finished')
+      return this.illegal(ws, userId, 'There is no seat to take here')
+    // Already seated: nothing changes, and the welcome says where.
+    if (this.atTable(userId))
+      return this.send(ws, this.frame('welcome', userId))
+    const seats = Array.from(
+      { length: match.config.maxSeats ?? 6 },
+      (_, i) => i,
+    )
+    const free = seats.filter((s) => !match.players.some((p) => p.seat === s))
+    if (!free.length)
+      return this.reject(ws, 'table_full', 'Every seat is taken')
+    if (wanted !== undefined && !seats.includes(wanted))
+      return this.illegal(ws, userId, 'There is no such seat')
+    if (wanted !== undefined && !free.includes(wanted))
+      return this.reject(ws, 'seat_taken', 'That seat is taken')
+    const player: Player = {
+      ...this.newPlayer(wanted ?? free[0], { userId, username }),
+      // The buy-in is the server's: the frame carries no amount.
+      stack: match.config.startingStack,
+      status: 'playing',
+      justSat: true,
+    }
+    match.players = [...match.players, player].sort((a, b) => a.seat - b.seat)
+    this.seq++
+    await this.ctx.storage.put({ match, seq: this.seq })
+    this.send(ws, this.frame('welcome', userId))
+    this.broadcast('state', { skip: ws, roster: true })
+    if (match.status === 'waiting' && match.players.length >= 2) {
+      match.status = 'playing'
+      await this.startNextHand()
+    }
   }
 
   /** Tells the socket why, then closes it; the seat may reconnect. */
@@ -468,15 +591,16 @@ export class TableDO extends DurableObject<WorkerEnv> {
    */
   private illegal(
     ws: WebSocket,
-    seat: SeatId,
+    userId: string,
     message: string,
     reqId?: string,
   ) {
     this.reject(ws, 'illegal', message, reqId)
     const handNo = this.hand?.config.handNo ?? 0
-    const seen = this.illegalCount.get(seat)
+    // Per account: whoever sits in the seat next starts from nothing.
+    const seen = this.illegalCount.get(userId)
     const n = seen?.handNo === handNo ? seen.n + 1 : 1
-    this.illegalCount.set(seat, { handNo, n })
+    this.illegalCount.set(userId, { handNo, n })
     if (n > ILLEGAL_PER_HAND) {
       ws.close(CLOSE_ABUSE, 'Too many illegal messages')
       this.limitHit(ws, CLOSE_ABUSE, 'illegal')
@@ -506,10 +630,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
     this.broadcast('state', { gone: ws })
     const match = this.match
     if (!match?.adjusted || match.status !== 'playing') return
-    const { seat } = ws.deserializeAttachment() as Attachment
-    const player = match.players.find((p) => p.seat === seat)
-    if (!player || player.awaySince !== undefined || this.seated(seat, ws))
+    const { userId } = ws.deserializeAttachment() as Attachment
+    const player = match.players.find((p) => p.userId === userId)
+    if (!player || player.awaySince !== undefined || this.connected(userId, ws))
       return
+    const seat = player.seat
     if (this.deadlines.some((d) => d.kind === 'grace' && d.seat === seat))
       return
     this.deadlines.push({ kind: 'grace', at: this.clock() + GRACE_MS, seat })
@@ -552,7 +677,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
       (p) =>
         seats.includes(p.seat) &&
         p.awaySince === undefined &&
-        !this.seated(p.seat),
+        !this.connected(p.userId),
     )
     if (!leaving.length) return
     for (const p of leaving) p.awaySince = this.clock()
@@ -663,7 +788,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const current = this.current!
     const t = this.clock()
     const took = t - current.turnStartedAt
-    const player = match.players.find((p) => p.seat === seat)!
+    const player = this.playerIn(seat)!
     // A turn that began while the seat was away was due at once: however
     // late the alarm ran, it costs no bank.
     const awayTurn =
@@ -681,7 +806,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     current.turnStartedAt = t
     this.hand = next
     this.seq++
-    if (reqId) this.lastAck[seat] = { reqId, seq: this.seq }
+    if (reqId) this.lastAck[player.userId] = { reqId, seq: this.seq }
 
     const writes: Record<string, unknown> = {
       match,
@@ -690,10 +815,12 @@ export class TableDO extends DurableObject<WorkerEnv> {
       seq: this.seq,
       lastAck: this.lastAck,
     }
-    const forfeit = player.timeouts >= FORFEIT_TIMEOUTS
+    // A six table never ends for one player's timeouts; sitting them out
+    // after two is P2-04's (PR-16).
+    const forfeit =
+      match.config.kind !== 'six-casual' && player.timeouts >= FORFEIT_TIMEOUTS
     if (isOver(next)) {
-      for (const [s, net] of Object.entries(next.result!.netBySeat))
-        match.net[Number(s)] += net
+      this.addNet(next)
       this.logHandEnd(next, t - current.startedAt)
       this.ended = await this.endOfHand(next, current, writes)
       writes.ended = this.ended
@@ -719,11 +846,34 @@ export class TableDO extends DurableObject<WorkerEnv> {
 
   private async startNextHandNow() {
     const match = this.match!
+    const six = match.config.kind === 'six-casual'
     await this.settleLuck()
-    const plan = this.controller.nextHandPlan(match.handNo + 1, match.config)
-    if (!plan) return this.finish('complete')
+    if (six) this.settleStacks()
+    // A six table deals only to people who are there: with fewer than two
+    // funded, connected players it waits, and a reconnect or a sit deals
+    // again (the 60 s grace and sitting out come with PR-16/17).
+    if (
+      six &&
+      match.players.filter(
+        (p) =>
+          p.stack! > 0 && p.status === 'playing' && this.connected(p.userId),
+      ).length < 2
+    )
+      return this.waitForPlayers()
+    const plan = six
+      ? this.sixController.nextHandPlan(
+          match.handNo + 1,
+          match.config,
+          this.roster(),
+        )
+      : this.controller.nextHandPlan(match.handNo + 1, match.config)
+    if (!plan) return six ? this.waitForPlayers() : this.finish('complete')
     let hand: HandState
     try {
+      // A six hand's frames and archive read who was dealt in from its
+      // plan; a plan without them cannot be dealt safely.
+      if (six && (!plan.blinds || !plan.users))
+        throw new Error('A six-casual plan names its blinds and players')
       hand = startHand(plan.config, plan.deck)
     } catch (error) {
       // A plan the engine refuses (a bad stored deck, in Phase 1): halt the
@@ -738,6 +888,16 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const { commitment } = await commitDeck(plan.deck, plan.secret)
     const t = this.clock()
     match.handNo = plan.config.handNo
+    if (six) {
+      match.blinds = plan.blinds!
+      match.dealt = plan.users!.map(({ seat, userId }) => ({
+        seat,
+        userId,
+        username: match.players.find((p) => p.userId === userId)!.username,
+      }))
+      for (const p of match.players)
+        if (match.dealt.some((d) => d.userId === p.userId)) p.justSat = false
+    }
     // Rated: each half of the match has its own bank; what is left of the
     // last one does not carry over.
     const every = match.config.bankRefillEvery
@@ -770,18 +930,30 @@ export class TableDO extends DurableObject<WorkerEnv> {
     this.expectArchive(writes)
     await this.ctx.storage.put(writes)
     await this.armAlarm()
-    // The commitment goes out before any frame carries a card of this hand.
+    // The commitment goes out before any frame carries a card of this hand,
+    // to everyone with a seat; a socket without one hears of no hand.
     for (const ws of this.openSockets())
-      this.send(ws, {
-        t: 'hand_start',
-        seq: this.seq,
-        matchId: match.id,
-        handNo: match.handNo,
-        commitment,
-        button: hand.config.button,
-        blinds: hand.config.blinds,
-        stacks: hand.players.map((p) => p.stack),
-      })
+      if (this.atTable(this.userOf(ws)))
+        this.send(ws, {
+          t: 'hand_start',
+          seq: this.seq,
+          matchId: match.id,
+          handNo: match.handNo,
+          commitment,
+          button: hand.config.button,
+          blinds: hand.config.blinds,
+          stacks: hand.players.map((p) => p.stack),
+          ...(six
+            ? {
+                seats: hand.players.map((p) => ({
+                  seat: p.seat,
+                  stack: p.stack,
+                })),
+                sb: hand.config.sb ?? null,
+                bb: hand.config.bb,
+              }
+            : {}),
+        })
     this.broadcast('state')
     if (match.handNo === 1)
       logEvent('match_start', {
@@ -796,8 +968,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
   /** Settles a hand the blinds alone finished, through the normal end path. */
   private async applyEndAtDeal(hand: HandState) {
     const match = this.match!
-    for (const [s, net] of Object.entries(hand.result!.netBySeat))
-      match.net[Number(s)] += net
+    this.addNet(hand)
     this.logHandEnd(hand, 0)
     const writes: Record<string, unknown> = { match }
     this.ended = await this.endOfHand(hand, this.current!, writes)
@@ -845,7 +1016,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
       handNo: match.handNo,
       segment: 1,
       config: hand.config,
-      seats: match.players.map(({ seat, userId, username }) => ({
+      // The accounts dealt into this hand, by its own map.
+      seats: this.dealtUsers().map(({ seat, userId, username }) => ({
         seat,
         userId,
         username,
@@ -870,14 +1042,17 @@ export class TableDO extends DurableObject<WorkerEnv> {
       slots,
     }
     const holeSlots = dealSlots(hand.config).holes
-    const own: Record<SeatId, RevealedSlot[]> = {}
+    const userOf = (seat: SeatId) => this.userIn(seat)!
+    const own: Record<string, RevealedSlot[]> = {}
     for (const p of hand.players)
-      own[p.seat] = await revealSlots(stored.deck, secret, holeSlots[p.seat])
+      own[userOf(p.seat)] = await revealSlots(
+        stored.deck,
+        secret,
+        holeSlots[p.seat],
+      )
     if (this.recordable()) {
       // A rated hand's record waits for its luck (settleLuck).
       const key = match.adjusted ? heldKey : outboxKey
-      const userOf = (seat: SeatId) =>
-        match.players.find((p) => p.seat === seat)!.userId
       const holes = Object.fromEntries(
         hand.players.map((p) => [
           p.seat,
@@ -969,7 +1144,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
   /** The turn deadline: the decision clock and bank, or now for an away seat. */
   private turnFor(hand: HandState, startedAt: number) {
     const match = this.match!
-    const player = match.players.find((p) => p.seat === hand.toAct)
+    const player = hand.toAct === null ? undefined : this.playerIn(hand.toAct)
     return player?.awaySince !== undefined
       ? turnDeadline(hand, startedAt, 0, 0)
       : turnDeadline(
@@ -981,7 +1156,72 @@ export class TableDO extends DurableObject<WorkerEnv> {
   }
 
   private bankOf(hand: HandState) {
-    return this.match!.players.find((p) => p.seat === hand.toAct)?.bankMs ?? 0
+    return hand.toAct === null ? 0 : (this.playerIn(hand.toAct)?.bankMs ?? 0)
+  }
+
+  // ---- Six-casual seats and stacks -------------------------------------------
+
+  /** What the six-casual controller deals from: seats, stacks, blinds. */
+  private roster(): Roster {
+    const match = this.match!
+    return {
+      seats: match.players.map((p) => ({
+        seat: p.seat,
+        userId: p.userId,
+        stack: p.stack!,
+        status: p.status!,
+        justSat: !!p.justSat,
+      })),
+      blinds: match.blinds ?? null,
+    }
+  }
+
+  /**
+   * Six-casual: the finished hand's final stacks go back to the accounts
+   * dealt into it, as the next hand is dealt (so a table summary shows
+   * stacks as of the last deal). Once per hand: a stack is set, not added.
+   */
+  private settleStacks() {
+    const match = this.match!
+    const hand = this.hand
+    if (!hand || !isOver(hand) || (match.settled ?? 0) >= hand.config.handNo)
+      return
+    for (const p of hand.players) {
+      const player = this.playerIn(p.seat)
+      if (player) player.stack = p.stack
+    }
+    match.settled = hand.config.handNo
+  }
+
+  /** A finished hand's net: per seat heads-up, per account at a six table. */
+  private addNet(hand: HandState) {
+    const match = this.match!
+    for (const [s, net] of Object.entries(hand.result!.netBySeat)) {
+      if (!match.netByUser) {
+        match.net[Number(s)] += net
+        continue
+      }
+      const userId = this.userIn(Number(s))!
+      match.netByUser[userId] = (match.netByUser[userId] ?? 0) + net
+    }
+  }
+
+  /**
+   * Six-casual: fewer than two players can be dealt in. Play waits, the
+   * stacks just settled are kept, and the next sit deals again.
+   */
+  private async waitForPlayers() {
+    const match = this.match!
+    match.status = 'waiting'
+    this.setGameDeadline(null)
+    this.seq++
+    await this.ctx.storage.put({
+      match,
+      seq: this.seq,
+      deadlines: this.deadlines,
+    })
+    await this.armAlarm()
+    this.broadcast('state', { roster: true })
   }
 
   /**
@@ -1064,6 +1304,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
    * again later. True when the table is gone.
    */
   private async idle() {
+    // A six table stays while anyone sits at it, and looks again later.
+    if (this.match?.config.kind === 'six-casual' && this.match.players.length) {
+      this.deadlines.push({ kind: 'idle', at: this.clock() + IDLE_MS })
+      return false
+    }
     if (this.match?.status === 'playing') return false
     const pending = await this.ctx.storage.list({ prefix: 'outbox:', limit: 1 })
     if (pending.size) {
@@ -1090,9 +1335,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
 
   /** A paired table not everyone opened in time. */
   private noShow() {
-    const absent = this.match!.players.map((p) => p.seat).filter(
-      (seat) => !this.seated(seat),
-    )
+    const absent = this.match!.players.filter(
+      (p) => !this.connected(p.userId),
+    ).map((p) => p.seat)
     return this.finish('no_show', undefined, absent)
   }
 
@@ -1204,14 +1449,15 @@ export class TableDO extends DurableObject<WorkerEnv> {
   }
 
   /** Both press within REMATCH_MS and the lobby starts a new rated table. */
-  private async pressRematch(ws: WebSocket, seat: SeatId) {
+  private async pressRematch(ws: WebSocket, userId: string) {
     const match = this.match!
+    const seat = match.players.find((p) => p.userId === userId)?.seat
     // Finished with a result but no offer yet (on its way, or lost to a
     // restart after the result was stored): make it now.
     if (match.outcome && !match.rematch) await this.offerRematch()
     const offer = match.rematch
-    if (!offer)
-      return this.illegal(ws, seat, 'There is no rematch at this table')
+    if (!offer || seat === undefined)
+      return this.illegal(ws, userId, 'There is no rematch at this table')
     // The minute is over, even if its alarm has not run yet.
     if (
       offer.state === 'waiting' &&
@@ -1376,8 +1622,12 @@ export class TableDO extends DurableObject<WorkerEnv> {
         ...(match.status === 'finished'
           ? {
               handNo: match.handNo,
+              // Six tables count timeouts per account (record_match v6).
               timeouts: Object.fromEntries(
-                match.players.map((p) => [p.seat, p.timeouts]),
+                match.players.map((p) => [
+                  match.config.kind === 'six-casual' ? p.userId : p.seat,
+                  p.timeouts,
+                ]),
               ),
               result: this.result(),
             }
@@ -1566,54 +1816,128 @@ export class TableDO extends DurableObject<WorkerEnv> {
       .filter((ws) => ws !== exclude && ws.readyState === OPEN)
   }
 
-  private seated(seat: SeatId, exclude?: WebSocket) {
-    return this.openSockets(exclude).some(
-      (ws) => (ws.deserializeAttachment() as Attachment).seat === seat,
+  private userOf(ws: WebSocket) {
+    return (ws.deserializeAttachment() as Attachment).userId
+  }
+
+  /** Whether `userId` has a socket open (other than `exclude`). */
+  /**
+   * The last ack for `userId`. Heads-up objects stored before acks were
+   * keyed by account kept them by seat; a retry across that deploy still
+   * finds its ack (a six table never stored one by seat).
+   */
+  private ackOf(userId: string): Ack | undefined {
+    return (
+      this.lastAck[userId] ??
+      (this.match?.config.kind === 'six-casual'
+        ? undefined
+        : this.lastAck[String(this.seatOfUser(userId))])
     )
   }
 
+  private seatOfUser(userId: string) {
+    return this.match?.players.find((p) => p.userId === userId)?.seat
+  }
+
+  private connected(userId: string, exclude?: WebSocket) {
+    return this.openSockets(exclude).some((ws) => this.userOf(ws) === userId)
+  }
+
+  /** Whether `userId` has a seat at the table now (heads-up: a player). */
+  private atTable(userId: string) {
+    return this.match!.players.some((p) => p.userId === userId)
+  }
+
+  /**
+   * Who was dealt into the hand on the table, seat by seat. Heads-up
+   * players never change seats, so the players are that map.
+   */
+  private dealtUsers(): Dealt[] {
+    const match = this.match!
+    if (match.dealt) return match.dealt
+    if (match.config.kind === 'six-casual') return []
+    return match.players.map(({ seat, userId, username }) => ({
+      seat,
+      userId,
+      username,
+    }))
+  }
+
+  /** The account dealt into `seat` in the hand on the table. */
+  private userIn(seat: SeatId) {
+    return this.dealtUsers().find((d) => d.seat === seat)?.userId
+  }
+
+  /** The player dealt into `seat` in the hand on the table. */
+  private playerIn(seat: SeatId) {
+    const userId = this.userIn(seat)
+    return this.match!.players.find((p) => p.userId === userId)
+  }
+
+  /** The seat `userId` was dealt into in the hand on the table, or null. */
+  private handSeat(userId: string): SeatId | null {
+    return this.dealtUsers().find((d) => d.userId === userId)?.seat ?? null
+  }
+
+  /**
+   * The table as `userId` may see it. A socket without a seat gets the
+   * summary only, never a view of the hand. A seated account gets the hand
+   * as the seat it was dealt into in that hand, by the hand's own map, or
+   * as nobody's seat when it was not dealt in: no hole card but shown ones,
+   * no moves.
+   */
   private frame(
     kind: 'welcome' | 'state',
-    seat: SeatId,
+    userId: string,
     exclude?: WebSocket,
   ): ServerMsg {
     const match = this.match!
+    const six = match.config.kind === 'six-casual'
     const table: MatchInfo = {
       kind: match.config.kind,
       status: match.status,
-      handsTotal: match.config.handsTotal,
+      ...(match.config.handsTotal !== undefined
+        ? { handsTotal: match.config.handsTotal }
+        : {}),
       players: match.players.map((p) => ({
         seat: p.seat,
         username: p.username,
-        connected: this.seated(p.seat, exclude),
+        connected: this.connected(p.userId, exclude),
         consecutiveTimeouts: p.timeouts,
+        ...(six ? { stack: p.stack!, status: p.status! } : {}),
       })),
     }
     const turn = this.deadlines.find((d) => isCurrentTurn(d, this.hand))
-    const view = this.hand
-      ? seatView(this.hand, seat, {
-          matchId: match.id,
-          match: table,
-          clock:
-            turn && match.status === 'playing'
-              ? { deadline: turn.at, bankMs: this.bankOf(this.hand) }
-              : null,
-          lastReqId: this.lastAck[seat]?.reqId ?? null,
-          commitment: this.current?.commitment ?? null,
-        })
-      : null
+    const seat = match.players.find((p) => p.userId === userId)?.seat ?? null
+    const view =
+      this.hand && seat !== null
+        ? seatView(this.hand, this.handSeat(userId), {
+            matchId: match.id,
+            match: table,
+            clock:
+              turn && match.status === 'playing'
+                ? { deadline: turn.at, bankMs: this.bankOf(this.hand) }
+                : null,
+            lastReqId: this.ackOf(userId)?.reqId ?? null,
+            commitment: this.current?.commitment ?? null,
+          })
+        : null
     const base = { seq: this.seq, matchId: match.id, serverNow: this.clock() }
     return kind === 'welcome'
       ? { ...base, t: 'welcome', seat, table, view }
       : { ...base, t: 'state', table, view }
   }
 
-  /** The finished hand's record and reveal, while it is still on the table. */
+  /**
+   * The finished hand's record and reveal, while it is still on the table,
+   * for a seated account; `own` only to an account dealt into that hand.
+   */
   private sendEnded(ws: WebSocket) {
     const ended = this.ended
     if (!ended || !this.hand || ended.record.handNo !== this.hand.config.handNo)
       return
-    const { seat } = ws.deserializeAttachment() as Attachment
+    const userId = this.userOf(ws)
+    if (!this.atTable(userId)) return
     const base = { seq: this.seq, matchId: ended.record.matchId }
     this.send(ws, {
       ...base,
@@ -1621,7 +1945,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
       handNo: ended.record.handNo,
       record: ended.record,
     })
-    const own = ended.own?.[seat]
+    const own =
+      ended.own?.[userId] ??
+      (this.match?.config.kind === 'six-casual'
+        ? undefined
+        : ended.own?.[String(this.seatOfUser(userId))])
     this.send(ws, {
       ...base,
       t: 'reveal',
@@ -1633,16 +1961,23 @@ export class TableDO extends DurableObject<WorkerEnv> {
   /**
    * `gone` is a socket that is closing: offline, and not sent to. `skip`
    * already has its frame (a fresh welcome) but still counts as connected.
+   * Sockets without a seat get only `roster` changes (someone sat down),
+   * and then without a view: never a hand's moves.
    */
   private broadcast(
     kind: 'state',
-    { gone, skip }: { gone?: WebSocket; skip?: WebSocket } = {},
+    {
+      gone,
+      skip,
+      roster = false,
+    }: { gone?: WebSocket; skip?: WebSocket; roster?: boolean } = {},
   ) {
     if (!this.match) return
     for (const ws of this.openSockets(gone)) {
       if (ws === skip) continue
-      const { seat } = ws.deserializeAttachment() as Attachment
-      this.send(ws, this.frame(kind, seat, gone))
+      const userId = this.userOf(ws)
+      if (!roster && !this.atTable(userId)) continue
+      this.send(ws, this.frame(kind, userId, gone))
     }
   }
 

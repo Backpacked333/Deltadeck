@@ -400,6 +400,21 @@ Risks:
   - `rotation keeps seats and stacks and starts a new matches row`
   - `deck keys do not accumulate`
 - **Risk:** stacks and seats must survive the rotation. It also interacts with `hands_after_match`.
+- **Contracts from PR-09's migration** (`20261010130000_six_casual.sql`):
+  - `record_match` reads six-casual `timeouts` keyed by **userId** (session totals). `table.ts` sends them keyed by seat today, so PR-13 must switch the key for six tables, or every timeout is stored as 0.
+  - Before the first six session is archived, the public review page (`src/net/publicMatch.ts`, `src/net/MatchReview.tsx`) must name players from each hand's `record.seats`, not `match_players.seat`. `(match_id, seat)` is no longer unique, so a six review would show the wrong names. This lands as its own small PR before PR-13.
+
+- **Left by PR-11's review** (`worker/src/table.ts` at PR-11):
+  - PR-12: a player who stands mid-hand must stay in `match.players` until that hand ends. `playerIn(seat)` reads the dealt account from there, and `applyActionNow`'s `player!` would otherwise throw inside `blockConcurrencyWhile` and reset the Durable Object.
+  - PR-13: `setGameDeadline` drops `idle` deadlines, so a six table that falls back to `waiting` after its first deal has no idle deadline. Re-arm it in `waitForPlayers`.
+  - PR-13: a six table that finishes (only `engine_fault` today) sends `match_end` to sockets without a seat too; six sessions send no `match_end` (ADR "Table and session"). Gate it with the session work.
+
+- **Exposure gate (Devin, #44):** nothing may create a six table from outside (PR-24's route and quick-sit) until these have landed:
+  - PR-12: lobby claims, so one account cannot sit at two tables (Devin's security finding);
+  - PR-16: busted or sitting-out players are stood up after 3 orbits or 5 minutes without a dealt hand, so busted occupants cannot fill a table for good;
+  - PR-14 rebuy, or its ADR cut line (automatic top-up).
+
+  Until then six tables exist only through the table's own `/init`, which no route calls.
 
 **PR-14 · P2-03f rebuy (cut line)**
 
@@ -445,8 +460,8 @@ Risks:
 
 **PR-18 · P2-05a ring layout and `SeatPlate`**
 
-- **Files:** new `src/components/table/SeatPlate.tsx` and a ring component (imported only from the `LiveApp` path); slot = `(seat−you+6)%6`; CSS in `src/net/live.css`. No `lib/atlas` or `lib/scripted` imports (`src/net/imports.test.ts:9-22`).
-- **Tests (red):** `Table.test.tsx › six seats render names, stacks, bets and the active timer`; `role=group` and `aria-label` per seat.
+- **Files:** new `src/net/SeatPlate.tsx` and the ring, `src/net/SixRing.tsx` (imported only from the `LiveApp` path); slot = `(seat−you+6)%6`; CSS in `src/net/live.css`. No `lib/atlas` or `lib/scripted` imports (`src/net/imports.test.ts:9-22`).
+- **Tests (red):** `src/net/SixRing.test.tsx › six seats render names, stacks, bets and the active timer`; `role=group` and `aria-label` per seat.
 - **Risk:** check-bundle must keep the entry chunk flat; record its output in the PR.
 
 **PR-19 · P2-05b wire six-casual into `LiveTable`, keyboard, phone fit**
@@ -460,6 +475,10 @@ Risks:
   - `mobile.spec › a six-seat table fits 320 px without horizontal scroll`
   - `live.spec › keyboard loop at a six-seat table`
 - **Risk:** the board is already 260 px against about 242 px of felt at 320 px; it needs `--card-md-w:40px`.
+- **From the PR-18 review:**
+  - The board also overflows the oval's middle column from 681 px to about 860 px: about 239 px wide at 681 px, while five cards at the default `--card-md-w: 60px` need about 316 px. Set `--card-md-w` to 40–44 px inside `.six-ring` below about 860 px, or move the breakpoint.
+  - Which slot is the bottom, and which way is clockwise, lives only in the grid areas in `live.css`; the unit test checks only `data-slot`. `mobile.spec` asserts that the slot 0 plate is the lowest and that slot 1 is to its left.
+  - Add a test that no file outside `src/net` imports `SixRing` or `SeatPlate`, so the ring stays in the online chunk.
 
 **PR-20 · P2-05c (optional) move the heads-up live table onto the ring and take `toHeroGame` out of the live path**
 

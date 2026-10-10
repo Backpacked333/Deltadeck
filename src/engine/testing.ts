@@ -10,6 +10,9 @@ import type { HandConfig, HandState, PlayerAction, SeatId } from './types'
 export const randomIntFrom = (random: () => number) => (n: number) =>
   Math.floor(random() * n)
 
+/** A deterministic source of numbers in [0, 1) for seeded test walks. */
+export const seededRandom = (seed: number) => lcg(seed)
+
 export const seededDeck = (seed: number) =>
   shuffleWith(randomIntFrom(lcg(seed)))
 

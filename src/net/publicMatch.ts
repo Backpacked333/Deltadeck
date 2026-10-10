@@ -11,13 +11,27 @@ import type {
   Outcome,
 } from '../shared/protocol'
 
+/**
+ * One account in the match (a match_players row). `seat` is the last seat it
+ * held: at a six table two accounts can share it, so it orders the header
+ * and never says who played a hand.
+ */
 export type PublicSeat = {
+  userId: string
   seat: SeatId
   username: string
   outcome: Outcome | null
 }
 
-export type PublicHand = { record: HandRecordV1; verified: boolean }
+/**
+ * A hand and who sat where in it, from its own record.seats: seats are
+ * reused and players join between hands, so only the hand knows.
+ */
+export type PublicHand = {
+  record: HandRecordV1
+  verified: boolean
+  players: { seat: SeatId; username: string }[]
+}
 
 export type PublicMatch =
   | { status: 'playing' }
@@ -74,14 +88,24 @@ export async function loadPublicMatch(
     user_id: string
     outcome: Outcome | null
   }[]
-  const names = seatRows.length
+  const handRows = (hands.data ?? []) as {
+    record: HandRecordV1
+    verified: boolean
+  }[]
+  // The accounts the hands name as well as the rows, since a hand is named
+  // from its own record.seats. Heads-up, both name the same two accounts,
+  // so this asks for exactly what it always did.
+  const userIds = [
+    ...new Set([
+      ...seatRows.map((s) => s.user_id),
+      ...handRows.flatMap((h) => h.record.seats.map((s) => s.userId)),
+    ]),
+  ]
+  const names = userIds.length
     ? await client
         .from('players')
         .select('user_id, username')
-        .in(
-          'user_id',
-          seatRows.map((s) => s.user_id),
-        )
+        .in('user_id', userIds)
     : { data: [], error: null }
   fail(names.error)
   const nameOf = new Map(
@@ -96,12 +120,20 @@ export async function loadPublicMatch(
     finishedAt: match.data.finished_at,
     reason: match.data.result?.reason ?? null,
     seats: seatRows.map((s) => ({
+      userId: s.user_id,
       seat: s.seat,
       username: nameOf.get(s.user_id) ?? 'A player',
       outcome: s.outcome,
     })),
-    hands: (
-      (hands.data ?? []) as { record: HandRecordV1; verified: boolean }[]
-    ).map((h) => ({ record: h.record, verified: !!h.verified })),
+    hands: handRows.map((h) => ({
+      record: h.record,
+      verified: !!h.verified,
+      // The account's name now, as the header shows it; the name it sat
+      // down with only when the account has no player row to read.
+      players: h.record.seats.map((s) => ({
+        seat: s.seat,
+        username: nameOf.get(s.userId) ?? s.username,
+      })),
+    })),
   }
 }

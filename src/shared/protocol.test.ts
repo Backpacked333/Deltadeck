@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import { lcg } from '../lib/sim'
 import { MAX_FRAME, parseClientMsg } from './protocol'
+import type { MatchKind } from './protocol'
 
 const frame = (v: unknown) => JSON.stringify(v)
 const act = {
@@ -31,6 +32,13 @@ describe('parseClientMsg', () => {
       t: 'queue',
       kind: 'hu-rated',
     })
+    // Sit anywhere free, or in a named seat 0..5.
+    expect(parseClientMsg(frame({ t: 'sit' }))).toEqual({ t: 'sit' })
+    for (const seat of [0, 3, 5])
+      expect(parseClientMsg(frame({ t: 'sit', seat }))).toEqual({
+        t: 'sit',
+        seat,
+      })
   })
 
   it('rejects malformed messages', () => {
@@ -53,12 +61,28 @@ describe('parseClientMsg', () => {
       frame({ t: 'resync', x: 1 }),
       frame({ t: 'rematch', matchId: 'x' }),
       frame({ t: 'queue', kind: 'six-max' }),
+      // A seat is an integer 0..5, and who sits comes only from the token:
+      // no account, name or stack in the frame.
+      frame({ t: 'sit', seat: 6 }),
+      frame({ t: 'sit', seat: -1 }),
+      frame({ t: 'sit', seat: 1.5 }),
+      frame({ t: 'sit', seat: '1' }),
+      frame({ t: 'sit', seat: null }),
+      frame({ t: 'sit', seat: 2, x: 1 }),
+      frame({ t: 'sit', userId: 'u1' }),
+      frame({ t: 'sit', seat: 2, username: 'u1' }),
+      frame({ t: 'sit', seat: 2, stack: 4000 }),
       frame({ t: 'hello' }),
       frame({ ...act, reqId: 'a'.repeat(MAX_FRAME) }),
     ])
       expect(parseClientMsg(bad), bad.slice(0, 60)).toBeNull()
     expect(parseClientMsg(42)).toBeNull()
     expect(parseClientMsg(' '.repeat(MAX_FRAME + 1))).toBeNull()
+  })
+
+  it('refuses to queue for six-casual: a six table is joined by sitting down', () => {
+    const kind: MatchKind = 'six-casual'
+    expect(parseClientMsg(frame({ t: 'queue', kind }))).toBeNull()
   })
 
   it('never throws on random input and only returns valid shapes', () => {
@@ -78,7 +102,10 @@ describe('parseClientMsg', () => {
           'act',
           'raise',
           'hu-casual',
+          'sit',
           'r1',
+          5,
+          6,
           true,
           null,
         ])
@@ -92,6 +119,7 @@ describe('parseClientMsg', () => {
         'type',
         'to',
         'kind',
+        'seat',
         'x',
       ]
       return Object.fromEntries(
@@ -105,9 +133,46 @@ describe('parseClientMsg', () => {
           : JSON.stringify(value(0))
       const msg = parseClientMsg(raw ?? 'undefined')
       if (msg)
-        expect(['act', 'resync', 'queue', 'dequeue', 'rematch']).toContain(
-          msg.t,
-        )
+        expect([
+          'act',
+          'resync',
+          'queue',
+          'dequeue',
+          'rematch',
+          'sit',
+        ]).toContain(msg.t)
     }
+  })
+
+  it('accepts a sit only as a seat 0..5 or none, whatever else it carries', () => {
+    const random = lcg(9)
+    const pick = <T>(xs: T[]) => xs[Math.floor(random() * xs.length)]
+    const values = [0, 1, 5, 6, -1, 2.5, 1e21, NaN, '', '3', null, true, [], {}]
+    const accepted = { seat: 0, none: 0 }
+    for (let i = 0; i < 5000; i++) {
+      const extra = ['seat', 'userId', 'username', 'stack', 'x'].filter(
+        () => random() < 0.4,
+      )
+      const sent = {
+        t: 'sit',
+        ...Object.fromEntries(extra.map((k) => [k, pick(values)])),
+      }
+      const msg = parseClientMsg(frame(sent))
+      if (!msg) continue
+      expect(msg.t).toBe('sit')
+      // Nothing but the seat survives, and only as a seat number.
+      expect(Object.keys(msg).filter((k) => k !== 't' && k !== 'seat')).toEqual(
+        [],
+      )
+      if (msg.t !== 'sit') continue
+      if (msg.seat === undefined) accepted.none++
+      else {
+        accepted.seat++
+        expect([0, 1, 2, 3, 4, 5]).toContain(msg.seat)
+      }
+    }
+    // Both shapes come through: no seat, and a seat 0..5.
+    expect(accepted.none).toBeGreaterThan(100)
+    expect(accepted.seat).toBeGreaterThan(20)
   })
 })

@@ -9,7 +9,8 @@ import { toHeroGame } from '../engine/project'
 import type { SeatId } from '../engine/types'
 import { legalActions } from '../lib/poker'
 import { buildPresets } from '../lib/presets'
-import type { MatchInfo, SeatView } from '../shared/protocol'
+import { isSeated } from '../shared/protocol'
+import type { MatchInfo, SeatedView, SeatView } from '../shared/protocol'
 import { useRunout } from '../state/runout'
 import { inviteLink } from './api'
 import type { Identity } from './api'
@@ -87,7 +88,7 @@ export function LiveTable({
   return (
     <div className="play-column live-table">
       <MatchBar table={table} seat={seat} view={view} state={state} />
-      {view ? (
+      {view && isSeated(view) ? (
         <LiveHand
           view={view}
           opponent={opponent?.username ?? 'Opponent'}
@@ -252,7 +253,7 @@ function LiveHand({
   act,
   rematch,
 }: {
-  view: SeatView
+  view: SeatedView
   opponent: string
   state: TableState
   act: ReturnType<typeof useTable>['act']

@@ -32,10 +32,20 @@ export const CLOSE_ELSEWHERE = 4409
 /** Too many frames or connections. Reconnect after a backoff of ≥ 1 s. */
 export const CLOSE_RATE_LIMITED = 4429
 
-export type MatchKind = 'hu-casual' | 'hu-rated'
+/**
+ * `six-casual`: a casual table of 2 to 6 seats, one archived session at a
+ * time (ADR amendment 2026-10-10, Phase 2). Never rated or graded.
+ */
+export type MatchKind = 'hu-casual' | 'hu-rated' | 'six-casual'
 export type MatchConfig = {
   kind: MatchKind
-  handsTotal: number
+  /** Six tables: how many seats the table has. Absent: heads-up. */
+  maxSeats?: number
+  /**
+   * Heads-up: the match's length in hands. Absent at a six table, which
+   * deals for as long as two players can be dealt in.
+   */
+  handsTotal?: number
   startingStack: number
   blinds: { sb: number; bb: number }
   /** Per-decision clock and time bank, in milliseconds. */
@@ -60,10 +70,19 @@ export type ClientMsg =
       action: PlayerAction
     }
   | { t: 'resync' }
-  | { t: 'queue'; kind: MatchKind }
+  /** The heads-up queue: a six table is joined by sitting down, not queued. */
+  | { t: 'queue'; kind: Exclude<MatchKind, 'six-casual'> }
   | { t: 'dequeue' }
   /** At a finished rated table: play the same opponent again. */
   | { t: 'rematch' }
+  /**
+   * At a six table: take `seat`, or the lowest free seat. Who sits is the
+   * socket's account and the stack is the buy-in: the frame names neither.
+   */
+  | { t: 'sit'; seat?: SeatId }
+
+/** A seated six-casual player: dealt in, or sitting out (P2-04). */
+export type SeatStatus = 'playing' | 'sitting_out'
 
 export type ErrorCode =
   | 'not_your_turn'
@@ -76,6 +95,10 @@ export type ErrorCode =
   | 'unauthorized'
   /** Rated play needs a confirmed email on a permanent account. */
   | 'unverified'
+  /** Six tables: the seat asked for has a player. */
+  | 'seat_taken'
+  /** Six tables: every seat has a player. */
+  | 'table_full'
 
 /**
  * Everything one seat may know about the table. There is deliberately no
@@ -85,8 +108,18 @@ export type ErrorCode =
 export type SeatView = {
   matchId: string
   handNo: number
-  you: SeatId
+  /**
+   * The seat this viewer was dealt into in this hand, or null: a six-casual
+   * player who sat down after the deal sees the hand as nobody's seat does.
+   */
+  you: SeatId | null
   button: SeatId
+  /**
+   * Six-casual hands: the seat that posted the small blind (null when it was
+   * dead) and the big blind's seat. Heads-up views leave both out.
+   */
+  sb?: SeatId | null
+  bb?: SeatId
   street: Street
   board: number[]
   /** This hand's deck commitment; null between hands. */
@@ -94,12 +127,17 @@ export type SeatView = {
   match: {
     kind: MatchKind
     status: 'waiting' | 'playing' | 'finished'
-    handsTotal: number
+    /** Heads-up only, as in MatchConfig. */
+    handsTotal?: number
     players: {
       seat: SeatId
       username: string
       connected: boolean
       consecutiveTimeouts: number
+      /** Six tables: chips as of the last deal (or the buy-in, if since). */
+      stack?: number
+      /** Six tables. */
+      status?: SeatStatus
     }[]
   }
   pot: { total: number; layers: Pot[] }
@@ -128,6 +166,11 @@ export type SeatView = {
     showdown: boolean
   }
 }
+
+/** A view for a seat dealt into the hand: heads-up views are always one. */
+export type SeatedView = SeatView & { you: SeatId }
+export const isSeated = (view: SeatView): view is SeatedView =>
+  view.you !== null
 
 /** Who is at the table and how the match stands. */
 export type MatchInfo = SeatView['match']
@@ -208,7 +251,8 @@ export type MatchEndReason =
 export type ServerMsg = { seq: number; matchId: string } & (
   | {
       t: 'welcome'
-      seat: SeatId
+      /** null: this account has no seat at the (six) table. */
+      seat: SeatId | null
       table: MatchInfo
       /** null until the first hand is dealt. */
       view: SeatView | null
@@ -222,6 +266,13 @@ export type ServerMsg = { seq: number; matchId: string } & (
       button: SeatId
       blinds: { sb: number; bb: number }
       stacks: number[]
+      /**
+       * Six-casual: each dealt seat with the stack in `stacks` (after the
+       * blinds), and the blind seats as in SeatView.
+       */
+      seats?: { seat: SeatId; stack: number }[]
+      sb?: SeatId | null
+      bb?: SeatId
     }
   | { t: 'hand_end'; handNo: number; record: HandRecordV1 }
   | ({ t: 'reveal' } & Reveal)
@@ -334,6 +385,13 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case 'dequeue':
     case 'rematch':
       return onlyKeys(v, ['t']) ? { t: v.t } : null
+    case 'sit':
+      if (!onlyKeys(v, ['t', 'seat'])) return null
+      if (v.seat === undefined) return { t: 'sit' }
+      // Seat ids are 0..5 everywhere (ADR amendment 2026-10-10, "Seats").
+      return isCount(v.seat) && (v.seat as number) <= 5
+        ? { t: 'sit', seat: v.seat as number }
+        : null
     case 'queue':
       return onlyKeys(v, ['t', 'kind']) &&
         (v.kind === 'hu-casual' || v.kind === 'hu-rated')

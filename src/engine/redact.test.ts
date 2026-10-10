@@ -5,7 +5,13 @@ import type { SeatView } from '../shared/protocol'
 import { act, isOver, startHand } from './hand'
 import { seatView } from './redact'
 import type { ViewExtras } from './redact'
-import { config, deckWith, randomAction, randomTable } from './testing'
+import {
+  config,
+  deckWith,
+  randomAction,
+  randomTable,
+  withExplicitBlinds,
+} from './testing'
 import type { HandState } from './types'
 
 const extras: ViewExtras = {
@@ -41,6 +47,9 @@ const VIEW_KEYS = [
   'toAct',
   'you',
 ]
+// Six-casual hands name their blind seats, which every player sees posted
+// at the deal: they say where chips went, never what anyone holds.
+const SIX_VIEW_KEYS = [...VIEW_KEYS, 'bb', 'sb'].sort()
 const PLAYER_KEYS = [
   'allIn',
   'bet',
@@ -70,6 +79,49 @@ function sampleStates(count: number, seed: number) {
 }
 
 describe('seatView redaction', () => {
+  it('adds only the blind seats for a hand that names them', () => {
+    const random = lcg(12)
+    for (const state of sampleStates(300, 7)) {
+      const named = withExplicitBlinds(state.config, random)
+      const six: HandState = { ...state, config: named }
+      const view = seatView(six, state.players[0].seat, extras)
+      expect(Object.keys(view).sort()).toEqual(
+        state.result ? [...SIX_VIEW_KEYS, 'result'].sort() : SIX_VIEW_KEYS,
+      )
+      expect([view.sb, view.bb]).toEqual([named.sb, named.bb])
+      // A hand without them keeps exactly its old keys and bytes.
+      expect(
+        JSON.stringify(seatView(state, state.players[0].seat, extras)),
+      ).not.toMatch(/"(sb|bb)":/)
+    }
+  })
+
+  it('shows a seatless viewer no hole card but shown ones, and no moves', () => {
+    for (const state of sampleStates(2000, 8)) {
+      const view = seatView(state, null, extras)
+      expect(view.you).toBeNull()
+      expect(view.legal).toBeNull()
+      for (const p of view.players) {
+        const real = state.players.find((q) => q.seat === p.seat)!
+        expect(p.cards).toEqual(real.shown ? real.cards : null)
+      }
+      // The same as any seated viewer sees of everyone else.
+      const seated = seatView(state, state.players[0].seat, extras)
+      expect(view.players.slice(1)).toEqual(seated.players.slice(1))
+      // And unchanged when every unshown hand and the deck change.
+      const swapped: HandState = {
+        ...state,
+        deck: state.deck.map(() => -1),
+        players: state.players.map((p) =>
+          p.shown ? p : { ...p, cards: [-1, -1] },
+        ),
+      }
+      expect(JSON.stringify(seatView(swapped, null, extras))).toBe(
+        JSON.stringify(view),
+      )
+    }
+  })
+
   it('exposes only allowlisted keys', () => {
     for (const state of sampleStates(300, 5)) {
       const view = seatView(state, state.players[0].seat, extras)

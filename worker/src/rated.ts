@@ -8,7 +8,7 @@ import type { MatchConfig, Outcome } from '../../src/shared/protocol'
 export { DRAW_BAND_BB }
 
 /** 40 hands at 100 bb; 20 s a decision and a 60 s bank for each half. */
-export const RATED_CONFIG: MatchConfig = {
+export const RATED_CONFIG: MatchConfig & { handsTotal: number } = {
   kind: 'hu-rated',
   handsTotal: 40,
   startingStack: 2000,

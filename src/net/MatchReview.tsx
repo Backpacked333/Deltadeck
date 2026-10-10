@@ -77,8 +77,6 @@ export function MatchReview({
       </div>
     )
 
-  const name = (seat: SeatId) =>
-    match.seats.find((s) => s.seat === seat)?.username ?? 'A player'
   const hand = match.hands[Math.min(at, match.hands.length - 1)]
   return (
     <>
@@ -87,8 +85,9 @@ export function MatchReview({
           {match.kind === 'hu-rated' ? 'Rated match' : 'Casual match'}
         </h2>
         <p>
+          {/* One per account: at a six table two can share a last seat. */}
           {match.seats.map((s, i) => (
-            <span key={s.seat}>
+            <span key={s.userId}>
               {i > 0 && ' vs '}
               <a href={`#u/${s.username}`}>{s.username}</a>
             </span>
@@ -121,7 +120,7 @@ export function MatchReview({
               Next hand
             </button>
           </nav>
-          <Hand hand={hand} name={name} />
+          <Hand hand={hand} />
         </>
       ) : (
         <p className="live-muted">No hands were played.</p>
@@ -159,14 +158,12 @@ function Summary({
   )
 }
 
-function Hand({
-  hand,
-  name,
-}: {
-  hand: PublicHand
-  name: (seat: SeatId) => string
-}) {
+function Hand({ hand }: { hand: PublicHand }) {
   const { record } = hand
+  // Who held a seat in this hand: seats are reused and players join between
+  // hands, so the match's player list cannot say.
+  const name = (seat: SeatId) =>
+    hand.players.find((p) => p.seat === seat)?.username ?? 'A player'
   return (
     <section className="panel live-review" aria-label={`Hand ${record.handNo}`}>
       <header className="live-review-head">
@@ -220,8 +217,9 @@ function Hand({
         })}
       </ol>
       <p>
-        {([0, 1] as SeatId[])
-          .filter((s) => record.netBySeat[s] !== undefined)
+        {/* Every seat dealt in, in seat order (heads-up: 0 then 1). */}
+        {(Object.keys(record.netBySeat).map(Number) as SeatId[])
+          .sort((a, b) => a - b)
           .map((s) => {
             const net = record.netBySeat[s]
             return `${name(s)} ${net > 0 ? '+' : net < 0 ? '−' : '±'}${Math.abs(net)}`

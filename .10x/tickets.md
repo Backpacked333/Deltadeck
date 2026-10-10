@@ -1067,14 +1067,15 @@ Rated matches use `MatchKind 'hu-rated'`. Everything below is additive; casual H
 
 - **Goal.** Six seats with the trainer's card art, chips and spring choreography; a generic seat plate (Atlas's avatar is for Atlas only); a turn indicator and timer legible on phones; keyboard parity. `toHeroGame` is retired from the live path.
 - **User-visible outcome.** A six-seat table that looks and feels like the trainer, readable on a phone and playable by keyboard.
-- **Files.** `src/components/table/Table.tsx`; new `src/components/table/SeatPlate.tsx`; `src/net/LiveTable.tsx`; `src/engine/project.ts`; `e2e/live.spec.ts`, `e2e/mobile.spec.ts`.
+- **Files.** New `src/net/SixRing.tsx` and `src/net/SeatPlate.tsx`, CSS in `src/net/live.css`; `src/net/LiveTable.tsx`; `src/engine/project.ts`; `e2e/live.spec.ts`, `e2e/mobile.spec.ts`.
 - **Depends on.** P2-03.
 - **Estimate.** 4 hd · L.
 - **Acceptance tests.**
-  - `src/components/table/Table.test.tsx › six seats render names, stacks, bets and the active timer`.
+  - `src/net/SixRing.test.tsx › six seats render names, stacks, bets and the active timer`.
   - `e2e/mobile.spec.ts › a six-seat table fits 320 px without horizontal scroll`.
   - `e2e/live.spec.ts › keyboard loop at a six-seat table`.
 - **Riskiest assumption → check.** That `Table.tsx` (2-seat `Game` with hero at index 0) can generalise rather than fork. Spike six plates at 320 px (half a day) before choosing.
+- **Spike result (PR-18).** Fork: a new ring in the online chunk, and `Table.tsx` stays as it is (ADR, "Table UI (P2-05)"). The heads-up stage's absolute oval runs 61 px past a 320 px screen, so the ring is a grid: two rows of three plates around the board up to 680 px, the oval from 681 px.
 - **Cut line.** A static six-seat layout without per-seat motion polish.
 
 ### P2-06 · Side-pot chips and the 3-way all-in frame gate
