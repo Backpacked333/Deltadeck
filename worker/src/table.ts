@@ -303,6 +303,10 @@ export class TableDO extends DurableObject<WorkerEnv> {
 
   private async init(body: InitBody) {
     if (this.match) return json({ error: 'exists' }, 409)
+    // A six table starts empty and has no start deadline: a paired
+    // opponent or one would make a Player without a stack or status.
+    if (body.kind === 'six-casual' && (body.opponent || body.startWithinMs))
+      return json({ error: 'six tables start empty' }, 400)
     const handsTotal =
       Number.isInteger(body.handsTotal) &&
       body.handsTotal! >= 1 &&

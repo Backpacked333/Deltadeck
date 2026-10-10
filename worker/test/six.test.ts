@@ -567,6 +567,80 @@ describe('six seats before showdown', () => {
   }, 120_000)
 })
 
+describe('a six table between players', () => {
+  it('starts empty: an opponent or a start deadline is refused', async () => {
+    for (const extra of [
+      { opponent: { userId: 'guest', username: 'guest' } },
+      { startWithinMs: 60_000 },
+    ]) {
+      const matchId = crypto.randomUUID()
+      const response = await stub(matchId).fetch('https://table/init', {
+        method: 'POST',
+        body: JSON.stringify({
+          matchId,
+          creator: { userId: 'host', username: 'host' },
+          kind: 'six-casual',
+          ...extra,
+        }),
+      })
+      expect(response.status, JSON.stringify(extra)).toBe(400)
+    }
+  })
+
+  it('a busted player is dealt no more cards; the table waits, then deals again when someone sits', async () => {
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, 'bust-a', 0)
+    const b = await sitDown(matchId, 'bust-b', 2)
+    await a.next(isState(1))
+    await move(matchId, { 0: a, 2: b }, () => ({ type: 'fold' }))
+    await a.next((f) => f.t === 'reveal' && f.handNo === 1)
+    // b loses every chip to a in hand 1: settled into the table's stacks
+    // at the next deal, as a real all-in would be (no rebuy until PR-14).
+    await runInDurableObject(stub(matchId), (instance: TableDO) => {
+      const { hand } = instance as unknown as { hand: HandState }
+      const winner = hand.players.find((p) => p.seat === 0)!
+      const loser = hand.players.find((p) => p.seat === 2)!
+      winner.stack += loser.stack
+      loser.stack = 0
+    })
+    await elapse(matchId, NEXT_HAND_MS)
+    const { match } = await peek(matchId)
+    expect(match.status).toBe('waiting')
+    const stacks = () =>
+      (match as unknown as { players: { seat: SeatId; stack: number }[] })
+        .players
+    expect(stacks().map((p) => [p.seat, p.stack])).toEqual([
+      [0, 4000],
+      [2, 0],
+    ])
+    // c sits: dealing resumes between a and c only.
+    const c = await sitDown(matchId, 'bust-c', 4)
+    await c.next(isState(2))
+    const two = (await peek(matchId)).hand!
+    expect(two.config.seats.map((s) => s.seat)).toEqual([0, 4])
+    const { cards } = holesOf(two)
+    await b.next(isState(2))
+    for (const view of viewsOf(b.frames, 2)) {
+      expect(view.you).toBeNull()
+      for (const p of view.players) expect(p.cards).toBeNull()
+    }
+    const ended = await playOut(matchId, { 0: a, 4: c }, () => ({
+      type: 'fold',
+    }))
+    await b.next((f) => f.t === 'reveal' && f.handNo === 2)
+    for (const f of b.frames)
+      if (f.t === 'reveal' && f.handNo === 2) expect(f.own).toBeUndefined()
+    const seen = JSON.stringify(b.frames)
+    for (const seat of [0, 4] as SeatId[])
+      expect(seen).not.toContain(JSON.stringify(cards[seat]))
+    // Chips are conserved across the pause: 6,000 at the table.
+    expect(ended.players.reduce((sum, p) => sum + p.stack, 0) + 0).toBe(
+      4000 + 2000,
+    )
+    checkFrames([...a.frames, ...b.frames, ...c.frames], 'six-casual')
+  })
+})
+
 describe('six clients over many hands', () => {
   it('six clients sit and play, chips conserved across 200 hands', async () => {
     const matchId = await sixTable()

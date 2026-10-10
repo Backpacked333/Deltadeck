@@ -404,6 +404,11 @@ Risks:
   - `record_match` reads six-casual `timeouts` keyed by **userId** (session totals). `table.ts` sends them keyed by seat today, so PR-13 must switch the key for six tables, or every timeout is stored as 0.
   - Before the first six session is archived, the public review page (`src/net/publicMatch.ts`, `src/net/MatchReview.tsx`) must name players from each hand's `record.seats`, not `match_players.seat`. `(match_id, seat)` is no longer unique, so a six review would show the wrong names. This lands as its own small PR before PR-13.
 
+- **Left by PR-11's review** (`worker/src/table.ts` at PR-11):
+  - PR-12: a player who stands mid-hand must stay in `match.players` until that hand ends. `playerIn(seat)` reads the dealt account from there, and `applyActionNow`'s `player!` would otherwise throw inside `blockConcurrencyWhile` and reset the Durable Object.
+  - PR-13: `setGameDeadline` drops `idle` deadlines, so a six table that falls back to `waiting` after its first deal has no idle deadline. Re-arm it in `waitForPlayers`.
+  - PR-13: a six table that finishes (only `engine_fault` today) sends `match_end` to sockets without a seat too; six sessions send no `match_end` (ADR "Table and session"). Gate it with the session work.
+
 **PR-14 · P2-03f rebuy (cut line)**
 
 - **Files:** `protocol.ts` (`rebuy`), `table.ts`; uses `rebuyTo` from PR-06.
