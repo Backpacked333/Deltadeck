@@ -427,6 +427,15 @@ export class TableDO extends DurableObject<WorkerEnv> {
     ) {
       match.status = 'playing'
       await this.startNextHand()
+    } else if (
+      six &&
+      player &&
+      match.status === 'waiting' &&
+      match.players.length >= 2
+    ) {
+      // A seated player back at a waiting six table: deal if two are here.
+      match.status = 'playing'
+      await this.startNextHand()
     } else if (player) this.broadcast('state', { skip: server })
     return new Response(null, {
       status: 101,
@@ -483,7 +492,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
       return this.reject(ws, 'not_your_turn', 'Take a seat to play', msg.reqId)
 
     // A retry of the action we already applied: acknowledge it again.
-    if (this.lastAck[userId]?.reqId === msg.reqId)
+    if (this.ackOf(userId)?.reqId === msg.reqId)
       return this.send(ws, this.frame('state', userId))
     const hand = this.hand
     if (
@@ -840,6 +849,17 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const six = match.config.kind === 'six-casual'
     await this.settleLuck()
     if (six) this.settleStacks()
+    // A six table deals only to people who are there: with fewer than two
+    // funded, connected players it waits, and a reconnect or a sit deals
+    // again (the 60 s grace and sitting out come with PR-16/17).
+    if (
+      six &&
+      match.players.filter(
+        (p) =>
+          p.stack! > 0 && p.status === 'playing' && this.connected(p.userId),
+      ).length < 2
+    )
+      return this.waitForPlayers()
     const plan = six
       ? this.sixController.nextHandPlan(
           match.handNo + 1,
@@ -1801,6 +1821,24 @@ export class TableDO extends DurableObject<WorkerEnv> {
   }
 
   /** Whether `userId` has a socket open (other than `exclude`). */
+  /**
+   * The last ack for `userId`. Heads-up objects stored before acks were
+   * keyed by account kept them by seat; a retry across that deploy still
+   * finds its ack (a six table never stored one by seat).
+   */
+  private ackOf(userId: string): Ack | undefined {
+    return (
+      this.lastAck[userId] ??
+      (this.match?.config.kind === 'six-casual'
+        ? undefined
+        : this.lastAck[String(this.seatOfUser(userId))])
+    )
+  }
+
+  private seatOfUser(userId: string) {
+    return this.match?.players.find((p) => p.userId === userId)?.seat
+  }
+
   private connected(userId: string, exclude?: WebSocket) {
     return this.openSockets(exclude).some((ws) => this.userOf(ws) === userId)
   }
@@ -1880,7 +1918,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
               turn && match.status === 'playing'
                 ? { deadline: turn.at, bankMs: this.bankOf(this.hand) }
                 : null,
-            lastReqId: this.lastAck[userId]?.reqId ?? null,
+            lastReqId: this.ackOf(userId)?.reqId ?? null,
             commitment: this.current?.commitment ?? null,
           })
         : null
@@ -1907,7 +1945,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
       handNo: ended.record.handNo,
       record: ended.record,
     })
-    const own = ended.own?.[userId]
+    const own =
+      ended.own?.[userId] ??
+      (this.match?.config.kind === 'six-casual'
+        ? undefined
+        : ended.own?.[String(this.seatOfUser(userId))])
     this.send(ws, {
       ...base,
       t: 'reveal',

@@ -587,6 +587,40 @@ describe('a six table between players', () => {
     }
   })
 
+  it('deals no hand to a table nobody is at, and deals again when two are back', async () => {
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, 'away-a', 0)
+    const b = await sitDown(matchId, 'away-b', 2)
+    await a.next(isState(1))
+    await move(matchId, { 0: a, 2: b }, () => ({ type: 'fold' }))
+    await a.next((f) => f.t === 'reveal' && f.handNo === 1)
+    a.ws.close(1000)
+    b.ws.close(1000)
+    for (let i = 0; i < 200; i++) {
+      const open = await runInDurableObject(
+        stub(matchId),
+        (_i: TableDO, state) => state.getWebSockets().length,
+      )
+      if (open === 0) break
+      await new Promise((r) => setTimeout(r, 5))
+    }
+    // Both gone: the next deal waits instead of playing hands by timeout.
+    await elapse(matchId, NEXT_HAND_MS)
+    let { match } = await peek(matchId)
+    expect(match.status).toBe('waiting')
+    expect(match.handNo).toBe(1)
+    // One back is not enough; the second deals hand 2.
+    const a2 = await connect(matchId, 'away-a')
+    await a2.next((f) => f.t === 'welcome')
+    ;({ match } = await peek(matchId))
+    expect(match.status).toBe('waiting')
+    const b2 = await connect(matchId, 'away-b')
+    await b2.next(isState(2))
+    ;({ match } = await peek(matchId))
+    expect(match.handNo).toBe(2)
+    checkFrames([...a2.frames, ...b2.frames], 'six-casual')
+  })
+
   it('a busted player is dealt no more cards; the table waits, then deals again when someone sits', async () => {
     const matchId = await sixTable()
     const a = await sitDown(matchId, 'bust-a', 0)

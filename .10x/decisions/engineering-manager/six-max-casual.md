@@ -409,6 +409,13 @@ Risks:
   - PR-13: `setGameDeadline` drops `idle` deadlines, so a six table that falls back to `waiting` after its first deal has no idle deadline. Re-arm it in `waitForPlayers`.
   - PR-13: a six table that finishes (only `engine_fault` today) sends `match_end` to sockets without a seat too; six sessions send no `match_end` (ADR "Table and session"). Gate it with the session work.
 
+- **Exposure gate (Devin, #44):** nothing may create a six table from outside (PR-24's route and quick-sit) until these have landed:
+  - PR-12: lobby claims, so one account cannot sit at two tables (Devin's security finding);
+  - PR-16: busted or sitting-out players are stood up after 3 orbits or 5 minutes without a dealt hand, so busted occupants cannot fill a table for good;
+  - PR-14 rebuy, or its ADR cut line (automatic top-up).
+
+  Until then six tables exist only through the table's own `/init`, which no route calls.
+
 **PR-14 · P2-03f rebuy (cut line)**
 
 - **Files:** `protocol.ts` (`rebuy`), `table.ts`; uses `rebuyTo` from PR-06.
