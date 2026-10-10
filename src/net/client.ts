@@ -113,6 +113,11 @@ export class TableConnection {
   private listeners = new Set<() => void>()
   private socket: WebSocket | null = null
   private seq = -1
+  /**
+   * The session `hands` belongs to. A six table's next session numbers its
+   * hands from 1 again, under a new matchId; its hands start afresh.
+   */
+  private handsOf: string | null = null
   private attempts = 0
   /** A table that never accepted us is a bad link or a full table. */
   private everOpened = false
@@ -281,18 +286,18 @@ export class TableConnection {
       return
     }
     if (msg.t === 'hand_start') {
-      this.seen(msg.handNo, (h) =>
+      this.seen(msg.matchId, msg.handNo, (h) =>
         h.commitment ? h : { ...h, commitment: msg.commitment },
       )
       return
     }
     if (msg.t === 'hand_end') {
-      this.seen(msg.handNo, (h) => ({ ...h, record: msg.record }))
+      this.seen(msg.matchId, msg.handNo, (h) => ({ ...h, record: msg.record }))
       return
     }
     if (msg.t === 'reveal') {
       const { handNo, leaves, slots, own } = msg
-      this.seen(handNo, (h) => ({
+      this.seen(msg.matchId, handNo, (h) => ({
         ...h,
         reveal: { handNo, leaves, slots, ...(own ? { own } : {}) },
       }))
@@ -314,13 +319,14 @@ export class TableConnection {
       table: msg.table,
       view: msg.view,
       clockOffset: msg.serverNow - Date.now(),
-      hands: msg.view ? this.withView(msg.view) : this.state.hands,
+      hands: msg.view ? this.withView(msg.matchId, msg.view) : this.state.hands,
     })
   }
 
   /** Keeps our own cards, and a commitment we missed the start frame for. */
-  private withView(view: SeatView) {
-    const h = this.state.hands[view.handNo] ?? {}
+  private withView(matchId: string, view: SeatView) {
+    const hands = this.handsFor(matchId)
+    const h = hands[view.handNo] ?? {}
     const mine = view.players.find((p) => p.seat === view.you)?.cards
     const next: HandSeen = {
       ...h,
@@ -329,16 +335,23 @@ export class TableConnection {
         ? { commitment: view.commitment, late: true }
         : {}),
     }
-    return next === h
-      ? this.state.hands
-      : { ...this.state.hands, [view.handNo]: next }
+    return next === h ? hands : { ...hands, [view.handNo]: next }
   }
 
-  private seen(handNo: number, update: (h: HandSeen) => HandSeen) {
-    const hands = {
-      ...this.state.hands,
-      [handNo]: update(this.state.hands[handNo] ?? {}),
-    }
+  /** The hands kept so far, or none when `matchId` starts a new session. */
+  private handsFor(matchId: string) {
+    if (matchId === this.handsOf) return this.state.hands
+    this.handsOf = matchId
+    return {}
+  }
+
+  private seen(
+    matchId: string,
+    handNo: number,
+    update: (h: HandSeen) => HandSeen,
+  ) {
+    const before = this.handsFor(matchId)
+    const hands = { ...before, [handNo]: update(before[handNo] ?? {}) }
     // A match is at most 100 hands; keep the latest 100 regardless.
     const keys = Object.keys(hands)
       .map(Number)
