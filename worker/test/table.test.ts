@@ -237,7 +237,10 @@ describe('a heads-up table', () => {
     clients[actor].send({ ...base, reqId: 'old1', action: { type: 'call' } })
     await clients[actor].next(isState(1, 1), from)
     // The object as an earlier deploy left it: the ack under the seat.
-    const userId = match.players.find((p) => p.seat === actor)!.userId
+    const { players } = match as unknown as {
+      players: { seat: number; userId: string }[]
+    }
+    const userId = players.find((p) => p.seat === actor)!.userId
     await runInDurableObject(stub(matchId), (instance) => {
       const t = instance as unknown as {
         lastAck: Record<string, { reqId: string; seq: number }>
