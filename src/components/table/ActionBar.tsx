@@ -5,11 +5,22 @@ import {
   ScanSearch,
   Target,
 } from 'lucide-react'
-import type { Game } from '../../lib/poker'
 import type { legalActions } from '../../lib/poker'
 import type { Preset } from '../../lib/presets'
 
 export type { Preset }
+
+/**
+ * What the bar reads of the hand. The trainer's heads-up Game has all of
+ * it; a live six-seat table passes every seat's bet and stack instead, so
+ * it needs no two-seat Game.
+ */
+export type ActionHand = {
+  result?: { text: string; net: number }
+  bets: readonly number[]
+  pot: number
+  stacks: readonly number[]
+}
 
 const chips = (n: number) => Math.round(n).toLocaleString('en-US')
 const signed = (n: number) =>
@@ -160,7 +171,7 @@ export function ActionBar({
   revealing = false,
   versus,
 }: {
-  game: Game
+  game: ActionHand
   legal: ReturnType<typeof legalActions>
   yourTurn: boolean
   /** Hero to act, even while onboarding temporarily blocks input. */

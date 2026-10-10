@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
-import type { PlayerAction } from '../engine/types'
+import type { PlayerAction, SeatId } from '../engine/types'
 import { INITIAL_STATE, TableConnection } from './client'
 
 const noSubscription = () => () => {}
@@ -28,5 +28,9 @@ export function useTable(
     () => connection?.rematch() ?? false,
     [connection],
   )
-  return { state, act, rematch }
+  const sit = useCallback(
+    (seat: SeatId) => connection?.sit(seat) ?? false,
+    [connection],
+  )
+  return { state, act, rematch, sit }
 }

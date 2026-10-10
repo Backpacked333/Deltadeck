@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { fakeLadder, fakeProfile, onboard, playHand } from './helpers'
+import { devSignIn, fakeSixTable, SIX_TABLE } from './sixTable'
 
 /**
  * Nothing wider than the device. Comparing with innerWidth alone is not
@@ -120,4 +121,56 @@ test('the profile, a match review and the Method page fit a phone, down to 320 p
     page.getByRole('heading', { level: 1, name: 'Method' }),
   ).toBeVisible()
   await expectNoOverflow(page)
+})
+
+test('a six-seat table fits 320 px without horizontal scroll', async ({
+  page,
+}) => {
+  await devSignIn(page, 'you_at_the_bottom')
+  // The river with the viewer to act: five board cards, two hole cards,
+  // six plates with long names, a shot clock and the action bar at once.
+  await fakeSixTable(page, { street: 'river' })
+  await page.setViewportSize({ width: 320, height: 640 })
+  await page.goto(`/#play/${SIX_TABLE}`)
+  const ring = page.getByRole('region', { name: 'Poker table' })
+  const board = ring.getByRole('group', { name: 'Community cards' })
+  await expect(ring.getByRole('group', { name: /^Seat \d:/ })).toHaveCount(6)
+  await expect(board.getByRole('img', { name: / of / })).toHaveCount(5)
+  await expect(page.getByText('6-max · Hand 1')).toBeVisible()
+  await expect(page.getByRole('button', { name: /^Fold/ })).toBeVisible()
+  await expectNoOverflow(page)
+
+  const plate = async (slot: number) =>
+    (await ring.locator(`[data-slot="${slot}"] .six-plate`).boundingBox())!
+  const overlap = (
+    a: { x: number; y: number; width: number; height: number },
+    b: typeof a,
+  ) =>
+    a.x < b.x + b.width &&
+    b.x < a.x + a.width &&
+    a.y < b.y + b.height &&
+    b.y < a.y + a.height
+  // Phones get the grid and wider screens the oval; the board must clear
+  // every plate in both, the oval's narrow middle included. (From 681 to
+  // 743 px the app's header alone runs past the screen, on every page, so
+  // the page width is checked on either side of that band.)
+  for (const width of [320, 360, 412, 681, 700, 760, 860]) {
+    await page.setViewportSize({ width, height: 800 })
+    if (width <= 680 || width >= 744) await expectNoOverflow(page)
+    const cards = (await board.boundingBox())!
+    const you = await plate(0)
+    for (const slot of [0, 1, 2, 3, 4, 5]) {
+      const other = await plate(slot)
+      expect(overlap(cards, other), `${width} px: board on slot ${slot}`).toBe(
+        false,
+      )
+      // Where the slots sit lives only in live.css: the viewer's plate is
+      // the lowest, and the next seat clockwise is on its left.
+      expect(you.y + you.height).toBeGreaterThanOrEqual(
+        other.y + other.height - 1,
+      )
+    }
+    const next = await plate(1)
+    expect(next.x + next.width, `${width} px`).toBeLessThanOrEqual(you.x)
+  }
 })

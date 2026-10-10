@@ -10,7 +10,7 @@ import {
 import { act, isOver, startHand } from '../engine/hand'
 import { seatView } from '../engine/redact'
 import { config, deckWith } from '../engine/testing'
-import type { HandState, SeatId } from '../engine/types'
+import type { HandConfig, HandState, SeatId } from '../engine/types'
 import type {
   HandRecordV1,
   MatchInfo,
@@ -167,4 +167,87 @@ export async function finishedHand({ fold = false } = {}) {
     reveal: { ...base, t: 'reveal', ...reveal } as ServerMsg,
   }
   return { hand, record, reveal, commitment, frames }
+}
+
+// ---- Six-casual ---------------------------------------------------------------
+
+/** Who sits where at the test six table: seats 1 and 4 are empty. */
+export const SIX_ROSTER: { seat: SeatId; username: string; stack: number }[] = [
+  { seat: 0, username: 'bob', stack: 2000 },
+  { seat: 2, username: 'alice', stack: 2000 },
+  { seat: 3, username: 'carol', stack: 1500 },
+  { seat: 5, username: 'dave', stack: 3000 },
+]
+
+/** A six-casual table summary, stacks as of the last deal. */
+export const sixInfo = (
+  roster = SIX_ROSTER,
+  status: MatchInfo['status'] = 'playing',
+): MatchInfo => ({
+  kind: 'six-casual',
+  status,
+  players: roster.map(({ seat, username, stack }) => ({
+    seat,
+    username,
+    connected: true,
+    consecutiveTimeouts: 0,
+    stack,
+    status: 'playing' as const,
+  })),
+})
+
+/**
+ * Hand 1 at the six table: bob (seat 0) has the button, alice (seat 2)
+ * posts the small blind and carol (seat 3) the big; dave (seat 5) is first
+ * to act. alice holds As Kd; the others' cards must never reach her.
+ */
+export function sixHand(): HandState {
+  const cfg: HandConfig = {
+    handNo: 1,
+    seats: SIX_ROSTER.map(({ seat, stack }) => ({ seat, stack })),
+    button: 0,
+    blinds: { sb: 10, bb: 20 },
+    sb: 2,
+    bb: 3,
+  }
+  return startHand(
+    cfg,
+    deckWith(
+      cfg,
+      { 0: '7c 2h', 2: 'As Kd', 3: 'Qs Qh', 5: '9d 8d' },
+      '2c 7d 9h Tc 3s',
+    ),
+  )
+}
+
+/**
+ * A six-table frame as the server builds it: `seat` is where this account
+ * sits now (null: no seat, so no view), `dealt` the seat it was dealt into
+ * in `hand` (null: it sat down after the deal).
+ */
+export function sixFrame(
+  kind: 'welcome' | 'state',
+  seq: number,
+  seat: SeatId | null,
+  dealt: SeatId | null,
+  hand: HandState | null,
+  {
+    table = sixInfo(),
+    lastReqId = null,
+  }: { table?: MatchInfo; lastReqId?: string | null } = {},
+): ServerMsg {
+  const view =
+    hand && seat !== null
+      ? seatView(hand, dealt, {
+          matchId: MATCH,
+          match: table,
+          clock: null,
+          lastReqId,
+          commitment: null,
+        })
+      : null
+  const base = { seq, matchId: MATCH, serverNow: 0, table, view }
+  return kind === 'welcome'
+    ? { ...base, t: 'welcome', seat }
+    : { ...base, t: 'state' }
 }

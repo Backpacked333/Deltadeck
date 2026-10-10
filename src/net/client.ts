@@ -186,6 +186,18 @@ export class TableConnection {
     return true
   }
 
+  /**
+   * Takes `seat` at a six table. The frame names only the seat: the server
+   * seats this socket's account with its own buy-in, and its welcome says
+   * where we sit (or an error says why not).
+   */
+  sit(seat: SeatId): boolean {
+    const { status, seat: current } = this.state
+    if (status !== 'open' || current !== null) return false
+    this.socket!.send(JSON.stringify({ t: 'sit', seat }))
+    return true
+  }
+
   private set(patch: Partial<TableState>) {
     this.state = { ...this.state, ...patch }
     for (const listener of this.listeners) listener()

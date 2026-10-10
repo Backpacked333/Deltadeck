@@ -702,3 +702,69 @@
     opacity: 0.55;
   }
 }
+
+/* ---------- Casual 6-max at the live table (P2-05b) ----------
+   The middle of the felt holds the pot, the board and the viewer's own
+   cards. The trainer's 60 px cards make a 324 px board, wider than the
+   middle column of the oval up to about 860 px and than the phone grid, so
+   the ring sets its own card size. */
+@media (max-width: 900px) {
+  .six-ring {
+    --card-md-w: 42px;
+  }
+}
+@media (max-width: 680px) {
+  .six-ring {
+    --card-md-w: 40px;
+  }
+}
+.six-pot {
+  margin: 0;
+  color: var(--on-felt-2);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.six-pot b {
+  color: var(--on-felt);
+}
+.six-board,
+.six-hole {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+}
+@media (max-width: 900px) {
+  .six-board,
+  .six-hole {
+    gap: 4px;
+  }
+}
+/* Where the action bar stands on the viewer's turn: the same card, saying
+   who is to act or how the hand went. */
+.six-wait {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+.six-wait .action-caption {
+  margin: 0;
+}
+.six-shown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 14px;
+}
+.six-shown li {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}

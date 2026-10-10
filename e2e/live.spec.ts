@@ -1,6 +1,7 @@
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test } from '@playwright/test'
 import type { Browser, Page } from '@playwright/test'
+import { fakeSixTable, SIX_TABLE } from './sixTable'
 
 type Frame = {
   t: string
@@ -147,6 +148,61 @@ test('a third person cannot take a full table', async ({ browser }) => {
     },
   )
   for (const p of [alice, bob, carol]) await p.close()
+})
+
+test('keyboard loop at a six-seat table', async ({ browser }) => {
+  // No table server here: six tables cannot be opened over HTTP before
+  // quick-sit (P2-08), so the page's socket is answered by sixTable.ts.
+  const me = await player(browser, named('six'))
+  const { page } = me
+  const table = await fakeSixTable(page)
+  const acts = () =>
+    table.received.flatMap((m) => (m.t === 'act' ? [m.action] : []))
+  await page.goto(`/#play/${SIX_TABLE}`)
+  await expect(page.getByText('6-max · Hand 1')).toBeVisible()
+  const board = page
+    .getByRole('group', { name: 'Community cards' })
+    .getByRole('img', { name: / of / })
+
+  // Pre-flop, in the small blind after four calls: 2 picks ¾ of the pot
+  // (20 + ¾ × 120) and R raises to it.
+  await expect(myTurn(page)).toBeVisible()
+  await expect(page.locator('.action-bar kbd')).toHaveText(['F', 'C', 'R'])
+  await page.keyboard.press('2')
+  await expect(
+    page.getByRole('button', { name: /^Raise to 110/ }),
+  ).toBeVisible()
+  await page.keyboard.press('r')
+  await expect.poll(acts).toEqual([{ type: 'raise', to: 110 }])
+
+  // Everyone called. Flop and turn: C checks.
+  for (const cards of [3, 4]) {
+    await expect(board).toHaveCount(cards)
+    await expect(myTurn(page)).toBeVisible()
+    await page.keyboard.press('c')
+    await expect.poll(() => acts().length).toBe(cards - 1)
+  }
+
+  // River: 3 picks the pot (660) and B bets it; everyone calls.
+  await expect(board).toHaveCount(5)
+  await expect(myTurn(page)).toBeVisible()
+  await page.keyboard.press('3')
+  await expect(page.getByRole('button', { name: /^Bet 660/ })).toBeVisible()
+  await page.keyboard.press('b')
+  await expect(page.getByText('Next hand in a few seconds.')).toBeVisible()
+  expect(acts()).toEqual([
+    { type: 'raise', to: 110 },
+    { type: 'check' },
+    { type: 'check' },
+    { type: 'raise', to: 660 },
+  ])
+
+  // The hand is over and it is nobody's turn: the keys make no move.
+  await page.keyboard.press('c')
+  await page.keyboard.press('f')
+  await page.waitForTimeout(300)
+  expect(acts()).toHaveLength(4)
+  await me.close()
 })
 
 // One lobby holds every matchmaking queue, so two rated tests in parallel
