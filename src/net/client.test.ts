@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act as engineAct } from '../engine/hand'
 import { CLOSE_ABUSE, CLOSE_GONE, CLOSE_RATE_LIMITED } from '../shared/protocol'
+import type { HandRecordV1, ServerMsg } from '../shared/protocol'
 import { TableConnection } from './client'
 import { FakeSocket, firstHand, frame, MATCH } from './testing'
 
@@ -222,6 +223,40 @@ describe('TableConnection', () => {
     expect(connection.getState().status).toBe('closed')
     await vi.advanceTimersByTimeAsync(10_000)
     expect(FakeSocket.all).toHaveLength(1)
+  })
+
+  it("starts a new session's hands afresh, though its hand numbers restart", async () => {
+    // A six table's sessions each number their hands from 1, under a new
+    // matchId. The last session's hand 1 must not lend its record (names,
+    // deck check) to the new hand 1, nor crowd it out of the kept hands.
+    const { connection } = connect()
+    await flush()
+    const socket = FakeSocket.last()
+    const start = (matchId: string, handNo: number, seq: number) =>
+      ({
+        t: 'hand_start',
+        seq,
+        matchId,
+        handNo,
+        commitment: `${matchId}-${handNo}`,
+        button: 0,
+        blinds: { sb: 10, bb: 20 },
+        stacks: [2000, 2000],
+      }) satisfies ServerMsg
+    for (let n = 1; n <= 100; n++) {
+      socket.emit(start(MATCH, n, 2 * n))
+      socket.emit({
+        t: 'hand_end',
+        seq: 2 * n + 1,
+        matchId: MATCH,
+        handNo: n,
+        record: { handNo: n } as unknown as HandRecordV1,
+      })
+    }
+    socket.emit(start('next-session', 1, 300))
+    expect(connection.getState().hands).toEqual({
+      1: { commitment: 'next-session-1' },
+    })
   })
 
   it('records the match result', async () => {
