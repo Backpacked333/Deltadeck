@@ -25,7 +25,8 @@ import { lobbyStub } from '../src/lobby'
 import type { LobbyDO } from '../src/lobby'
 import { NEXT_HAND_MS } from '../src/table'
 import type { InitBody, TableDO } from '../src/table'
-import { checkFrames } from './frames'
+import { dealSlots } from '../../src/engine/deck'
+import { analysisKeys, checkFrames, FLOW_TYPES } from './frames'
 import {
   bySeat,
   connect,
@@ -1050,4 +1051,72 @@ describe('a bad stored sit-out count', () => {
     await elapse(matchId, 1)
     expect((await seated(matchId)).map((p) => p.seat)).toEqual([0])
   })
+})
+
+describe('sit-out frames', () => {
+  /** Every dealt seat's hole cards in `hand`, as the table holds them. */
+  const holes = (hand: HandState) =>
+    hand.config.seats.map(({ seat }) =>
+      dealSlots(hand.config).holes[seat].map((slot) => hand.deck[slot]),
+    )
+
+  it('sit_in and sit_out frames carry only allowed keys', async () => {
+    const matchId = await sixTable()
+    const rigged = new Rigged()
+    await rig(matchId, rigged)
+    const watcher = await connect(matchId, 'sf-w')
+    await watcher.next((f) => f.t === 'welcome')
+    const clients: Record<SeatId, Client> = {
+      0: await sitDown(matchId, 'sf-0', 0),
+      2: await sitDown(matchId, 'sf-2', 2),
+    }
+    await clients[0].next(isState(1))
+    const one = (await peek(matchId)).hand!
+    // Refused, typed: a socket without a seat has nothing to sit out of.
+    expect(await sitOut(watcher)).toMatchObject({ code: 'not_seated' })
+    expect(await sitIn(watcher)).toMatchObject({ code: 'not_seated' })
+    // Seat 4 sits during hand 1 and starts hand 2 on 100 chips.
+    clients[4] = await sitDown(matchId, 'sf-4', 4)
+    await setStack(matchId, 4, 100)
+    rigged.holes = { 0: 'As Ad', 4: '7c 2h' }
+    const two = await nextHand(matchId, clients, fold)
+    rigged.holes = null
+    // Hand 2: seat 2 sits out but plays it (folding to the raise), and
+    // seat 4 loses its last chips: both sit out from hand 3, and a sit_in
+    // with no chips is refused.
+    expect(statusOf(await sitOut(clients[2]), 2)).toBe('sitting_out')
+    await move(matchId, clients, () => ({ type: 'raise', to: 200 }))
+    await move(matchId, clients, fold)
+    await move(matchId, clients, () => ({ type: 'call' }))
+    expect(await sitIn(clients[4])).toMatchObject({ code: 'no_chips' })
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 2)
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).match.status).toBe('waiting')
+    // Seat 2 sits in: two to deal in, so hand 3 deals at once.
+    expect(statusOf(await sitIn(clients[2]), 2)).toBe('playing')
+    await clients[2].next(isState(3))
+    const three = await playOut(matchId, { 0: clients[0], 2: clients[2] })
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 3)
+
+    const all = [watcher, ...Object.values(clients)].flatMap((c) => c.frames)
+    expect(checkFrames(all, 'six-casual')).toEqual(new Set(FLOW_TYPES.sitOut))
+    expect(analysisKeys(all)).toEqual([])
+    // The socket without a seat heard every status change, never a hand.
+    for (const f of watcher.frames) {
+      expect(['welcome', 'state', 'error']).toContain(f.t)
+      if (f.t === 'welcome' || f.t === 'state') expect(f.view).toBeNull()
+    }
+    const statuses = watcher.frames.flatMap((f) =>
+      f.t === 'state'
+        ? [f.table.players.map((p) => `${p.seat}:${p.status}`).join()]
+        : [],
+    )
+    expect(statuses).toContain('0:playing,2:sitting_out,4:playing')
+    expect(statuses).toContain('0:playing,2:sitting_out,4:sitting_out')
+    expect(statuses.at(-1)).toBe('0:playing,2:playing,4:sitting_out')
+    const heard = JSON.stringify(watcher.frames)
+    for (const hand of [one, two, three])
+      for (const cards of holes(hand))
+        expect(heard).not.toContain(JSON.stringify(cards))
+  }, 30_000)
 })

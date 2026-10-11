@@ -478,4 +478,10 @@ export const FLOW_TYPES = {
    * and granted between hands, seen by a socket without a seat too.
    */
   rebuy: ['welcome', 'state', 'hand_start', 'hand_end', 'reveal', 'error'],
+  /**
+   * six-sitout.test.ts: sit_out and sit_in refused without a seat, a
+   * sit_out during a hand, a bust and its no_chips sit_in, and a sit_in
+   * that deals at a waiting table, seen by a socket without a seat too.
+   */
+  sitOut: ['welcome', 'state', 'hand_start', 'hand_end', 'reveal', 'error'],
 } satisfies Record<string, ServerMsg['t'][]>
