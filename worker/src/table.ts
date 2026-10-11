@@ -53,6 +53,7 @@ import {
   isCurrentTurn,
   orbitDone,
   outboxBackoff,
+  SIT_OUT_TIMEOUTS,
   timeoutAction,
   turnDeadline,
 } from './deadlines'
@@ -589,6 +590,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
     if (msg.t === 'sit') return this.sit(ws, msg.seat)
     if (msg.t === 'stand') return this.stand(ws)
     if (msg.t === 'rebuy') return this.rebuy(ws)
+    if (msg.t === 'sit_out') return this.sitOutMsg(ws)
+    if (msg.t === 'sit_in') return this.sitInMsg(ws)
     if (msg.t !== 'act') return this.illegal(ws, userId, 'Not a table message')
     // Nobody without a seat acts, and the reply carries no hand.
     if (!this.atTable(userId))
@@ -839,6 +842,70 @@ export class TableDO extends DurableObject<WorkerEnv> {
       match.status = 'playing'
       await this.startNextHand()
     }
+  }
+
+  /**
+   * A six-table player sits out from the next hand (ADR amendment
+   * 2026-10-10, "Sitting out"), between hands or during one. Dealt into
+   * the hand being played, they play it out as usual: only the next deal
+   * leaves them out. The answer is a welcome, and everyone sees the status.
+   * Sitting out again changes nothing.
+   */
+  private async sitOutMsg(ws: WebSocket) {
+    const match = this.match!
+    const { userId } = ws.deserializeAttachment() as Attachment
+    if (!this.seatable())
+      return this.illegal(ws, userId, 'There is no seat to sit out from here')
+    const player = match.players.find((p) => p.userId === userId)
+    if (!player) return this.reject(ws, 'not_seated', 'You have no seat here')
+    if (!this.sitOut(player))
+      return this.send(ws, this.frame('welcome', userId))
+    this.seq++
+    await this.ctx.storage.put({ match, seq: this.seq })
+    this.send(ws, this.frame('welcome', userId))
+    this.broadcast('state', { skip: ws, roster: true })
+  }
+
+  /**
+   * A six-table player sitting out is dealt in again from the next hand,
+   * their missed decisions back at 0 (ADR "Sitting out"). A player who is
+   * playing already changes nothing. With two players to deal in at a
+   * waiting table, the next hand deals now.
+   */
+  private async sitInMsg(ws: WebSocket) {
+    const match = this.match!
+    const { userId } = ws.deserializeAttachment() as Attachment
+    if (!this.seatable())
+      return this.illegal(ws, userId, 'There is no seat to sit in at here')
+    const player = match.players.find((p) => p.userId === userId)
+    if (!player) return this.reject(ws, 'not_seated', 'You have no seat here')
+    if (player.status !== 'sitting_out')
+      return this.send(ws, this.frame('welcome', userId))
+    this.sitIn(player)
+    this.seq++
+    await this.ctx.storage.put({ match, seq: this.seq })
+    this.send(ws, this.frame('welcome', userId))
+    this.broadcast('state', { skip: ws, roster: true })
+    if (match.status === 'waiting' && this.funded().length >= 2) {
+      match.status = 'playing'
+      await this.startNextHand()
+    }
+  }
+
+  /**
+   * Six-casual: `player` sits out from the next hand. False when they
+   * already were.
+   */
+  private sitOut(player: Player) {
+    if (player.status === 'sitting_out') return false
+    player.status = 'sitting_out'
+    return true
+  }
+
+  /** Six-casual: `player` is dealt in from the next hand, with no misses. */
+  private sitIn(player: Player) {
+    player.status = 'playing'
+    player.timeouts = 0
   }
 
   /**
@@ -1146,10 +1213,12 @@ export class TableDO extends DurableObject<WorkerEnv> {
       seq: this.seq,
       lastAck: this.lastAck,
     }
-    // A six table never ends for one player's timeouts; sitting them out
-    // after two is P2-04's (PR-16).
-    const forfeit =
-      match.config.kind !== 'six-casual' && player.timeouts >= FORFEIT_TIMEOUTS
+    const six = match.config.kind === 'six-casual'
+    // A six table never ends for one player's timeouts: two in a row sit
+    // them out from the next hand, and this one goes on on the normal clock.
+    const forfeit = !six && player.timeouts >= FORFEIT_TIMEOUTS
+    const satOut =
+      six && player.timeouts >= SIT_OUT_TIMEOUTS && this.sitOut(player)
     // Six-casual: players who stood during this hand leave as it ends.
     const stood = isOver(next) ? match.players.filter((p) => p.standing) : []
     if (isOver(next)) {
@@ -1169,8 +1238,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
     await this.ctx.storage.put(writes)
     await this.armAlarm()
     if (isOver(next)) await this.dropDeckIfUnqueued(writes)
-    // A seat that freed changes the table for sockets without a seat too.
-    this.broadcast('state', { roster: stood.length > 0 })
+    // A seat that freed, or a status that changed, changes the table for
+    // sockets without a seat too.
+    this.broadcast('state', { roster: stood.length > 0 || satOut })
     if (isOver(next)) for (const ws of this.openSockets()) this.sendEnded(ws)
     for (const ws of this.openSockets()) {
       const userId = this.userOf(ws)
