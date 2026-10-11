@@ -1102,19 +1102,7 @@ describe('LiveTable at a six-casual table', () => {
   it('side pots render separately and pay out in award order', async () => {
     render(<LiveTable matchId={MATCH} identity={alice} />)
     const socket = await opened()
-    // carol (300) and bob (800) are all in pre-flop, then alice bets 400 on
-    // the flop and dave calls: a main pot for all four, side pot 1 without
-    // carol, and side pot 2 between alice and dave.
-    let hand = sixHand({
-      stacks: { 0: 800, 3: 300 },
-      holes: { 0: 'Th Td', 2: 'Ah 9d', 3: 'Js 8s', 5: '8d 8h' },
-    })
-    hand = engineAct(hand, 5, { type: 'raise', to: 800 })
-    hand = engineAct(hand, 0, { type: 'call' })
-    hand = engineAct(hand, 2, { type: 'call' })
-    hand = engineAct(hand, 3, { type: 'call' })
-    hand = engineAct(hand, 2, { type: 'raise', to: 400 })
-    hand = engineAct(hand, 5, { type: 'call' })
+    let hand = sidePotsAtTheTurn()
     expect(hand.street).toBe('turn')
     act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
 
@@ -1163,6 +1151,68 @@ describe('LiveTable at a six-casual table', () => {
     expect(items(screen.getByRole('list', { name: 'Pots paid' }))).toEqual([
       'Side pot 1 1,000 chips split: you 500, dave 500',
       'Main pot 900 chips to carol',
+    ])
+  })
+
+  it('the pots paid name who was dealt in, after a seat changes hands', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    // bob takes side pot 1 and is unseated as the hand ends; erin sits in
+    // his seat while the result still shows. The ring shows her, but the
+    // pots went to the players the hand's record says were dealt in.
+    const done = playedOut(sidePotsAtTheTurn())
+    const erin = SIX_ROSTER.map((p) =>
+      p.seat === 0 ? { seat: 0 as const, username: 'erin', stack: 2000 } : p,
+    )
+    act(() => {
+      socket.emit({
+        t: 'hand_end',
+        seq: 1,
+        matchId: MATCH,
+        handNo: 1,
+        record: {
+          seats: SIX_ROSTER.map((p) => ({ ...p, userId: p.username })),
+        } as unknown as HandRecordV1,
+      })
+      socket.emit(sixFrame('welcome', 2, 2, 2, done, { table: sixInfo(erin) }))
+    })
+    expect(seat(0)).toHaveAccessibleName('Seat 1: erin')
+    expect(items(screen.getByRole('list', { name: 'Pots paid' }))).toEqual([
+      'Side pot 2 800 chips to you',
+      'Side pot 1 1,500 chips to bob',
+      'Main pot 1,200 chips to carol',
+    ])
+  })
+
+  it('a player seated after the deal sees the side pots by name', async () => {
+    render(<LiveTable matchId={MATCH} identity={identity('erin')} />)
+    const socket = await opened()
+    // erin sat down after the deal: she watches, dealt nothing, so no pot
+    // is hers and each names the players who can win it.
+    const roster = [...SIX_ROSTER, { seat: 4, username: 'erin', stack: 2000 }]
+    const hand = sidePotsAtTheTurn()
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 1, 4, null, hand, { table: sixInfo(roster) }),
+      ),
+    )
+    expect(items(screen.getByRole('list', { name: 'Pots' }))).toEqual([
+      'Main pot 1,200 chips between bob, alice, carol and dave',
+      'Side pot 1 1,500 chips between bob, alice and dave',
+      'Side pot 2 800 chips between alice and dave',
+    ])
+
+    act(() =>
+      socket.emit(
+        sixFrame('state', 2, 4, null, playedOut(hand), {
+          table: sixInfo(roster),
+        }),
+      ),
+    )
+    expect(items(screen.getByRole('list', { name: 'Pots paid' }))).toEqual([
+      'Side pot 2 800 chips to alice',
+      'Side pot 1 1,500 chips to bob',
+      'Main pot 1,200 chips to carol',
     ])
   })
 
@@ -1605,6 +1655,26 @@ const items = (list: HTMLElement) =>
   within(list)
     .getAllByRole('listitem')
     .map((li) => li.textContent!.replace(/\s+/g, ' ').trim())
+
+/**
+ * The turn with two side pots: carol (300) and bob (800) are all in
+ * pre-flop, then alice bets 400 on the flop and dave calls. The main pot
+ * (1,200) is for all four, side pot 1 (1,500) is without carol, and side
+ * pot 2 (800) is between alice and dave.
+ */
+function sidePotsAtTheTurn() {
+  let hand = sixHand({
+    stacks: { 0: 800, 3: 300 },
+    holes: { 0: 'Th Td', 2: 'Ah 9d', 3: 'Js 8s', 5: '8d 8h' },
+  })
+  hand = engineAct(hand, 5, { type: 'raise', to: 800 })
+  hand = engineAct(hand, 0, { type: 'call' })
+  hand = engineAct(hand, 2, { type: 'call' })
+  hand = engineAct(hand, 3, { type: 'call' })
+  hand = engineAct(hand, 2, { type: 'raise', to: 400 })
+  hand = engineAct(hand, 5, { type: 'call' })
+  return hand
+}
 
 /** Every remaining player checks or calls the hand down to showdown. */
 function playedOut(start: HandState) {
