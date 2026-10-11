@@ -98,6 +98,9 @@ type View =
 type Route = { view: View; lesson: LessonId | null }
 const Curriculum = lazy(() => import('./curriculum/Curriculum'))
 const LiveApp = lazy(() => import('./net/LiveApp'))
+// Signed in: checks the stored session with the account service (lazy, so
+// the account client never reaches the entry chunk).
+const SessionKeeper = lazy(() => import('./net/Session'))
 const InfoPage = lazy(() => import('./info/InfoPages'))
 const Gallery = lazy(() => import('./dev/Gallery'))
 const Landing = lazy(() => import('./landing/Landing'))
@@ -1204,6 +1207,11 @@ export default function App() {
           />
         )}
       </main>
+      {member && (
+        <Suspense fallback={null}>
+          <SessionKeeper />
+        </Suspense>
+      )}
 
       <footer className="footer">
         <span>
