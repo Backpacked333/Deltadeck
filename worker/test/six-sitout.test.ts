@@ -717,6 +717,50 @@ describe('standing up a player who sits out', () => {
     )
   }, 30_000)
 
+  it('a player who sits in at a waiting table keeps the seat while they wait to be dealt (guard)', async () => {
+    const matchId = await sixTable()
+    const clients: Record<SeatId, Client> = {
+      0: await sitDown(matchId, 'sw-0', 0),
+      2: await sitDown(matchId, 'sw-2', 2),
+    }
+    await clients[0].next(isState(1))
+    await playOut(matchId, clients, fold)
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 1)
+    // Seat 2 stands between hands, so seat 0 waits alone. It sits out,
+    // and four minutes later sits in: nobody is there to deal it in.
+    await answer(clients[2], { t: 'stand' })
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).match.status).toBe('waiting')
+    const t = await clockOf(matchId)
+    await sitOut(clients[0])
+    await elapse(matchId, 4 * 60_000)
+    expect(statusOf(await sitIn(clients[0]), 0)).toBe('playing')
+    // Playing, it waits to be dealt in as anyone seated does: the
+    // sit-out clocks stand nobody up who is not sitting out (ADR "Sitting
+    // out"), so no `sitout` alarm is left and it keeps the seat long
+    // after its five minutes.
+    expect(
+      (await storedDeadlines(matchId))!.filter((d) => d.kind === 'sitout'),
+    ).toEqual([])
+    await elapse(matchId, 20 * 60_000)
+    expect((await seated(matchId)).map((p) => p.seat)).toEqual([0])
+    expect(await claims()).toEqual({ 'sw-0': matchId })
+    // No hand dealt it in, so its clocks are where they were: sitting out
+    // again stands it up at once.
+    await sitOut(clients[0])
+    expect(await storedDeadlines(matchId)).toContainEqual({
+      kind: 'sitout',
+      at: t + FIVE_MINUTES,
+    })
+    await elapse(matchId, 0)
+    expect((await seated(matchId)).map((p) => p.seat)).toEqual([])
+    expect(last(clients[0].frames)).toMatchObject({ t: 'welcome', seat: null })
+    checkFrames(
+      Object.values(clients).flatMap((c) => c.frames),
+      'six-casual',
+    )
+  })
+
   it('a dealt hand spends the removal clocks, so the next sit_out starts them again', async () => {
     const matchId = await sixTable()
     const clients: Record<SeatId, Client> = {
