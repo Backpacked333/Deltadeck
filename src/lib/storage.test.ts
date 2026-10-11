@@ -4,6 +4,7 @@ import {
   emptyProgress,
   exportProgress,
   importProgress,
+  sanitizeProgress,
   LEGACY_KEY,
   readProgress,
   saveProgress,
@@ -181,5 +182,35 @@ describe('local progress storage', () => {
     progress = upsertHand(progress, { ...b, graded: true, expectedNet: -40 })
     expect(progress.hands.map((h) => h.id)).toEqual(['a', 'b'])
     expect(progress.hands[1]).toMatchObject({ graded: true, expectedNet: -40 })
+  })
+})
+
+describe('the account marker', () => {
+  it('keeps whose progress this is and when it was cleared, if well formed', () => {
+    const kept = sanitizeProgress({
+      hands: [],
+      owner: '11111111-1111-4111-8111-111111111111',
+      historyClearedAt: 1760000000000,
+    })
+    expect(kept.owner).toBe('11111111-1111-4111-8111-111111111111')
+    expect(kept.historyClearedAt).toBe(1760000000000)
+    const dropped = sanitizeProgress({
+      hands: [],
+      owner: '<script>',
+      historyClearedAt: 'yesterday',
+    })
+    expect(dropped.owner).toBeUndefined()
+    expect(dropped.historyClearedAt).toBeUndefined()
+  })
+
+  it('never takes an owner from an imported file', () => {
+    const file = JSON.stringify({
+      hands: [],
+      owner: 'someone',
+      historyClearedAt: 5,
+    })
+    const imported = importProgress(file)!
+    expect(imported.owner).toBeUndefined()
+    expect(imported.historyClearedAt).toBeUndefined()
   })
 })

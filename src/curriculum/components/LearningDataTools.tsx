@@ -38,9 +38,8 @@ export function LearningDataTools({ session }: { session: LearningSession }) {
     <section className="qp-data-tools">
       <h2>Learning data and recovery</h2>
       <p>
-        Only local learning records are exported. No account, cloud sync, table
-        history, private cards or future deck is included. JSON import is not
-        part of R1.
+        Only your learning records are exported: no table history, private cards
+        or future deck. JSON import is not part of R1.
       </p>
       <button className="button secondary" onClick={() => exportData('json')}>
         Export learning JSON

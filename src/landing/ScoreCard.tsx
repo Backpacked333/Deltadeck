@@ -242,7 +242,7 @@ export function ScoreCard({
           <span>
             {signedIn
               ? 'Your best score on each hand is kept with your account.'
-              : 'Your score, a rating once you play people, a public profile and a school badge. Google or an email link, no password.'}
+              : 'Your score, a rating once you play people, a public profile and a school badge. Free, in under a minute.'}
           </span>
         </div>
         <button className="btn btn-accent btn-lg" onClick={onSave}>

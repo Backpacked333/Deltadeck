@@ -147,6 +147,16 @@ function Terms() {
         </p>
       </Section>
 
+      <Section id="t-practice" title="Your practice data">
+        <p>
+          While you are signed in, your practice hands against Atlas, your
+          trainer settings and your lesson progress are saved to your account,
+          so they follow you between devices. They are private: only you can
+          read them. Signing out removes them from that browser; deleting your
+          account deletes them.
+        </p>
+      </Section>
+
       <Section id="t-fair" title="Fair play">
         <p>
           Play your own hands: no help from software or people during a hand, no

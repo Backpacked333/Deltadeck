@@ -4,6 +4,11 @@ import { describe, expect, it, vi } from 'vitest'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { rememberAuthReturn } from '../lib/authReturn'
 import { seedSession, TEST_SESSION_KEY } from '../test/session'
+import { signedIn } from '../lib/account'
+import { emptyProgress } from '../lib/storage'
+import type { HandRecord } from '../lib/storage'
+import { fakeAccount } from './fakeAccount'
+import { PracticeSync } from './sync'
 import { AccountPage, AuthCallback, SignOut } from './AccountPage'
 import type { Online } from './supabase'
 
@@ -44,6 +49,14 @@ function online({
 }
 
 const at = (url: string) => window.history.replaceState(null, '', url)
+const unsentHand = {
+  id: 's:1',
+  hand: 1,
+  net: 5,
+  result: 'won',
+  guided: false,
+  at: 1,
+} as HandRecord
 
 describe('AccountPage', () => {
   it('sends a signed-in player on to where they were going', async () => {
@@ -155,6 +168,47 @@ describe('SignOut', () => {
     expect(signOut).toHaveBeenCalledWith({ scope: 'local' })
     expect(localStorage.getItem(TEST_SESSION_KEY)).toBeNull()
     expect(localStorage.getItem('qp.username')).toBeNull()
+  })
+
+  it("forgets this browser's practice: the account keeps it", async () => {
+    seedSession()
+    localStorage.setItem('quantpoker.progress.v2', '{"hands":[]}')
+    localStorage.setItem('quantpoker.learning.v2', '{}')
+    const replace = vi.fn()
+    vi.stubGlobal('location', { ...window.location, replace })
+    render(<SignOut online={online()} />)
+    await waitFor(() => expect(replace).toHaveBeenCalled())
+    expect(localStorage.getItem('quantpoker.progress.v2')).toBeNull()
+    expect(localStorage.getItem('quantpoker.learning.v2')).toBeNull()
+  })
+
+  it('asks before dropping practice that could not reach the account', async () => {
+    seedSession()
+    const replace = vi.fn()
+    vi.stubGlobal('location', { ...window.location, replace })
+    const account = fakeAccount()
+    const sync = new PracticeSync(account.client, 'u1', {
+      merge: () => {},
+      reloadLearning: () => {},
+    })
+    try {
+      await sync.start()
+      account.state.offline = true
+      sync.note({ ...emptyProgress(), owner: 'u1', hands: [unsentHand] })
+      render(<SignOut online={online()} />)
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'not saved to your account yet',
+      )
+      expect(replace).not.toHaveBeenCalled()
+      await userEvent.click(
+        screen.getByRole('button', { name: 'Stay signed in' }),
+      )
+      // (window.location is stubbed here; the document's is the real one.)
+      expect(document.location.hash).toBe('#table')
+      expect(signedIn()).toBe(true)
+    } finally {
+      sync.stop()
+    }
   })
 
   it('still signs out when the account service cannot be reached', async () => {

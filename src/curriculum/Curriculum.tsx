@@ -735,11 +735,12 @@ function Notebook({
       <section className="local-data-panel">
         <div>
           <ShieldCheck size={20} />
-          <h3>Your learning stays with you.</h3>
+          <h3>Your learning is saved.</h3>
         </div>
         <p>
-          Progress and notes are stored only in this browser. There’s no account
-          or cloud sync. Export your notes before clearing browser data.
+          Progress and notes are kept in this browser and, while you are signed
+          in, on your account, so they follow you to your other devices. Only
+          you can read them. Export your notes whenever you like.
         </p>
         {confirmReset ? (
           <div className="reset-confirm" role="alert">
