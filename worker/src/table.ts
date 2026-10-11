@@ -1534,8 +1534,10 @@ export class TableDO extends DurableObject<WorkerEnv> {
 
   /**
    * Six-casual: the finished hand's final stacks go back to the accounts
-   * dealt into it, as the next hand is dealt (so a table summary shows
-   * stacks as of the last deal). Once per hand: a stack is set, not added.
+   * dealt into it, as the next hand is dealt or a rebuy tops one up. Once
+   * per hand: a stack is set, not added. An account that stood and sat
+   * again since the deal (`justSat`, cleared only when dealt in) is a new
+   * seat with its own buy-in: the hand's final stack left with the old one.
    */
   private settleStacks() {
     const match = this.match!
@@ -1546,7 +1548,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     if (!hand || !isOver(hand) || (match.settled ?? 0) >= latest) return
     for (const p of hand.players) {
       const player = this.playerIn(p.seat)
-      if (player) player.stack = p.stack
+      if (player && !player.justSat) player.stack = p.stack
     }
     match.settled = latest
   }
@@ -1555,7 +1557,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
    * Six-casual: the chips `player` has outside the hand being played.
    * Between hands, a player dealt into the hand just finished has its final
    * stack (the next deal settles it into `stack`); otherwise `stack` holds
-   * it: as of the last deal, the buy-in, or after a rebuy.
+   * it: as of the last deal, the buy-in, or after a rebuy. An account that
+   * stood and sat again since the deal holds its new buy-in, as
+   * settleStacks leaves it.
    */
   private stackOf(player: Player) {
     const match = this.match!
@@ -1567,7 +1571,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     ) {
       const seat = this.handSeat(player.userId)
       const final = hand.players.find((p) => p.seat === seat)
-      if (seat !== null && final) return final.stack
+      if (seat !== null && final && !player.justSat) return final.stack
     }
     return player.stack!
   }

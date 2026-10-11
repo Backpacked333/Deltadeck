@@ -1661,6 +1661,38 @@ describe('rebuying at a six table', () => {
     )
   })
 
+  it("an account that stands and sits again before the next deal brings a fresh buy-in, not the hand's final stack", async () => {
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2, 4], 'ra')
+    await clients[0].next(isState(1))
+    // Hand 1 (seats 0 and 2; seat 4 sat during it): seat 0 folds its
+    // small blind, 1,990 to 2,010, and stands up between hands.
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 1)
+    expect(await standUp(clients[0])).toMatchObject({ seat: null })
+    // The cooldown is over before the next deal, as it never is in play
+    // (2 minutes against 3 s), but nothing enforces that. The account
+    // sits again, in seat 1, with the buy-in a new seat brings.
+    await setClock(matchId, 1_800_000_000_000 + SIT_COOLDOWN_MS)
+    const back = await trySit(clients[0], 1)
+    expect(back).toMatchObject({ t: 'welcome', seat: 1 })
+    expect(rosterStack(back, 1)).toBe(2000)
+    expect(rosterStack(back, 2)).toBe(2010)
+    // Hand 2 settles hand 1's stacks into those dealt into it, and deals
+    // the account its new seat's 2,000: 6,010 at the table, as brought.
+    await elapse(matchId, NEXT_HAND_MS)
+    await clients[2].next(isState(2))
+    expect((await peek(matchId)).hand!.config.seats).toEqual([
+      { seat: 1, stack: 2000 },
+      { seat: 2, stack: 2010 },
+      { seat: 4, stack: 2000 },
+    ])
+    checkFrames(
+      Object.values(clients).flatMap((c) => c.frames),
+      'six-casual',
+    )
+  })
+
   it('a heads-up table refuses a rebuy', async () => {
     const matchId = await createTable('hu-a')
     const a = await connect(matchId, 'hu-a')
