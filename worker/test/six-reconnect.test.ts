@@ -17,6 +17,8 @@ import { dealSlots } from '../../src/engine/deck'
 import { legalActions } from '../../src/engine/hand'
 import type { HandState, PlayerAction, SeatId } from '../../src/engine/types'
 import type { ClientMsg, ServerMsg } from '../../src/shared/protocol'
+import { lobbyStub } from '../src/lobby'
+import type { LobbyDO } from '../src/lobby'
 import { GRACE_MS } from '../src/rated'
 import { NEXT_HAND_MS } from '../src/table'
 import type { InitBody, TableDO } from '../src/table'
@@ -795,54 +797,124 @@ describe('a restart while a player is away', () => {
   }, 30_000)
 })
 
+/**
+ * Holds every lobby claim the table makes until the test lets it go
+ * (`letGo(i)`, the i-th claim), and records the releases it sends.
+ */
+async function holdLobby(matchId: string) {
+  // Made here, not in the table: a promise the table made could not be
+  // resolved from the test (workerd's per-object I/O rule).
+  const gates: (() => void)[] = []
+  const holds = Array.from(
+    { length: 4 },
+    () => new Promise<void>((resolve) => gates.push(resolve)),
+  )
+  let claims = 0
+  const released: string[][] = []
+  await runInDurableObject(stub(matchId), (instance: TableDO) => {
+    const real = env.LOBBY
+    const lobbyOf = (id: DurableObjectId) => {
+      const lobby = real.get(id, { locationHint: 'enam' })
+      return {
+        claim: async (userId: string, table: string) => {
+          await holds[claims++]
+          return lobby.claim(userId, table)
+        },
+        release: (userIds: string[], table: string) => {
+          released.push(userIds)
+          return lobby.release(userIds, table)
+        },
+      }
+    }
+    ;(instance as unknown as { env: typeof env }).env = {
+      ...env,
+      LOBBY: {
+        idFromName: (name: string) => real.idFromName(name),
+        get: lobbyOf,
+      } as unknown as typeof env.LOBBY,
+    }
+  })
+  const until = async (
+    what: string,
+    done: () => boolean | Promise<boolean>,
+  ) => {
+    for (let i = 0; i < 400 && !(await done()); i++)
+      await new Promise((r) => setTimeout(r, 5))
+    expect(await done(), what).toBe(true)
+  }
+  return {
+    released,
+    /** Resolves once `n` claims are waiting. */
+    asked: (n: number) => until(`${n} claims asked`, () => claims >= n),
+    letGo: (i: number) => gates[i](),
+    until,
+  }
+}
+
+/** The table the lobby holds `userId` at, if any. */
+const lobbyHolds = (userId: string) =>
+  runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
+    state.storage.get<string>(`active:${userId}`),
+  )
+
 describe('a socket that closes while its sit waits on the lobby', () => {
-  it('still starts the grace once the seat is taken', async () => {
+  it('is not seated, and its lobby claim is released', async () => {
     const matchId = await sixTable()
-    let letGo = () => {}
-    const held = new Promise<void>((resolve) => (letGo = resolve))
-    let asked = false
-    await runInDurableObject(stub(matchId), (instance: TableDO) => {
-      const real = env.LOBBY
-      const lobbyOf = (id: DurableObjectId) => {
-        const lobby = real.get(id, { locationHint: 'enam' })
-        return {
-          claim: async (userId: string, table: string) => {
-            asked = true
-            await held
-            return lobby.claim(userId, table)
-          },
-          release: (userIds: string[], table: string) =>
-            lobby.release(userIds, table),
-        }
-      }
-      ;(instance as unknown as { env: typeof env }).env = {
-        ...env,
-        LOBBY: {
-          idFromName: (name: string) => real.idFromName(name),
-          get: lobbyOf,
-        } as unknown as typeof env.LOBBY,
-      }
-    })
+    const lobby = await holdLobby(matchId)
     const client = await connect(matchId, 'rc-0')
     await client.next((f) => f.t === 'welcome')
     client.send({ t: 'sit', seat: 0 })
     // The sit waits on the lobby; its socket closes meanwhile.
-    for (let i = 0; i < 400 && !asked; i++)
-      await new Promise((r) => setTimeout(r, 5))
-    expect(asked).toBe(true)
+    await lobby.asked(1)
     await leave(matchId, client, 'rc-0')
-    letGo()
-    for (let i = 0; i < 400 && !(await seated(matchId)).length; i++)
-      await new Promise((r) => setTimeout(r, 5))
-    const t = await clockOf(matchId)
+    lobby.letGo(0)
+    // Nobody is there to sit: no seat, no grace to run for one, and the
+    // account is free for its next table at once rather than held for the
+    // grace and the five minutes sitting out.
+    await lobby.until('a release sent', () => lobby.released.length > 0)
+    expect(lobby.released).toEqual([['rc-0']])
+    expect(await seated(matchId)).toEqual([])
+    expect(await graces(matchId)).toEqual([])
+    expect(await lobbyHolds('rc-0')).toBeUndefined()
+  })
+
+  it('leaves the claim to a second tab whose sit is still waiting', async () => {
+    // A tab sits, and a second tab of the same account replaces it while
+    // that sit waits on the lobby, then sits too. The first sit finds its
+    // socket closed and takes no seat, but must not release the claim the
+    // second one is about to be seated under.
+    const matchId = await sixTable()
+    const lobby = await holdLobby(matchId)
+    const first = await connect(matchId, 'rt-0')
+    await first.next((f) => f.t === 'welcome')
+    first.send({ t: 'sit', seat: 0 })
+    await lobby.asked(1)
+    const second = await connect(matchId, 'rt-0')
+    await second.next((f) => f.t === 'welcome')
+    const from = second.frames.length
+    second.send({ t: 'sit', seat: 3 })
+    await lobby.asked(2)
+    // The first claim answers; its sit is done once only the second one
+    // is still claiming.
+    lobby.letGo(0)
+    const claiming = () =>
+      runInDurableObject(
+        stub(matchId),
+        (instance: TableDO) =>
+          (instance as unknown as { claiming: Map<string, number> }).claiming,
+      )
+    await lobby.until(
+      'the first sit done',
+      async () => (await claiming()).get('rt-0') === 1,
+    )
+    expect(await seated(matchId)).toEqual([])
+    lobby.letGo(1)
+    await second.next((f) => f.t === 'welcome' && f.seat === 3, from)
     expect(await seated(matchId)).toMatchObject([
-      { seat: 0, userId: 'rc-0', status: 'playing' },
+      { seat: 3, userId: 'rt-0', status: 'playing' },
     ])
-    expect(await graces(matchId)).toEqual([
-      { kind: 'grace', at: t + GRACE_MS, seat: 0, userId: 'rc-0' },
-    ])
-    await at(matchId, t + GRACE_MS)
-    expect((await storedSeat(matchId, 0)).status).toBe('sitting_out')
+    expect(lobby.released).toEqual([])
+    expect(await lobbyHolds('rt-0')).toBe(matchId)
   })
 })
 

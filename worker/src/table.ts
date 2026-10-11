@@ -712,6 +712,12 @@ export class TableDO extends DurableObject<WorkerEnv> {
     if (this.match !== match || !this.seatable()) return
     if (this.atTable(userId))
       return this.send(ws, this.frame('welcome', userId))
+    // Its socket closed while the lobby answered: nobody is here to sit.
+    // No seat, so no grace and no five minutes sitting out holding the
+    // account here; the claim goes back at once, unless another sit of
+    // this account is still claiming (it keeps the claim, or releases it).
+    if (ws.readyState !== OPEN)
+      return this.claiming.has(userId) ? undefined : this.releaseSeats([userId])
     const seat = this.seatFor(ws, userId, wanted)
     if (seat === null) return this.releaseSeats([userId])
     const player: Player = {
@@ -722,12 +728,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
       justSat: true,
     }
     match.players = [...match.players, player].sort((a, b) => a.seat - b.seat)
-    // The socket may have closed while the lobby answered, when its close
-    // found no seat to start a grace for: it starts now.
-    const graced = this.graceForAbsent()
     this.seq++
     await this.ctx.storage.put({ match, seq: this.seq })
-    if (graced) await this.armAlarm()
     this.send(ws, this.frame('welcome', userId))
     this.broadcast('state', { skip: ws, roster: true })
     if (match.status === 'waiting' && match.players.length >= 2) {
