@@ -624,6 +624,35 @@ The plan gave `rebuy` (here) and `stand` (PR-12) server messages but no control 
   - `quick-sit picks the fullest table with a free seat`
   - `quick-sit retries the next table on full`
   - the `tables` frame passes `LOBBY_FRAME_KEYS`.
+- **As built** (branch `claude/sharp-cannon-4150j6`; `worker/src/lobby.ts`, `limits.ts`, `registry.ts`, `table.ts`, `deadlines.ts`; `src/shared/protocol.ts`, `src/net/lobbyClient.ts`). The six decisions are in the ADR's "Clarifications from PR-24", recorded before the code.
+  - **Wire (`qp.v1`, additive).** Client messages `quick_sit {tried?}` and `tables`, both for the lobby socket; a table answers either with `illegal`. `tried` is one to three distinct lowercase table ids (`QUICK_SIT_TABLES`), and anything else in the frame is refused. Lobby frames `sit_at {tableId}` and `tables {tables: TableRow[]}`. Error code `tables_full`, lobby only. `LOBBY_FRAME_KEYS` lists both frames, and `TABLE_ROW_KEYS` lists exactly `tableId`, `seated`, `maxSeats`, `avgPot` and `playersPerHour`. `checkLobbyFrame` checks each row by key and by value (a UUID, then counts), and `checkFrame` refuses `tables_full` from a table.
+  - **Quick-sit.** It spends from a per-account budget first: `QUICK_SITS` = 6 per 60 s, a `FrameBudget`, which now takes a burst and a window. It ends the account's heads-up search. Then, holding the account's claims (`forUsers`), it answers in this order:
+    1. `matched {resumed: true}` for the account's claim, at a six table or a heads-up one;
+    2. it asks `liveness()` of each tried table the lobby knows, and drops those that answer `over`;
+    3. `sit_at`: the first table from `tables()` with a free seat and not tried, then a table the lobby opened that is ready and nobody has sat at yet;
+    4. otherwise it opens a table.
+  - **Opening.** Under the cap of 50 (`SIX_TABLES_MAX`), counted as the listed ids together with the `created:` records younger than `CREATED_MS` (20 min); one table nobody has sat at per account; and the day's `creates:` count (30, shared with invites). The `created:` record (`{at, by, ready: false}`) and the day's count are written before `/init`, with only storage awaited since the first read. `ready` is set once `/init` answers. A failed init deletes the record and gives back the count.
+  - **Release.** `removeTable` deletes `created:` with `table:`. A table nobody sat at reaches it through `idle()`'s `unlist` after `IDLE_MS`; a table that halts, through `finish`.
+  - **The `report` deadline.** It is added (ADR decision 6): `syncReport` runs in `armAlarm`, and `sit` arms the alarm when a held sit leaves the table waiting. `six-reconnect.test.ts` now pins the report's alarm (t0 + 30 s) and then the grace end (t0 + 70 s).
+  - **Not built, as decided.** No `GET /api/tables`: the route is still 404. No push of the list. No client retry (PR-25).
+  - **Tests.**
+    - `worker/test/quick-sit.test.ts` (new, 19):
+      - picking: the fullest table with a free seat; the claimed table first, at a six table and at a heads-up one; a quick-sit ends a heads-up search;
+      - retries: the next table on `table_full`, on `sit_cooldown`, and after a table that answered closed, which is dropped for everyone (a live table that was tried stays listed); at most three tables tried, then one opens;
+      - opening: an empty six table when none has a free seat; two players at an empty lobby land at one table; the cap of 50 then `tables_full`; a listed table the lobby opened counts once; two concurrent quick-sits cannot overshoot;
+      - release: a table that deletes itself; one that halts; a lost record stops counting 20 minutes after it was opened, not 1 ms sooner;
+      - abuse: one table nobody has sat at per account; the daily creation cap; the per-account rate limit;
+      - the `tables` frame: an id and four counts, in `tables()`'s order, with no account and no `updatedAt`.
+    - `six-registry.test.ts`: "no client path lists or creates six tables yet" is replaced by two tests. "quick-sit and the tables frame are the only client paths to six tables": no frame names a table before the list is asked for, then exactly its id and counts; quick-sit sends a player there, and opens an empty six-casual table. "every other path to a six table stays shut": `/api/tables` is 404; the queue refuses `six-casual`; the invite route makes `hu-casual`, and only `index.ts` and `lobby.ts` call `/init`, `index.ts` never with `six-casual`; init refuses a six table with an opponent or a start deadline. Each old assertion is either kept or replaced by the new intended behaviour. Also `a change held at a waiting table goes out when its window passes, not at the idle check`.
+    - `lobby.test.ts` › lobby frames now sees `sit_at` and `tables` too, so every `LOBBY_FRAME_KEYS` type is checked.
+    - `protocol.test.ts`: the parser accepts and refuses as above, and both types are in the fuzz.
+    - `lobby.test.tsx`: five `LobbyConnection` tests for `quickSit` and `listTables`.
+    - Each was shown red before the code, and again under its own mutation (commit bodies): 25 worker, 5 client and 4 parser mutations, all red, all restored.
+  - **Gates** (once, at the end): typecheck, typecheck:worker and lint clean; unit 1,067 tests in 103 files; worker 371 in 28 (350 before: 19 quick-sit, the report deadline, and the gate test split in two); build with the entry chunk at 143.5 kB gzip (unchanged: `protocol.ts` reaches it only as types); e2e 45 passed.
+- **Left for PR-25:**
+  - **The retry.** Sit at `sitAt` with a bare `sit`. On `table_full`, `sit_cooldown` or a close with 4404, call `quickSit([...tried, tableId])`. Stop at `tables_full` or `rate_limited`, and go to the table a 4409 close names. Navigating to `#play/<id>` unmounts the lobby page and closes its socket, so the retry needs the lobby connection to outlive the navigation, or to reopen it. A halted table answers a sit with `illegal` (it is off the list within milliseconds of halting); treat that as a refusal too.
+  - **The list.** Ask with `listTables()` when the list opens, and every 15 s while it is shown. `avgPot` is in chips, so divide by 20 for big blinds. Full tables are listed (6/6). The PM question on `playersPerHour` is still open.
+  - `status.md` and `handoff.md` still describe the gate as shut; the merge's state commit updates them.
 
 **PR-25 · P2-08c `TableList`**
 
