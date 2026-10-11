@@ -1116,17 +1116,30 @@ describe('LiveTable at a six-casual table', () => {
       'Side pot 2 800 chips between you and dave',
     ])
 
-    // Checked down: carol's straight takes the main pot, bob's three tens
-    // side pot 1 and alice's nines side pot 2. The chips go out as the
-    // engine pushes them, the last side pot first and the main pot last.
+    // alice bets 200 on the turn. The bet sits on her plate and in the
+    // total; the pots are the chips of finished streets, so none moves.
+    hand = engineAct(hand, 2, { type: 'raise', to: 200 })
+    act(() => socket.emit(sixFrame('state', 2, 2, 2, hand)))
+    expect(seat(2)).toHaveTextContent('Bet 200')
+    expect(within(table).getByText(/^Pot/)).toHaveTextContent('Pot 3,700')
+    expect(items(within(table).getByRole('list', { name: 'Pots' }))).toEqual([
+      'Main pot 1,200 chips between bob, you, carol and dave',
+      'Side pot 1 1,500 chips between bob, you and dave',
+      'Side pot 2 800 chips between you and dave',
+    ])
+
+    // dave calls and it is checked down: carol's straight takes the main
+    // pot, bob's three tens side pot 1 and alice's nines side pot 2, now
+    // with the turn's bets in it. The chips go out as the engine pushes
+    // them, the last side pot first and the main pot last.
     hand = playedOut(hand)
     expect(hand.result!.awards.map((a) => a.pot)).toEqual([2, 1, 0])
-    act(() => socket.emit(sixFrame('state', 2, 2, 2, hand)))
+    act(() => socket.emit(sixFrame('state', 3, 2, 2, hand)))
     expect(within(table).queryByRole('list', { name: 'Pots' })).toBeNull()
     expect(
       items(within(table).getByRole('list', { name: 'Pots paid' })),
     ).toEqual([
-      'Side pot 2 800 chips to you',
+      'Side pot 2 1,200 chips to you',
       'Side pot 1 1,500 chips to bob',
       'Main pot 1,200 chips to carol',
     ])
