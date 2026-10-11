@@ -11,6 +11,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { LobbyMsg } from '../../src/shared/protocol'
 import { lobbyStub, REPAIR_MS, START_WITHIN_MS } from '../src/lobby'
 import type { LobbyDO } from '../src/lobby'
+import { REGISTRY_STALE_MS } from '../src/registry'
+import type { TableEntry, TableReport } from '../src/registry'
 import { checkLobbyFrame, LOBBY_FRAME_KEYS } from './frames'
 import {
   connect,
@@ -513,5 +515,81 @@ describe('lobby frames', () => {
       new Set(Object.keys(LOBBY_FRAME_KEYS)),
     )
     for (const f of all) checkLobbyFrame(f)
+  })
+})
+
+describe('the six-table registry (P2-08)', () => {
+  /** The lobby's clock while these tests run, so updatedAt is exact. */
+  const LOBBY_AT = 1_900_000_000_000
+  const entryOf = (tableId: string) =>
+    runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
+      state.storage.get<TableEntry>(`table:${tableId}`),
+    )
+  const listed = () =>
+    runInDurableObject(lobbyStub(env), (instance: LobbyDO) => instance.tables())
+  const report = (tableId: string, entry: TableReport) =>
+    lobbyStub(env).reportTable(tableId, entry)
+  const counts = (seated: number): TableReport => ({
+    seated,
+    maxSeats: 6,
+    avgPot: 40,
+    playersPerHour: 3,
+  })
+
+  it('lists the fullest table with a free seat first, and full tables last', async () => {
+    await setLobbyClock(LOBBY_AT)
+    await report('d-full', counts(6))
+    await report('c-two', counts(2))
+    await report('b-five', counts(5))
+    await report('a-two', counts(2))
+    await report('e-empty', counts(0))
+    // Quick-sit's order: a free seat first, fullest first, ties by id.
+    expect((await listed()).map((t) => t.tableId)).toEqual([
+      'b-five',
+      'a-two',
+      'c-two',
+      'e-empty',
+      'd-full',
+    ])
+  })
+
+  it('an entry not refreshed for 20 minutes is not listed, and is dropped', async () => {
+    await setLobbyClock(LOBBY_AT)
+    await report('old', counts(2))
+    await setLobbyClock(LOBBY_AT + 60_000)
+    await report('new', counts(2))
+    // Exactly 20 minutes old: still listed.
+    await setLobbyClock(LOBBY_AT + REGISTRY_STALE_MS)
+    expect((await listed()).map((t) => t.tableId)).toEqual(['new', 'old'])
+    // Older than that: treated as gone (its table died without removing
+    // itself), and the read drops it.
+    await setLobbyClock(LOBBY_AT + REGISTRY_STALE_MS + 1)
+    expect((await listed()).map((t) => t.tableId)).toEqual(['new'])
+    expect(await entryOf('old')).toBeUndefined()
+    expect(await entryOf('new')).toBeDefined()
+  })
+
+  it('an entry holds counts only, whatever a report carries', async () => {
+    await setLobbyClock(LOBBY_AT)
+    // A report that names accounts (no table sends one) is stored without them.
+    await report('named', {
+      ...counts(2),
+      username: 'eve',
+      userIds: ['eve-id'],
+    } as TableReport)
+    expect(await entryOf('named')).toEqual({
+      ...counts(2),
+      updatedAt: LOBBY_AT,
+    })
+    const stored = await lobbyState()
+    expect(JSON.stringify(stored['table:named'])).not.toMatch(/eve/)
+  })
+
+  it('a table removed from the list is no longer listed', async () => {
+    await setLobbyClock(LOBBY_AT)
+    await report('gone', counts(1))
+    await lobbyStub(env).removeTable('gone')
+    expect(await entryOf('gone')).toBeUndefined()
+    expect(await listed()).toEqual([])
   })
 })

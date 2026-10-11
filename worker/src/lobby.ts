@@ -1,11 +1,14 @@
 // The one lobby: who is waiting for a heads-up match, which table each
-// account is at, and how often two accounts were paired today. Everything
-// is in storage, so hibernation or eviction never loses a waiting player.
+// account is at, how often two accounts were paired today, and the list of
+// six tables. Everything is in storage, so hibernation or eviction never
+// loses a waiting player.
 //
 //   queue:<userId>          { userId, username, since, kind, rating? }  (connected + asked)
 //   active:<userId>         matchId                      (one table each)
 //   pairs:<day>:<a>:<b>     times paired that UTC day    (limit 2)
 //   creates:<day>:<userId>  invite tables made that day  (limit 30)
+//   table:<tableId>         { seated, maxSeats, avgPot, playersPerHour, updatedAt }
+//                           (six tables; counts only, never an account)
 import { DurableObject } from 'cloudflare:workers'
 import {
   CLOSE_ABUSE,
@@ -21,6 +24,8 @@ import type { WorkerEnv } from './env'
 import { FrameBudget, MATCH_CREATES_PER_DAY } from './limits'
 import { logEvent } from './log'
 import { ratingWindow, REPAIR_MS } from './pairing'
+import { isStale, listTables } from './registry'
+import type { ListedTable, TableEntry, TableReport } from './registry'
 import type { InitBody, Liveness } from './table'
 
 /** The same two accounts meet at most this often per UTC day. */
@@ -488,6 +493,46 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
   /** The table this account should be at, if any. */
   async activeFor(userId: string) {
     return this.liveActive(userId)
+  }
+
+  // ---- The six-table registry (RPC from tables; P2-08) -----------------------
+
+  /**
+   * A six table's entry in the list, counts only (ADR, clarifications from
+   * PR-23). The fields are copied by name, so a report that carried an
+   * account would still be stored without it. One write and no read: every
+   * report wakes this object, which every player shares.
+   */
+  async reportTable(tableId: string, report: TableReport) {
+    const { seated, maxSeats, avgPot, playersPerHour } = report
+    await this.ctx.storage.put(`table:${tableId}`, {
+      seated,
+      maxSeats,
+      avgPot,
+      playersPerHour,
+      updatedAt: this.clock(),
+    } satisfies TableEntry)
+  }
+
+  /** A six table that deleted itself or halted leaves the list. */
+  async removeTable(tableId: string) {
+    await this.ctx.storage.delete(`table:${tableId}`)
+  }
+
+  /**
+   * The listed six tables in quick-sit's order (listTables). Not exposed to
+   * clients yet: PR-24 adds the frame or route. Entries too old to trust
+   * are dropped here, on the read, so a report stays a single write.
+   */
+  async tables(): Promise<ListedTable[]> {
+    const t = this.clock()
+    const rows = await this.ctx.storage.list<TableEntry>({ prefix: 'table:' })
+    const stale = [...rows].filter(([, entry]) => isStale(entry, t))
+    if (stale.length) await this.ctx.storage.delete(stale.map(([key]) => key))
+    return listTables(
+      [...rows].map(([key, entry]) => [key.slice('table:'.length), entry]),
+      t,
+    )
   }
 
   /**
