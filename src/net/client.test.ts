@@ -147,6 +147,39 @@ describe('TableConnection', () => {
     ])
   })
 
+  it('sit without a seat sends a bare sit; with one, names it', async () => {
+    // Quick-sit (PR-25): the server picks the lowest free seat.
+    const bare = connect().connection
+    await flush()
+    const socket = FakeSocket.last()
+    expect(bare.sit()).toBe(false)
+    socket.open()
+    socket.emit(sixFrame('welcome', 1, null, null, null))
+    expect(bare.sit()).toBe(true)
+    expect(socket.sent).toEqual(['{"t":"sit"}'])
+    socket.emit(sixFrame('welcome', 2, 1, null, null))
+    expect(bare.sit()).toBe(false)
+
+    const named = connect().connection
+    await flush()
+    const other = FakeSocket.last()
+    other.open()
+    other.emit(sixFrame('welcome', 1, null, null, null))
+    expect(named.sit(4)).toBe(true)
+    expect(other.sent.map((m) => JSON.parse(m))).toEqual([{ t: 'sit', seat: 4 }])
+  })
+
+  it('resync() asks for a fresh welcome only on an open socket', async () => {
+    const { connection } = connect()
+    await flush()
+    const socket = FakeSocket.last()
+    expect(connection.resync()).toBe(false)
+    expect(socket.sent).toEqual([])
+    socket.open()
+    expect(connection.resync()).toBe(true)
+    expect(socket.sent.map((m) => JSON.parse(m))).toEqual([{ t: 'resync' }])
+  })
+
   it('sends a bare sit_out and sit_in from a seat at a six table only', async () => {
     const { connection } = connect()
     await flush()
