@@ -508,6 +508,61 @@ describe('coming back to a six table', () => {
     )
   }, 30_000)
 
+  it('a player in their grace is dealt in when the table deals', async () => {
+    // The usual case at a table of three or more: seat 4 drops between
+    // hands. Seats 0 and 2 are still there, so the table deals hand 3 on
+    // time, and it deals seat 4 in (ADR clarification from PR-17: "a hand
+    // the table deals still deals them in").
+    const { matchId, clients } = await handTwo('rd')
+    await playOut(matchId, clients, fold)
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 2)
+    const left = await clockOf(matchId)
+    await leave(matchId, clients[4], 'rd-4')
+    await elapse(matchId, NEXT_HAND_MS)
+    await clients[0].next(isState(3))
+    const { match, hand } = await peek(matchId)
+    expect(match.status).toBe('playing')
+    expect(hand!.config.seats.map((s) => s.seat)).toEqual([0, 2, 4])
+    expect(hand!.config).toMatchObject({ button: 2, sb: 4, bb: 0 })
+    expect(await graces(matchId)).toEqual([
+      { kind: 'grace', at: left + GRACE_MS, seat: 4, userId: 'rd-4' },
+    ])
+    // Seat 2 calls at once; seat 4, the small blind, gets the normal 20 s
+    // and its whole 30 s bank, not an instant move.
+    const dealt = left + NEXT_HAND_MS
+    await move(matchId, clients, call)
+    expect(clockAt(clients[0], 3, 1)).toEqual({
+      toAct: 4,
+      deadline: dealt + 50_000,
+      bankMs: 30_000,
+    })
+    await at(matchId, dealt + 50_000 - 1)
+    expect((await peek(matchId)).hand!.actions).toHaveLength(1)
+    // It runs out within the grace: a fold, one missed decision, and seat
+    // 4 still playing.
+    await at(matchId, dealt + 50_000)
+    expect((await peek(matchId)).hand!.actions.at(-1)).toMatchObject({
+      seat: 4,
+      action: { type: 'fold' },
+    })
+    expect(await storedSeat(matchId, 4)).toMatchObject({
+      status: 'playing',
+      timeouts: 1,
+    })
+    // When the grace ends seat 4 sits out, and the next deal leaves it out.
+    await at(matchId, left + GRACE_MS)
+    expect(await storedSeat(matchId, 4)).toMatchObject({
+      status: 'sitting_out',
+      timeouts: 1,
+    })
+    const four = await nextHand(matchId, { 0: clients[0], 2: clients[2] })
+    expect(four.config.seats.map((s) => s.seat)).toEqual([0, 2])
+    checkFrames(
+      Object.values(clients).flatMap((c) => c.frames),
+      'six-casual',
+    )
+  }, 30_000)
+
   it('a table whose active players drop below two pauses and resumes', async () => {
     const { matchId, clients, dealtAt } = await handTwo('rz')
     // Seats 2 and 4 drop as hand 2 starts. Seat 0 raises; the hand goes on
