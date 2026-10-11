@@ -22,8 +22,7 @@ import { CREATED_MS, lobbyStub, SIX_TABLES_MAX } from '../src/lobby'
 import type { LobbyDO } from '../src/lobby'
 import type { TableEntry, TableReport } from '../src/registry'
 import { REPORT_MS } from '../src/registry'
-import { NEXT_HAND_MS } from '../src/table'
-import type { TableDO } from '../src/table'
+import { NEXT_HAND_MS, TableDO } from '../src/table'
 import { checkLobbyFrame, expectKeys, TABLE_ROW_KEYS } from './frames'
 import {
   connect,
@@ -452,6 +451,35 @@ describe('the cap releases', () => {
 })
 
 describe('abuse', () => {
+  it('a quick-sit whose claimed table cannot be asked is still answered', async () => {
+    // Review B6: the claim is checked with its table, and that call can
+    // throw. The client is told, so its seating ends.
+    const errors: string[] = []
+    vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      errors.push(args.map(String).join(' '))
+    })
+    const tableId = await sixTable()
+    await runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
+      state.storage.put('active:throw-q', tableId),
+    )
+    vi.spyOn(TableDO.prototype, 'liveness').mockRejectedValue(new Error('reset'))
+    const q = await inLobby('throw-q')
+    expect(await quickSit(q)).toEqual({
+      t: 'error',
+      code: 'tables_full',
+      message: 'Could not check your table just now. Try again in a moment.',
+      seq: expect.any(Number),
+    })
+    expect(
+      errors.some(
+        (line) =>
+          line.includes('"reason":"quick_sit"') && line.includes('throw-q'),
+      ),
+    ).toBe(true)
+    expect(await createdIds()).toEqual([])
+    for (const f of q.frames) checkLobbyFrame(f)
+  })
+
   it('one account cannot open more than one table at a time', async () => {
     const a = await inLobby('one-a')
     const first = await sentTo(a)

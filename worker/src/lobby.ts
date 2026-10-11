@@ -640,14 +640,30 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
       await this.ctx.storage.delete(`queue:${userId}`)
       await this.presence()
     }
-    const answer = await this.forUsers([userId], async (): Promise<Answer> => {
-      // At a table already (six or heads-up): back to it, as a queue
-      // request would be. So an account at a table never opens one.
-      const active = await this.liveActive(userId)
-      if (active) return { t: 'matched', matchId: active, resumed: true }
-      await this.forgetClosed(tried)
-      return this.pickTable({ userId, username }, tried)
-    })
+    let answer: Answer
+    try {
+      answer = await this.forUsers([userId], async (): Promise<Answer> => {
+        // At a table already (six or heads-up): back to it, as a queue
+        // request would be. So an account at a table never opens one.
+        const active = await this.liveActive(userId)
+        if (active) return { t: 'matched', matchId: active, resumed: true }
+        await this.forgetClosed(tried)
+        return this.pickTable({ userId, username }, tried)
+      })
+    } catch (error) {
+      // The claim is checked with its table, a call that can throw. The
+      // client waits for an answer to end its seating, so it gets one.
+      logEvent('error', {
+        userId,
+        reason: 'quick_sit',
+        detail: describeError(error),
+      })
+      answer = {
+        t: 'error',
+        code: 'tables_full',
+        message: 'Could not check your table just now. Try again in a moment.',
+      }
+    }
     this.send(ws, answer)
   }
 
