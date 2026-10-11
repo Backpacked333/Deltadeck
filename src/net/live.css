@@ -701,6 +701,43 @@
     padding: 6px 8px;
   }
 }
+/* Chip flights (P2-06b): a seat's bet to the pot as a street closes, and
+   each pot to its winner at the result. The layer covers the ring; each
+   flight starts at its own corner and moves by transform alone, between
+   points SixFlights measured once from the laid-out plates and pots, so
+   nothing in flight touches layout. The fade-in hides the result's pots
+   on their pills until their turn to leave (animation-delay). The layer
+   clips them: a transformed box counts toward the page's width, and a
+   flight measured before the window narrows would widen the page until
+   it lands. */
+.six-flights {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow: hidden;
+  pointer-events: none;
+}
+.six-flight {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  animation: six-fly 0.6s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+@keyframes six-fly {
+  from {
+    transform: translate(var(--fx), var(--fy)) translate(-50%, -50%);
+    opacity: 0;
+  }
+  8%,
+  85% {
+    opacity: 1;
+  }
+  to {
+    transform: translate(var(--tx), var(--ty)) translate(-50%, -50%);
+    opacity: 0;
+  }
+}
 @media (prefers-reduced-motion: reduce) {
   .six-plate {
     transition: none;
@@ -708,6 +745,10 @@
   .six-seat[data-active] .six-plate::after {
     animation: none;
     opacity: 0.55;
+  }
+  /* SixFlights launches none; this covers a page the setting changed on. */
+  .six-flight {
+    display: none;
   }
 }
 

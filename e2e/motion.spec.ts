@@ -61,6 +61,8 @@ test('the all-in runout animates without long frames', async ({ page }) => {
 // successive streets, each street's bets gathered from up to four seats,
 // then three pots paid to three seats, the last side pot first. Sampled
 // the same way, from just before the first all-in until the payout ends.
+// The six table runs no card reveals of its own (the server deals a board
+// with the act that closes the betting), so its load is the chips.
 test('a 3-way all-in runout with two side pots has no long frames', async ({
   page,
 }) => {
@@ -74,7 +76,7 @@ test('a 3-way all-in runout with two side pots has no long frames', async ({
   await expect(ring.getByRole('list', { name: 'Pots paid' })).toHaveText(
     /^Side pot 2: 2,200 .*maximilian_okafor.*Side pot 1: 1,680 .*bartholomew_99.*Main pot: 3,760 .*evangeline_marten$/,
   )
-  // The payout's last flight starts 1.1 s after the result and lasts 0.6 s.
-  await page.waitForTimeout(2000)
+  // The last pot leaves 1.3 s after the result and lands 0.6 s later.
+  await page.waitForTimeout(2500)
   await expectNoLongFrames(page)
 })

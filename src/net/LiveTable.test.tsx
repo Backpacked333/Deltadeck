@@ -111,6 +111,23 @@ describe('LiveTable', () => {
     expect(screen.getByRole('button', { name: /Check/ })).toBeDisabled()
   })
 
+  it("a heads-up live table keeps the trainer's chip flights", async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    let hand = firstHand()
+    act(() => socket.emit(frame('welcome', 1, 0, hand)))
+    hand = engineAct(hand, 0, { type: 'call' })
+    act(() => socket.emit(frame('state', 2, 0, hand)))
+    hand = engineAct(hand, 1, { type: 'check' })
+    act(() => socket.emit(frame('state', 3, 0, hand)))
+    // The flop: both blinds fly from their bets to the pot as Table.tsx
+    // draws them, and nothing of the six table's motion is on the page.
+    expect(
+      [...document.querySelectorAll('.flight')].map((f) => f.className),
+    ).toEqual(['flight from-hero-bet to-pot', 'flight from-atlas-bet to-pot'])
+    expect(document.querySelector('.six-flights, .six-flight')).toBeNull()
+  })
+
   it('shows the hand result without deal buttons', async () => {
     render(<LiveTable matchId={MATCH} identity={alice} />)
     const socket = await opened()
@@ -1255,6 +1272,217 @@ describe('LiveTable at a six-casual table', () => {
     expect(within(table).queryByRole('list')).toBeNull()
   })
 
+  it("when a street closes each seat's bet flies from that seat to the pot", async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    let hand = sixHand()
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    // A move gathers nothing: the bets stay on the plates until the
+    // street closes.
+    let seq = 1
+    for (const s of [5, 0, 2] as const) {
+      hand = engineAct(hand, s, { type: 'call' })
+      act(() => socket.emit(sixFrame('state', ++seq, 2, 2, hand)))
+    }
+    expect(flights()).toEqual([])
+
+    // carol checks her option and the flop comes: the four bets of 20 fly
+    // to the pot, one flight from each seat that had one.
+    hand = engineAct(hand, 3, { type: 'check' })
+    expect(hand.street).toBe('flop')
+    act(() => socket.emit(sixFrame('state', ++seq, 2, 2, hand)))
+    expect(gathered()).toEqual([
+      ['seat-0', 'pot'],
+      ['seat-2', 'pot'],
+      ['seat-3', 'pot'],
+      ['seat-5', 'pot'],
+    ])
+    // Decoration: screen readers hear the pot and the result instead.
+    expect(document.querySelector('.six-flights')).toHaveAttribute(
+      'aria-hidden',
+      'true',
+    )
+
+    // Checked down to one pot: bob's sevens and twos beat carol's queens,
+    // and the pot flies from the middle to him.
+    act(() => socket.emit(sixFrame('state', ++seq, 2, 2, playedOut(hand))))
+    expect(screen.getByText('bob wins · Two pair')).toBeInTheDocument()
+    expect(paid()).toEqual([['pot', 'seat-0']])
+  })
+
+  it('at the result each pot flies from its pill to its winner, the last side pot first', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    let hand = sidePotsAtTheTurn()
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    // alice bets 200 on the turn and dave calls: the river gathers both.
+    hand = engineAct(hand, 2, { type: 'raise', to: 200 })
+    act(() => socket.emit(sixFrame('state', 2, 2, 2, hand)))
+    hand = engineAct(hand, 5, { type: 'call' })
+    expect(hand.street).toBe('river')
+    act(() => socket.emit(sixFrame('state', 3, 2, 2, hand)))
+    expect(gathered()).toEqual([
+      ['seat-2', 'pot'],
+      ['seat-5', 'pot'],
+    ])
+    expect(paid()).toEqual([])
+
+    // Checked down: alice's nines take side pot 2, bob's tens side pot 1
+    // and carol's straight the main pot. Each pot leaves its own pill for
+    // its winner in the order the engine pushes them, after the one
+    // before, so the order shows.
+    hand = playedOut(hand)
+    act(() => socket.emit(sixFrame('state', 4, 2, 2, hand)))
+    expect(paid()).toEqual([
+      ['pot-2', 'seat-2'],
+      ['pot-1', 'seat-0'],
+      ['pot-0', 'seat-3'],
+    ])
+    const [first, second, third] = paidDelays()
+    expect(first).toBeLessThan(second)
+    expect(second).toBeLessThan(third)
+  })
+
+  it('a split pot sends a flight to each winner at once, after the last bets are gathered', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    // carol is all in for 300 with a straight; alice and dave tie with
+    // nines and ace kicker, so they split the side pot.
+    let hand = sixHand({
+      stacks: { 3: 300 },
+      holes: { 0: '7c 2h', 2: 'Ah 9d', 3: 'Js 8s', 5: 'Ad 9c' },
+    })
+    hand = engineAct(hand, 5, { type: 'raise', to: 800 })
+    hand = engineAct(hand, 0, { type: 'fold' })
+    hand = engineAct(hand, 2, { type: 'call' })
+    hand = engineAct(hand, 3, { type: 'call' })
+    while (hand.street !== 'river')
+      hand = engineAct(hand, hand.toAct!, { type: 'check' })
+    hand = engineAct(hand, 2, { type: 'check' })
+    hand = engineAct(hand, 5, { type: 'raise', to: 100 })
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    expect(flights()).toEqual([])
+
+    // alice calls dave's river bet: both bets go to the pot first, then
+    // side pot 1 to alice and dave together, then the main pot to carol.
+    hand = engineAct(hand, 2, { type: 'call' })
+    act(() => socket.emit(sixFrame('state', 2, 2, 2, hand)))
+    expect(gathered()).toEqual([
+      ['seat-2', 'pot'],
+      ['seat-5', 'pot'],
+    ])
+    expect(paid()).toEqual([
+      ['pot-1', 'seat-2'],
+      ['pot-1', 'seat-5'],
+      ['pot-0', 'seat-3'],
+    ])
+    const [alices, daves, carols] = paidDelays()
+    expect(alices).toBe(daves)
+    expect(daves).toBeLessThan(carols)
+    expect(Math.max(...gatheredDelays())).toBeLessThan(alices)
+  })
+
+  it("a flight starts at its seat's bet and lands on its pot or winner, wherever the ring puts them", async () => {
+    // jsdom lays nothing out, so each box the flights start or land on is
+    // given: seat s's bets at (100s, 10s), the pot line at (500, 300),
+    // pot k's pill at (600 + 50k, 280), seat s's plate at (100s, 400),
+    // and the ring's flight layer at (50, 20).
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(
+      function (this: Element) {
+        const seatOf = () =>
+          Number(this.closest('[data-seat]')?.getAttribute('data-seat'))
+        const pot = this.getAttribute('data-pot')
+        return this.classList.contains('six-flights')
+          ? rect(50, 20, 1000, 600)
+          : this.classList.contains('six-chips')
+            ? rect(100 * seatOf(), 10 * seatOf(), 40, 20)
+            : this.classList.contains('six-plate')
+              ? rect(100 * seatOf(), 400, 80, 40)
+              : this.classList.contains('six-pot')
+                ? rect(500, 300, 60, 20)
+                : pot !== null
+                  ? rect(600 + 50 * Number(pot), 280, 40, 16)
+                  : rect(0, 0, 0, 0)
+      },
+    )
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    let hand = sidePotsAtTheTurn()
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    hand = engineAct(hand, 2, { type: 'raise', to: 200 })
+    act(() => socket.emit(sixFrame('state', 2, 2, 2, hand)))
+    hand = engineAct(hand, 5, { type: 'call' })
+    act(() => socket.emit(sixFrame('state', 3, 2, 2, hand)))
+    // alice sits at the bottom of the ring (slot 0) but is seat 2: her
+    // chips leave seat 2's bets, the middle of (200, 20, 40, 20), less
+    // the layer's corner, and land on the middle of the pot line.
+    expect(path('seat-2', 'pot')).toEqual(['170px', '10px', '480px', '290px'])
+    expect(path('seat-5', 'pot')).toEqual(['470px', '40px', '480px', '290px'])
+
+    act(() => socket.emit(sixFrame('state', 4, 2, 2, playedOut(hand))))
+    // Side pot 2 leaves its pill for alice's plate, the main pot its own
+    // for carol's.
+    expect(path('pot-2', 'seat-2')).toEqual([
+      '670px',
+      '268px',
+      '190px',
+      '400px',
+    ])
+    expect(path('pot-0', 'seat-3')).toEqual([
+      '570px',
+      '268px',
+      '290px',
+      '400px',
+    ])
+  })
+
+  it('no chips fly under reduced motion', async () => {
+    render(
+      <MotionConfig reducedMotion="always">
+        <LiveTable matchId={MATCH} identity={alice} />
+      </MotionConfig>,
+    )
+    const socket = await opened()
+    let hand = sidePotsAtTheTurn()
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    hand = engineAct(hand, 2, { type: 'raise', to: 200 })
+    act(() => socket.emit(sixFrame('state', 2, 2, 2, hand)))
+    hand = engineAct(hand, 5, { type: 'call' })
+    act(() => socket.emit(sixFrame('state', 3, 2, 2, hand)))
+    act(() => socket.emit(sixFrame('state', 4, 2, 2, playedOut(hand))))
+    // The words carry it all: the pots paid, in order.
+    expect(items(screen.getByRole('list', { name: 'Pots paid' }))).toEqual([
+      'Side pot 2: 1,200 chips to you',
+      'Side pot 1: 1,500 chips to bob',
+      'Main pot: 1,200 chips to carol',
+    ])
+    expect(flights()).toEqual([])
+  })
+
+  it('chips leave the ring once they land, and a new hand takes any still flying', async () => {
+    vi.useFakeTimers()
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    let hand = sidePotsAtTheTurn()
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    hand = engineAct(hand, 2, { type: 'raise', to: 200 })
+    act(() => socket.emit(sixFrame('state', 2, 2, 2, hand)))
+    hand = engineAct(hand, 5, { type: 'call' })
+    act(() => socket.emit(sixFrame('state', 3, 2, 2, hand)))
+    expect(gathered()).toHaveLength(2)
+    act(() => vi.advanceTimersByTime(2000))
+    expect(flights()).toEqual([])
+
+    // The result's pots are in the air when hand 2 is dealt: they go.
+    act(() => socket.emit(sixFrame('state', 4, 2, 2, playedOut(hand))))
+    expect(paid()).toHaveLength(3)
+    const next = sixHand()
+    next.config = { ...next.config, handNo: 2 }
+    act(() => socket.emit(sixFrame('state', 5, 2, 2, next)))
+    expect(screen.getByText('6-max · Hand 2')).toBeInTheDocument()
+    expect(flights()).toEqual([])
+  })
+
   it('a table waiting for players promises no next hand', async () => {
     render(<LiveTable matchId={MATCH} identity={alice} />)
     const socket = await opened()
@@ -1666,6 +1894,51 @@ const awayIn = (table: MatchInfo, seats: SeatId[]): MatchInfo => ({
     seats.includes(p.seat) ? { ...p, connected: false } : p,
   ),
 })
+
+/** The six table's chip flights, in DOM order: where each flies from and to. */
+const flightEls = () => [
+  ...document.querySelectorAll<HTMLElement>('.six-flight'),
+]
+const flights = () =>
+  flightEls().map((f) => [
+    f.getAttribute('data-from'),
+    f.getAttribute('data-to'),
+  ])
+/** The bets gathered into the pot as streets close. */
+const gathered = () => flights().filter(([, to]) => to === 'pot')
+const gatheredDelays = () =>
+  flightEls()
+    .filter((f) => f.getAttribute('data-to') === 'pot')
+    .map((f) => parseFloat(f.style.animationDelay || '0'))
+/** The pots paid to their winners at the result. */
+const paid = () => flights().filter(([from]) => from?.startsWith('pot'))
+const paidDelays = () =>
+  flightEls()
+    .filter((f) => f.getAttribute('data-from')?.startsWith('pot'))
+    .map((f) => parseFloat(f.style.animationDelay || '0'))
+/** Where the one flight from `from` to `to` starts and lands. */
+const path = (from: string, to: string) => {
+  const found = flightEls().filter(
+    (f) =>
+      f.getAttribute('data-from') === from && f.getAttribute('data-to') === to,
+  )
+  expect(found).toHaveLength(1)
+  return ['--fx', '--fy', '--tx', '--ty'].map((v) =>
+    found[0].style.getPropertyValue(v),
+  )
+}
+const rect = (left: number, top: number, width: number, height: number) =>
+  ({
+    left,
+    top,
+    width,
+    height,
+    x: left,
+    y: top,
+    right: left + width,
+    bottom: top + height,
+    toJSON: () => ({}),
+  }) as DOMRect
 
 /** A list's items as read aloud: their text, hidden words included. */
 const items = (list: HTMLElement) =>

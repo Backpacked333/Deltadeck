@@ -22,6 +22,7 @@ import type { MatchInfo, SeatedView, SeatView } from '../shared/protocol'
 import type { TableState } from './client'
 import { Cards } from './ReviewLive'
 import type { PlateSeat } from './SeatPlate'
+import { SixFlights } from './SixFlights'
 import { SixRing } from './SixRing'
 
 const SEATS = 6
@@ -275,6 +276,7 @@ export function SixTable({
         clock={live && live.toAct !== null ? live.clock : null}
         clockOffset={state.clockOffset}
         onSit={canSit ? (s) => void sit(s) : undefined}
+        overlay={<SixFlights view={view} />}
       >
         <Middle view={view} nameOf={nameOf} />
       </SixRing>
@@ -493,7 +495,8 @@ function Middle({
  * (this street's bets are still on the plates, and in the total), and each
  * says who can still win it. At the result each says who took it, in the
  * order the chips are pushed: the last side pot first and the main pot
- * last (HandResult.awards), the order PR-22's chip flights will follow.
+ * last (HandResult.awards), the order the chip flights follow; each pill
+ * carries its pot's index (`data-pot`) for the flights to leave from.
  * Both lists spell out role="list": Safari drops the role of a list styled
  * list-style: none, and its name with it.
  */
@@ -514,7 +517,7 @@ function SidePots({
     return (
       <ul className="six-pots" role="list" aria-label="Pots">
         {layers.map((pot, i) => (
-          <li key={i}>
+          <li key={i} data-pot={i}>
             {label(i)}: <b>{chips(pot.amount)}</b>
             <span className="sr-only">
               {` chips between ${listed(pot.eligible.map(who))}`}
@@ -533,7 +536,7 @@ function SidePots({
         const paid = result.awards.filter((a) => a.pot === pot && a.amount > 0)
         const amount = paid.reduce((sum, a) => sum + a.amount, 0)
         return (
-          <li key={pot}>
+          <li key={pot} data-pot={pot}>
             {label(pot)}: <b>{chips(amount)}</b>
             <span className="sr-only"> chips</span>
             {paid.length === 1
