@@ -5,6 +5,7 @@
 // hand), seated but not dealt into the hand on the table (that hand as
 // nobody's seat sees it), or dealt in (their own cards, and the action bar
 // while it is their move). Every card drawn here is one the frame carried.
+// A seated viewer also has their seat's controls: Rebuy and Stand up.
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { ActionBar } from '../components/table/ActionBar'
@@ -14,6 +15,7 @@ import { categories } from '../lib/poker'
 import { buildPresets } from '../lib/presets'
 import type { Preset } from '../lib/presets'
 import { categoryOf, fromId } from '../lib/sim'
+import { buyIn, SIX_BLINDS } from '../engine/stacks'
 import { isSeated } from '../shared/protocol'
 import type { MatchInfo, SeatedView, SeatView } from '../shared/protocol'
 import type { TableState } from './client'
@@ -22,6 +24,8 @@ import type { PlateSeat } from './SeatPlate'
 import { SixRing } from './SixRing'
 
 const SEATS = 6
+/** The buy-in, and what a rebuy tops up to: 100 bb (R-10). */
+const TOP_UP = buyIn(SIX_BLINDS.bb)
 const noop = () => {}
 const chips = (n: number) => Math.round(n).toLocaleString('en-US')
 const NO_GUESS = {
@@ -40,11 +44,15 @@ export function SixTable({
   state,
   act,
   sit,
+  rebuy,
+  stand,
 }: {
   table: MatchInfo
   state: TableState
   act: (action: PlayerAction) => boolean
   sit: (seat: SeatId) => boolean
+  rebuy: () => boolean
+  stand: () => boolean
 }) {
   const { view, seat } = state
   const dealt = view && isSeated(view) ? view : null
@@ -102,6 +110,25 @@ export function SixTable({
 
   const canSit =
     seat === null && state.status === 'open' && table.status !== 'finished'
+  // Our own seat's controls. The hand we are dealt into while it is being
+  // played, if any: a rebuy waits for it to end, and a stand during it
+  // keeps the seat until then. The wire has no marker of that pending
+  // stand (ADR, clarifications from PR-12), so we remember the hand we
+  // stood from ourselves.
+  const playing = dealt && !dealt.result ? dealt : null
+  const handKey = view ? `${view.matchId}:${view.handNo}` : null
+  const [stoodFrom, setStoodFrom] = useState<string | null>(null)
+  const leaving = playing !== null && stoodFrom === handKey
+  const mine =
+    seat === null ? undefined : table.players.find((p) => p.seat === seat)
+  const controls = state.status === 'open' && table.status !== 'finished'
+  // The roster's stack is what the next hand deals us (after the last
+  // hand, or a rebuy); the server decides, this only offers.
+  const canRebuy =
+    controls && !playing && mine?.stack !== undefined && mine.stack < TOP_UP
+  const onStand = () => {
+    if (stand() && playing) setStoodFrom(handKey)
+  }
   return (
     <div
       className="play-column live-table six-table"
@@ -152,6 +179,15 @@ export function SixTable({
           <SixStatus table={table} view={view} state={state} nameOf={nameOf} />
         )}
       </div>
+      {seat !== null && (
+        <SeatControls
+          canRebuy={canRebuy}
+          canStand={controls && !!mine && !leaving}
+          leaving={leaving}
+          onRebuy={() => void rebuy()}
+          onStand={onStand}
+        />
+      )}
       {flash && (
         <p className="live-error" role="alert">
           {flash}
@@ -162,17 +198,20 @@ export function SixTable({
 }
 
 /**
- * Who sits where, from the roster. A seat dealt into the hand on the table
- * shows its chips behind and in front from that hand; anyone else, the
- * stack the roster gives (as of the last deal, or their buy-in).
+ * Who sits where, from the roster. While a hand is played, a seat dealt
+ * into it shows its chips behind and in front from that hand. Anyone else,
+ * and every seat once the hand is over, shows the stack the roster gives:
+ * what the next hand deals them (after the last hand, or a rebuy). A seat
+ * whose player left as the hand ended may have a new one by then.
  */
 function plates(
   table: MatchInfo,
   view: SeatView | null,
   nameOf: (seat: SeatId) => string,
 ): PlateSeat[] {
+  const live = view && !view.result ? view : null
   const seated: PlateSeat[] = table.players.map((p) => {
-    const inHand = view?.players.find((h) => h.seat === p.seat)
+    const inHand = live?.players.find((h) => h.seat === p.seat)
     return {
       seat: p.seat,
       username: p.username,
@@ -196,6 +235,44 @@ function plates(
       left: true,
     }))
   return [...seated, ...left]
+}
+
+/**
+ * The viewer's own seat. Rebuy is offered below 100 bb out of the hand
+ * being played; Stand up to anyone seated, until they have stood from the
+ * hand they are dealt into. The line saying so is a live region mounted
+ * with the controls, so its change is announced.
+ */
+function SeatControls({
+  canRebuy,
+  canStand,
+  leaving,
+  onRebuy,
+  onStand,
+}: {
+  canRebuy: boolean
+  canStand: boolean
+  leaving: boolean
+  onRebuy: () => void
+  onStand: () => void
+}) {
+  return (
+    <div className="six-seat-controls" role="group" aria-label="Your seat">
+      {canRebuy && (
+        <button type="button" className="btn btn-outline" onClick={onRebuy}>
+          Rebuy<span className="sr-only"> to {chips(TOP_UP)} chips</span>
+        </button>
+      )}
+      {canStand && (
+        <button type="button" className="btn btn-quiet" onClick={onStand}>
+          Stand up
+        </button>
+      )}
+      <p className="six-leaving" role="status">
+        {leaving ? 'Leaving after this hand' : ''}
+      </p>
+    </div>
+  )
 }
 
 /** The middle of the felt: the pot, the board, and the viewer's own cards. */
@@ -362,6 +439,12 @@ function SixStatus({
 }) {
   const seated = state.seat !== null
   const result = view?.result ?? null
+  // Seated without chips and out of any hand being played: no hand deals
+  // us in until we rebuy (the server deals only funded players).
+  const broke =
+    seated &&
+    !(view && !view.result && view.you !== null) &&
+    table.players.find((p) => p.seat === state.seat)?.stack === 0
   const net =
     result && view && view.you !== null
       ? (result.netBySeat[view.you] ?? 0)
@@ -397,6 +480,8 @@ function SixStatus({
   const caption =
     table.status === 'finished' ? (
       <a href="#lobby">Back to the lobby</a>
+    ) : broke ? (
+      'No chips left: rebuy to be dealt in.'
     ) : seated && view?.you === null ? (
       'You are dealt in from the next hand.'
     ) : !seated && table.players.length < SEATS ? (

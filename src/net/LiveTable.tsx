@@ -32,7 +32,10 @@ export function LiveTable({
   matchId: string
   identity: Identity
 }) {
-  const { state, act, rematch, sit } = useTable(matchId, identity.getToken)
+  const { state, act, rematch, sit, rebuy, stand } = useTable(
+    matchId,
+    identity.getToken,
+  )
   const { status, table, view, seat } = state
 
   if (status === 'elsewhere')
@@ -81,7 +84,16 @@ export function LiveTable({
     )
   // A six table has viewers without a seat; it renders from its own frames.
   if (table?.kind === 'six-casual')
-    return <SixTable table={table} state={state} act={act} sit={sit} />
+    return (
+      <SixTable
+        table={table}
+        state={state}
+        act={act}
+        sit={sit}
+        rebuy={rebuy}
+        stand={stand}
+      />
+    )
   if (!table || seat === null)
     return (
       <p className="live-status" role="status">

@@ -649,6 +649,178 @@ describe('LiveTable at a six-casual table', () => {
     ).toHaveFocus()
   })
 
+  it('Rebuy appears to a seated player below 100 bb once out of the hand, and sends a bare rebuy', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    // Dealt into the hand being played: no rebuy, short as she is.
+    const short = withStack(SIX_ROSTER, 2, 1200)
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 1, 2, 2, sixHand({ stacks: { 2: 1200 } }), {
+          table: sixInfo(short),
+        }),
+      ),
+    )
+    expect(screen.getByText('dave to act')).toBeInTheDocument()
+    expect(rebuyButton()).toBeNull()
+
+    // The hand is over and the roster says what it left her: 1,990.
+    const ended = foldedToCarol()
+    act(() =>
+      socket.emit(
+        sixFrame('state', 2, 2, 2, ended, { table: sixInfo(AFTER_FOLDS) }),
+      ),
+    )
+    const button = rebuyButton()!
+    expect(button).toHaveAccessibleName('Rebuy to 2,000 chips')
+    // By keyboard, as every control at the table.
+    button.focus()
+    await userEvent.keyboard('{Enter}')
+    // The type alone: the server computes the amount.
+    expect(socket.sent.map((m) => JSON.parse(m))).toEqual([{ t: 'rebuy' }])
+
+    // Topped up: the table's answer takes the button away, her plate
+    // shows the new stack, and focus stays at the table on her seat.
+    const topped = withStack(AFTER_FOLDS, 2, 2000)
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 3, 2, 2, ended, { table: sixInfo(topped) }),
+      ),
+    )
+    expect(rebuyButton()).toBeNull()
+    expect(seat(2)).toHaveTextContent('2,000 chips')
+    expect(seat(2)).toHaveFocus()
+
+    // At exactly 100 bb, or above it, there is nothing to top up.
+    act(() =>
+      socket.emit(
+        sixFrame('state', 4, 2, 2, ended, {
+          table: sixInfo(withStack(AFTER_FOLDS, 2, 2400)),
+        }),
+      ),
+    )
+    expect(rebuyButton()).toBeNull()
+  })
+
+  it('a busted player watching a hand may rebuy; a viewer without a seat has no seat controls', async () => {
+    render(<LiveTable matchId={MATCH} identity={identity('erin')} />)
+    const socket = await opened()
+    // erin is seated at seat 4 with no chips, so the hand was dealt
+    // without her: she may rebuy while it is played.
+    const busted = [...SIX_ROSTER, { seat: 4, username: 'erin', stack: 0 }]
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 1, 4, null, sixHand(), { table: sixInfo(busted) }),
+      ),
+    )
+    expect(rebuyButton()).toBeInTheDocument()
+    expect(standButton()).toBeInTheDocument()
+    // Without chips she is not dealt in from the next hand unless she does.
+    expect(screen.queryByText(/dealt in from the next hand/)).toBeNull()
+    expect(
+      screen.getByText('No chips left: rebuy to be dealt in.'),
+    ).toBeInTheDocument()
+    await userEvent.click(rebuyButton()!)
+    expect(JSON.parse(socket.sent.at(-1)!)).toEqual({ t: 'rebuy' })
+    // Topped up, she is dealt in from the next hand like anyone seated.
+    const topped = withStack(busted, 4, 2000)
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 2, 4, null, sixHand(), { table: sixInfo(topped) }),
+      ),
+    )
+    expect(rebuyButton()).toBeNull()
+    expect(
+      screen.getByText('You are dealt in from the next hand.'),
+    ).toBeInTheDocument()
+
+    // A viewer without a seat: neither control.
+    act(() => socket.emit(sixFrame('welcome', 3, null, null, sixHand())))
+    expect(screen.queryByRole('group', { name: 'Your seat' })).toBeNull()
+    expect(rebuyButton()).toBeNull()
+    expect(standButton()).toBeNull()
+  })
+
+  it('Stand up sends a bare stand; dealt into the hand, she reads Leaving after this hand', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    const hand = sixHand()
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    const controls = screen.getByRole('group', { name: 'Your seat' })
+    const status = within(controls).getByRole('status')
+    expect(status).toHaveTextContent('')
+    standButton()!.focus()
+    await userEvent.keyboard('{Enter}')
+    expect(socket.sent.map((m) => JSON.parse(m))).toEqual([{ t: 'stand' }])
+    // The wire has no marker of a pending stand: she knows she sent one.
+    // The live region was already there, so the change is announced.
+    expect(status).toHaveTextContent('Leaving after this hand')
+    expect(standButton()).toBeNull()
+    expect(seat(2)).toHaveFocus()
+
+    // The table answers that she keeps the seat until the hand ends.
+    act(() => socket.emit(sixFrame('welcome', 2, 2, 2, hand)))
+    expect(status).toHaveTextContent('Leaving after this hand')
+    expect(standButton()).toBeNull()
+
+    // The hand ends and the seat frees: a viewer without a seat again.
+    const left = SIX_ROSTER.filter((p) => p.seat !== 2)
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 3, null, null, null, { table: sixInfo(left) }),
+      ),
+    )
+    expect(screen.queryByText('Leaving after this hand')).toBeNull()
+    expect(screen.queryByRole('group', { name: 'Your seat' })).toBeNull()
+    expect(
+      within(seat(2)).getByRole('button', { name: /^Sit here/ }),
+    ).toBeInTheDocument()
+
+    // Back in the seat later and dealt into a new hand: she stays.
+    const next = { ...sixHand(), config: { ...hand.config, handNo: 7 } }
+    act(() => socket.emit(sixFrame('welcome', 4, 2, 2, next)))
+    expect(screen.getByText('6-max · Hand 7')).toBeInTheDocument()
+    expect(screen.queryByText('Leaving after this hand')).toBeNull()
+    expect(standButton()).toBeInTheDocument()
+  })
+
+  it('Stand up between hands frees the seat at once, with no leaving caption', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 1, 2, 2, foldedToCarol(), {
+          table: sixInfo(AFTER_FOLDS),
+        }),
+      ),
+    )
+    await userEvent.click(standButton()!)
+    expect(JSON.parse(socket.sent.at(-1)!)).toEqual({ t: 'stand' })
+    expect(screen.queryByText('Leaving after this hand')).toBeNull()
+  })
+
+  it('between hands the plates show the stacks the roster carries', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    // Hand 1 is over; carol stood up as it ended and frank took seat 3.
+    // The finished hand still says what seat 3 held (1,510): that was
+    // carol's, and frank brings his own 2,000.
+    const roster = AFTER_FOLDS.map((p) =>
+      p.seat === 3 ? { seat: 3, username: 'frank', stack: 2000 } : p,
+    )
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 1, 2, 2, foldedToCarol(), {
+          table: sixInfo(roster),
+        }),
+      ),
+    )
+    expect(seat(3)).toHaveAccessibleName('Seat 4: frank')
+    expect(seat(3)).toHaveTextContent('2,000 chips')
+    expect(seat(2)).toHaveTextContent('1,990 chips')
+    expect(seat(5)).toHaveTextContent('3,000 chips')
+  })
+
   it('each winner is named with their own hand when a side pot splits the chips', async () => {
     render(<LiveTable matchId={MATCH} identity={alice} />)
     const socket = await opened()
@@ -771,6 +943,23 @@ function playedOut(start: HandState) {
   }
   return hand
 }
+
+/** The Rebuy and Stand up controls, when the table offers them. */
+const rebuyButton = () => screen.queryByRole('button', { name: /^Rebuy/ })
+const standButton = () => screen.queryByRole('button', { name: 'Stand up' })
+
+/** `roster` with `seat`'s stack replaced. */
+const withStack = (roster: typeof SIX_ROSTER, at: number, stack: number) =>
+  roster.map((p) => (p.seat === at ? { ...p, stack } : p))
+
+/** Hand 1 over: dave, bob and alice fold to carol's big blind. */
+function foldedToCarol() {
+  let hand = sixHand()
+  for (const s of [5, 0, 2]) hand = engineAct(hand, s, { type: 'fold' })
+  return hand
+}
+/** The roster after foldedToCarol: alice lost her small blind to carol. */
+const AFTER_FOLDS = withStack(withStack(SIX_ROSTER, 2, 1990), 3, 1510)
 
 /**
  * The move keys the page takes: a key is taken when a listener calls

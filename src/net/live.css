@@ -774,3 +774,17 @@
   align-items: center;
   gap: 4px;
 }
+/* The viewer's own seat under the table (PR-14): Rebuy and Stand up, and
+   the line saying a stand waits for the hand to end. The line stays in
+   the page, empty, so screen readers announce it when it fills. */
+.six-seat-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.six-leaving {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 14px;
+}

@@ -14,7 +14,7 @@ import { act, assertInvariants, isOver, startHand } from '../../src/engine/hand'
 import { luckAdjusted } from '../../src/engine/luck'
 import type { Blinds } from '../../src/engine/positions'
 import { seatView } from '../../src/engine/redact'
-import { buyIn, rebuyTo } from '../../src/engine/stacks'
+import { buyIn, rebuyTo, SIX_BLINDS } from '../../src/engine/stacks'
 import type { RevealedSlot } from '../../src/engine/deck'
 import { EngineError } from '../../src/engine/types'
 import type { HandState, SeatId } from '../../src/engine/types'
@@ -84,8 +84,8 @@ export const DEFAULT_CONFIG: MatchConfig & { handsTotal: number } = {
 export const SIX_CONFIG: MatchConfig = {
   kind: 'six-casual',
   maxSeats: 6,
-  startingStack: buyIn(DEFAULT_CONFIG.blinds.bb),
-  blinds: { ...DEFAULT_CONFIG.blinds },
+  startingStack: buyIn(SIX_BLINDS.bb),
+  blinds: { ...SIX_BLINDS },
   decisionMs: 20_000,
   bankMs: 30_000,
 }

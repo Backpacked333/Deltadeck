@@ -10,6 +10,7 @@ import {
   PROTOCOL,
 } from '../shared/protocol'
 import type {
+  ClientMsg,
   ErrorCode,
   HandRecordV1,
   MatchInfo,
@@ -195,6 +196,32 @@ export class TableConnection {
     const { status, seat: current } = this.state
     if (status !== 'open' || current !== null) return false
     this.socket!.send(JSON.stringify({ t: 'sit', seat }))
+    return true
+  }
+
+  /**
+   * At a six table: top up to 100 bb from the next hand. The frame is the
+   * type alone: the server computes the amount, and its welcome carries
+   * the new stack (or an error says why not).
+   */
+  rebuy(): boolean {
+    return this.sendSeated({ t: 'rebuy' })
+  }
+
+  /**
+   * At a six table: leave the seat, at once between hands, or when the
+   * hand this player is dealt into ends (folding when the action reaches
+   * them). The wire has no marker of a pending stand; the caller knows.
+   */
+  stand(): boolean {
+    return this.sendSeated({ t: 'stand' })
+  }
+
+  /** Sends a seat-only frame, if this socket is open and has a seat. */
+  private sendSeated(msg: Extract<ClientMsg, { t: 'rebuy' | 'stand' }>) {
+    const { status, seat } = this.state
+    if (status !== 'open' || seat === null) return false
+    this.socket!.send(JSON.stringify(msg))
     return true
   }
 

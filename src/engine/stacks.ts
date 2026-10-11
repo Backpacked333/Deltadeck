@@ -9,6 +9,16 @@ import { EngineError } from './types'
 /** Buy-in and rebuy target in big blinds: 2,000 chips at 10/20 (R-10). */
 export const BUY_IN_BB = 100
 
+/**
+ * Casual 6-max stakes (R-10). The table deals at them (worker SIX_CONFIG);
+ * the live table reads them only to offer a rebuy, which the server still
+ * decides.
+ */
+export const SIX_BLINDS: Readonly<{ sb: number; bb: number }> = Object.freeze({
+  sb: 10,
+  bb: 20,
+})
+
 /** Why a rebuy is refused; `in_hand` is also the wire error code. */
 export type RebuyRefusal = 'in_hand' | 'not_below'
 

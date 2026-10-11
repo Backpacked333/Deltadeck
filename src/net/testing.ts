@@ -179,7 +179,10 @@ export const SIX_ROSTER: { seat: SeatId; username: string; stack: number }[] = [
   { seat: 5, username: 'dave', stack: 3000 },
 ]
 
-/** A six-casual table summary, stacks as of the last deal. */
+/**
+ * A six-casual table summary. Stacks are outside the hand being played:
+ * as of its deal for a player dealt in, else what the next hand deals.
+ */
 export const sixInfo = (
   roster = SIX_ROSTER,
   status: MatchInfo['status'] = 'playing',
