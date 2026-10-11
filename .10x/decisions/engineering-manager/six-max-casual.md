@@ -453,6 +453,9 @@ The plan gave `rebuy` (here) and `stand` (PR-12) server messages but no control 
 - **Files:** `deadlines.ts` gets `orbitDone(...)`; `MatchConfig` gets `bankRefill:'orbit'`, while rated keeps `bankRefillEvery`; `table.ts:743-745`; new `worker/test/six-clock.test.ts`.
 - **Tests (red):** first the orbit-definition test, then `the bank refills each orbit` (30 s bank, 20 s decision).
 - **Risk:** the dead button or joiners could stretch an orbit.
+- **Left by PR-15 for PR-16:**
+  - An orbit starts in one place: the deal in `startNextHandNow`, when `orbitDone(...)` returns `refill`. Count "the third orbit start after they sat out" from that event, not in hands, and keep the count in `match` (by account) so it survives a restart and a session rotation, as `orbitTravel` does.
+  - The refill sets every seated player's bank, so a player sitting out has the whole bank when they `sit_in`. That is the ADR's "every seated player"; change it there first if sitting out should keep a spent bank.
 
 **PR-16 · P2-04b sit-out and removal**
 
