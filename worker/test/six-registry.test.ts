@@ -843,6 +843,16 @@ describe('when the lobby fails', () => {
     // lobby refuses it. A quiet table like this one is soon evicted from
     // memory, so the retry must be in its storage, not only in memory.
     const matchId = await sixTable()
+    // Its clock at its init, as in production: the idle check init armed
+    // (by the real clock, before sixTable froze it) stays later than the
+    // report's deadline below.
+    const [idle] = (await runInDurableObject(
+      stub(matchId),
+      (_: TableDO, state) =>
+        state.storage.get<{ kind: string; at: number }[]>('deadlines'),
+    ))!
+    expect(idle.kind).toBe('idle')
+    await setClock(matchId, idle.at - IDLE_MS)
     await sitDown(matchId, 'evict-a', 0)
     await settled(matchId)
     expect(refuse).toHaveBeenCalledTimes(1)
@@ -850,6 +860,14 @@ describe('when the lobby fails', () => {
     const t = (await runInDurableObject(stub(matchId), (i: TableDO) =>
       i.clock(),
     )) as number
+    // The failure arms the report's own deadline: the waiting table has no
+    // other alarm before its idle check (review B5).
+    const { reportedAt } = (await listingOf(matchId))!
+    expect(reportedAt).toBe(t)
+    await until(
+      'the refused report arms its deadline',
+      async () => (await storageOf(matchId)).alarm === reportedAt + REPORT_MS,
+    )
     await abortAllDurableObjects()
     await freezeClock(matchId, t)
     // The lobby is back: the first alarm after the window sends the table

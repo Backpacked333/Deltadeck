@@ -2213,12 +2213,16 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const tableId = match.id
     void this.toLobbyList(tableId, 'lobby_report', (lobby) =>
       lobby.reportTable(tableId, report),
-    ).then((sent) => {
+    ).then(async (sent) => {
       // Only while the table still holds this listing: once it has deleted
       // itself (listing null), a late failure writes nothing back.
       if (sent || this.listing !== listing) return
       listing.pending = true
-      return this.ctx.storage.put('listing', listing)
+      await this.ctx.storage.put('listing', listing)
+      // The change is held again, after armAlarm ran for the write that
+      // sent it: arm again, so a waiting table gets its `report` deadline
+      // (syncReport) rather than waiting for its idle check.
+      if (this.listing === listing && this.seatable()) await this.armAlarm()
     })
   }
 
