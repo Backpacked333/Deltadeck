@@ -25,7 +25,6 @@ function fakeClient({
         return { data: { subscription: { unsubscribe: vi.fn() } } }
       }),
       signOut: vi.fn(async () => listener?.('SIGNED_OUT', null)),
-      signInWithOtp: vi.fn(async () => ({ error: null })),
       signInWithOAuth: vi.fn(async () => ({ error: null })),
     },
     from: vi.fn(() => ({
@@ -70,13 +69,13 @@ describe('loadProviders', () => {
       async () =>
         new Response(
           JSON.stringify({
-            external: { google: true, github: false, email: true },
+            external: { google: true, apple: false, github: true, email: true },
           }),
         ),
     )
     expect(await loadProviders('https://x', 'k', ok)).toEqual({
       google: true,
-      github: false,
+      apple: false,
       email: true,
     })
     expect(ok).toHaveBeenCalledWith('https://x/auth/v1/settings', {
@@ -87,7 +86,7 @@ describe('loadProviders', () => {
     })
     expect(await loadProviders('https://x', 'k', down)).toEqual({
       google: false,
-      github: false,
+      apple: false,
       email: true,
     })
   })
@@ -102,31 +101,65 @@ describe('AuthGate', () => {
     ).toHaveAttribute('href', '#table')
   })
 
-  it('shows only enabled sign-in methods and sends a magic link', async () => {
-    settings({ google: false, github: true, email: true })
-    const client = fakeClient()
-    renderGate(client)
+  it('asks for a sign-in first, with a way to create an account', async () => {
+    settings({ google: false, apple: true, email: true })
+    renderGate(fakeClient())
     expect(
-      await screen.findByRole('button', { name: 'Continue with GitHub' }),
+      await screen.findByRole('heading', {
+        name: 'Sign in to play real opponents',
+      }),
     ).toBeInTheDocument()
     expect(
-      screen.getByText(/Play money only\. No prizes, no deposits\. 18\+\./),
+      await screen.findByRole('button', { name: 'Continue with Apple' }),
     ).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Google/ })).toBeNull()
-    await userEvent.type(screen.getByLabelText('Email'), 'a@b.co')
+    expect(screen.getByText(/18 or older/)).toBeInTheDocument()
     await userEvent.click(
-      screen.getByRole('button', { name: 'Email me a link' }),
+      screen.getByRole('button', { name: 'Create a free account' }),
     )
-    expect(await screen.findByText(/Check/)).toHaveTextContent('a@b.co')
-    expect(client.auth.signInWithOtp).toHaveBeenCalledWith({
-      email: 'a@b.co',
-      options: { emailRedirectTo: `${window.location.origin}/` },
-    })
-    expect(sessionStorage.getItem('qp.afterAuth')).toBe('#lobby')
+    expect(
+      screen.getByRole('heading', {
+        name: 'Create an account to play real opponents',
+      }),
+    ).toBeInTheDocument()
+  })
+
+  it('leads with a new account when signing up from the landing page', async () => {
+    settings({ email: true })
+    localStorage.setItem(
+      'qp.pendingClaim',
+      JSON.stringify({
+        receipt: 'a'.repeat(32),
+        hand: 'h1',
+        ver: 1,
+        accuracy: 82,
+        percentile: null,
+        at: 0,
+      }),
+    )
+    render(
+      <AuthGate
+        client={fakeClient()}
+        url="https://x.supabase.co"
+        apiKey="k"
+        onboarding
+      >
+        {() => null}
+      </AuthGate>,
+    )
+    expect(
+      await screen.findByRole('heading', {
+        name: 'Save your score of 82 and get rated',
+      }),
+    ).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: 'Create account' }),
+    ).toBeInTheDocument()
+    localStorage.clear()
   })
 
   it('starts OAuth with a redirect back to the page', async () => {
-    settings({ google: true, github: false, email: false })
+    settings({ google: true, apple: false, email: false })
     const client = fakeClient()
     renderGate(client)
     await userEvent.click(
@@ -173,6 +206,8 @@ describe('AuthGate', () => {
     await waitFor(() =>
       expect(screen.getByLabelText('Email')).toBeInTheDocument(),
     )
+    // This browser only: the player's other devices stay signed in.
+    expect(client.auth.signOut).toHaveBeenCalledWith({ scope: 'local' })
   })
 
   it('shows an error when the profile row cannot be loaded', async () => {
