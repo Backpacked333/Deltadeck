@@ -28,7 +28,7 @@ import type { TableController } from '../src/controller'
 import { IDLE_MS } from '../src/deadlines'
 import { lobbyStub } from '../src/lobby'
 import type { LobbyDO } from '../src/lobby'
-import { NEXT_HAND_MS, SIT_COOLDOWN_MS } from '../src/table'
+import { NEXT_HAND_MS, SIT_COOLDOWN_MS, SIX_CONFIG } from '../src/table'
 import type { InitBody, TableDO } from '../src/table'
 import { analysisKeys, checkFrames, FLOW_TYPES } from './frames'
 import {
@@ -2388,7 +2388,7 @@ describe('six sessions', () => {
     expect(start.matchId).toMatch(UUID)
     expect(start.matchId).not.toBe(matchId)
     // Same seats, stacks carried from hand 1000, blinds moved on from it
-    // (not a first hand's), banks as they were.
+    // (not a first hand's).
     expect(first.config.seats).toEqual(
       ended.players.map((p) => ({ seat: p.seat, stack: p.stack })),
     )
@@ -2398,7 +2398,14 @@ describe('six sessions', () => {
       sb: blinds.sb,
       bb: blinds.bb,
     })
-    expect(await banks()).toEqual(before)
+    // A rotation leaves the banks alone (six-clock.test.ts rotates in mid-
+    // orbit), but this hand also starts an orbit (PR-15): since the table's
+    // first hand the big blind has gone 3, 5, 0, 1 and now 3 again, round
+    // all six seats. So the spender's 5 s is back, with everyone's bank.
+    expect(blinds.bb).toBe(3)
+    expect(await banks()).toEqual(
+      before.map(([seat]) => [seat, SIX_CONFIG.bankMs]),
+    )
     // D stood after hand 999 (3 hands dealt at the table): 1000 and the new
     // hand 1 since, so 4 to go.
     expect(await trySit(d)).toMatchObject({

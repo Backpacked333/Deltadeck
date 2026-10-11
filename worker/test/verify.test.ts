@@ -456,6 +456,10 @@ describe('an engine fault', () => {
       kind: 'engine_fault',
       detail: { error: 'Invalid deck', evidence: { deck: Array(52).fill(7) } },
     })
+    // A heads-up plan's evidence, exactly: the six table's orbit fields
+    // are not added to it.
+    const { evidence } = fake.incidents[0].detail as { evidence: object }
+    expect(Object.keys(evidence).sort()).toEqual(['config', 'deck', 'secret'])
     expect(logged.join('\n')).not.toMatch(/"deck"|7,7,7/)
     vi.restoreAllMocks()
   })

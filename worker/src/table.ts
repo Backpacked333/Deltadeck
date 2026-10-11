@@ -51,6 +51,7 @@ import {
   IDLE_MS,
   INVITE_TTL_MS,
   isCurrentTurn,
+  orbitDone,
   outboxBackoff,
   timeoutAction,
   turnDeadline,
@@ -78,8 +79,8 @@ export const DEFAULT_CONFIG: MatchConfig & { handsTotal: number } = {
 }
 /**
  * Casual 6-max (ADR amendment 2026-10-10, Phase 2): six seats, a 100 bb
- * buy-in at 10/20, 20 s per decision and a 30 s bank. No length: the table
- * deals while two players can be dealt in.
+ * buy-in at 10/20, 20 s per decision and a 30 s bank, full again at every
+ * orbit. No length: the table deals while two players can be dealt in.
  */
 export const SIX_CONFIG: MatchConfig = {
   kind: 'six-casual',
@@ -88,6 +89,7 @@ export const SIX_CONFIG: MatchConfig = {
   blinds: { ...SIX_BLINDS },
   decisionMs: 20_000,
   bankMs: 30_000,
+  bankRefill: 'orbit',
 }
 /** Pause after a hand so both players see the result. */
 export const NEXT_HAND_MS = 3000
@@ -123,7 +125,12 @@ type Player = {
   seat: SeatId
   userId: string
   username: string
-  /** Time bank left for the match. */
+  /**
+   * Time bank left: for the match (casual heads-up), for its half (rated),
+   * or until the next orbit starts (six-casual, where a player who sits
+   * starts with the whole bank). It is this account's, read through the
+   * hand's seat-to-account map, so a seat's next player never inherits it.
+   */
   bankMs: number
   /** Missed decisions in a row; any move of their own resets it. */
   timeouts: number
@@ -174,6 +181,11 @@ type Match = {
    * when it was dead), for the next deal; null before the first.
    */
   blinds?: Blinds | null
+  /**
+   * Six-casual: seats the big blind has travelled since the orbit started
+   * (orbitDone), 0 to 5. Kept across idle gaps and sessions, as `blinds`.
+   */
+  orbitTravel?: number
   /**
    * Six-casual: who was dealt into hand `handNo`, fixed at its deal. Every
    * frame and archive call about that hand reads this, never `players`, so
@@ -406,7 +418,13 @@ export class TableDO extends DurableObject<WorkerEnv> {
       handNo: 0,
       net: six ? {} : { 0: 0, 1: 0 },
       ...(six
-        ? { netByUser: {}, blinds: null, tableHands: 0, sessionTimeouts: {} }
+        ? {
+            netByUser: {},
+            blinds: null,
+            orbitTravel: 0,
+            tableHands: 0,
+            sessionTimeouts: {},
+          }
         : {}),
       ...(rated ? { adjusted: { 0: 0, 1: 0 }, adjustedThrough: 0 } : {}),
       ...(rated && body.rematchOf ? { rematchOf: body.rematchOf } : {}),
@@ -1211,19 +1229,37 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const fresh = six && !!match.sessionOver
     if (fresh) this.newSession()
     let hand: HandState
+    let orbit: ReturnType<typeof orbitDone> | null = null
     try {
       // A six hand's frames and archive read who was dealt in from its
       // plan; a plan without them cannot be dealt safely.
       if (six && (!plan.blinds || !plan.users))
         throw new Error('A six-casual plan names its blinds and players')
       hand = startHand(plan.config, plan.deck)
+      // Whether this deal starts an orbit, from the last deal's big blind
+      // (a table stored before the count began has travelled nothing). A
+      // corrupt count halts the table here, like a plan the engine refuses.
+      if (six)
+        orbit = orbitDone(
+          match.orbitTravel ?? 0,
+          match.blinds ?? null,
+          plan.blinds!,
+        )
     } catch (error) {
       // A plan the engine refuses (a bad stored deck, in Phase 1): halt the
-      // match like any engine fault rather than break the object.
+      // match like any engine fault rather than break the object. A six
+      // table's evidence adds the orbit count and the blinds it counts
+      // from, so a corrupt count can be diagnosed from the incident.
       return this.engineFault(error, plan.config.handNo, {
         config: plan.config,
         deck: plan.deck,
         secret: toBase64(plan.secret),
+        ...(six
+          ? {
+              orbitTravel: match.orbitTravel ?? null,
+              blinds: match.blinds ?? null,
+            }
+          : {}),
       })
     }
     if (!this.invariantsHold(hand)) return
@@ -1233,6 +1269,12 @@ export class TableDO extends DurableObject<WorkerEnv> {
     if (six) {
       match.tableHands = (match.tableHands ?? 0) + 1
       match.blinds = plan.blinds!
+      match.orbitTravel = orbit!.travel
+      // A new orbit: every seated player, dealt in or not, has the whole
+      // bank again before the hand's first decision (its turn deadline,
+      // set below, reads it).
+      if (orbit!.refill && match.config.bankRefill === 'orbit')
+        for (const p of match.players) p.bankMs = match.config.bankMs
       match.dealt = plan.users!.map(({ seat, userId }) => ({
         seat,
         userId,
