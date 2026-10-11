@@ -544,6 +544,41 @@ describe('the cap releases', () => {
 })
 
 describe('abuse', () => {
+  it('three tried tables are leave to open, never a ban on a seat', async () => {
+    // Review B3. At the cap, three made-up tried ids (they count as tried
+    // too) cannot hold a player away from a listed table with a free seat.
+    await fullTables(SIX_TABLES_MAX - 1)
+    const free = await listed(3)
+    const q = await inLobby('ban-q')
+    const madeUp = [
+      crypto.randomUUID(),
+      crypto.randomUUID(),
+      crypto.randomUUID(),
+    ]
+    expect(await quickSit(q, madeUp)).toMatchObject({
+      t: 'sit_at',
+      tableId: free,
+    })
+    expect(await createdIds()).toEqual([])
+    for (const f of q.frames) checkLobbyFrame(f)
+  })
+
+  it('three tried tables and a table of its own still waiting: sent to its own', async () => {
+    // Review B3: the account may not open a second unseated table, so the
+    // one it has, which it has not tried, is offered.
+    const tried = [
+      (await tableWith('own-a')).matchId,
+      (await tableWith('own-b')).matchId,
+      (await tableWith('own-c')).matchId,
+    ]
+    const q = await inLobby('own-q')
+    const mine = await sentTo(q, tried)
+    expect(tried).not.toContain(mine)
+    expect(await createdOf(mine)).toMatchObject({ by: 'own-q', ready: true })
+    expect(await sentTo(q, tried)).toBe(mine)
+    expect(await createdIds()).toEqual([mine])
+  })
+
   it('a quick-sit whose claimed table cannot be asked is still answered', async () => {
     // Review B6: the claim is checked with its table, and that call can
     // throw. The client is told, so its seating ends.

@@ -632,8 +632,9 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    * A six table for this account (ADR, clarifications from PR-24): the
    * table it is at, if any; else the fullest listed table with a free seat
    * this quick-sit has not `tried`; else one the lobby opened that nobody
-   * has sat at yet; else a new one, under the cap. The client sits there,
-   * and asks again naming the tables that refused it.
+   * has sat at yet; else a new one, under the cap. With three tried, a new
+   * one first, and one of the others only if none opens. The client sits
+   * there, and asks again naming the tables that refused it.
    */
   private async quickSit(ws: WebSocket, tried: string[]) {
     const { userId, username } = this.who(ws)
@@ -709,44 +710,80 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
   }
 
   /**
-   * Picks or opens the table. From the first read to the writes that take
-   * a place under the cap only storage is awaited, so the input gate holds
-   * and no other quick-sit counts in between: two cannot both open the
-   * 50th. The table's /init, which lets other events in, comes after.
+   * Picks or opens the table. Each pass reads afresh, and from its first
+   * read to the writes that take a place under the cap only storage is
+   * awaited, so the input gate holds and no other quick-sit counts in
+   * between: two cannot both open the 50th. A call that lets other events
+   * in (the table's /init) ends a pass.
    */
   private async pickTable(who: Who, tried: string[]): Promise<Answer> {
-    const t = this.clock()
-    const listed = await this.tables()
-    const opened = await this.openedTables(t)
-    const listedIds = new Set(listed.map((row) => row.tableId))
-    // Opened and nobody has sat there yet: not listed.
-    const unseated = opened.filter(([tableId]) => !listedIds.has(tableId))
-    if (tried.length < QUICK_SIT_TABLES) {
-      const free = listed.find(
-        (row) => row.seated < row.maxSeats && !tried.includes(row.tableId),
-      )
-      if (free) return { t: 'sit_at', tableId: free.tableId }
-      // Two players arriving together at an empty lobby share one table.
-      const waiting = unseated.find(
-        ([tableId, c]) => c.ready && !tried.includes(tableId),
-      )
-      if (waiting) return { t: 'sit_at', tableId: waiting[0] }
+    const untried = (tableId: string) => !tried.includes(tableId)
+    let failed = false
+    for (;;) {
+      const t = this.clock()
+      const listed = await this.tables()
+      const opened = await this.openedTables(t)
+      const listedIds = new Set(listed.map((row) => row.tableId))
+      // Opened and nobody has sat there yet: not listed.
+      const unseated = opened.filter(([tableId]) => !listedIds.has(tableId))
+      // A seat: the fullest listed table with one, else a table opened that
+      // nobody has sat at yet, so two players arriving together at an
+      // empty lobby share one table.
+      const seat =
+        listed.find((row) => row.seated < row.maxSeats && untried(row.tableId))
+          ?.tableId ??
+        unseated.find(([tableId, c]) => c.ready && untried(tableId))?.[0]
+      // Fewer than three tried: a seat comes first. Three are leave to open
+      // a table, never a ban on a seat (below).
+      if (seat && tried.length < QUICK_SIT_TABLES)
+        return { t: 'sit_at', tableId: seat }
+      const refusal = failed
+        ? 'Could not open a table just now. Try again in a moment.'
+        : await this.refusal(who, listedIds, opened, unseated)
+      if (!refusal) {
+        const tableId = await this.open(who, t)
+        if (tableId) return { t: 'sit_at', tableId }
+        // The open let other events in: read again before answering.
+        failed = true
+        continue
+      }
+      // No table opens for this account: a seat it has not tried, if any.
+      if (seat) return { t: 'sit_at', tableId: seat }
+      return { t: 'error', code: 'tables_full', message: refusal }
     }
-    const full = (message: string): Answer => ({
-      t: 'error',
-      code: 'tables_full',
-      message,
-    })
+  }
+
+  /**
+   * Why `who` may not open a table now, or null if it may: the cap, its own
+   * table nobody has sat at yet (offered to it and everyone until someone
+   * sits there), or its openings today. Storage reads only.
+   */
+  private async refusal(
+    who: Who,
+    listedIds: Set<string>,
+    opened: (readonly [string, Created])[],
+    unseated: (readonly [string, Created])[],
+  ) {
     const counted = new Set([...listedIds, ...opened.map(([id]) => id)])
     if (counted.size >= SIX_TABLES_MAX)
-      return full('Every table is full. Try again in a minute.')
-    // One table nobody has sat at per account: it is offered to this
-    // account (and everyone) until someone sits there.
+      return 'Every table is full. Try again in a minute.'
     if (unseated.some(([, c]) => c.by === who.userId))
-      return full('Your table is still empty. Try again in a minute.')
+      return 'Your table is still empty. Try again in a minute.'
     const creates = await this.createsToday(who.userId)
     if (creates.made >= MATCH_CREATES_PER_DAY)
-      return full('You have opened enough tables today. Try again tomorrow.')
+      return 'You have opened enough tables today. Try again tomorrow.'
+    return null
+  }
+
+  /**
+   * Opens a table for `who` at `t`: its `created:` record and the day's
+   * count first (the caller has awaited only storage since its reads), and
+   * only then the table's /init, which lets other events in. Its id, or
+   * null if the table did not open: the record goes and the day's count is
+   * given back.
+   */
+  private async open(who: Who, t: number) {
+    const creates = await this.createsToday(who.userId)
     const tableId = crypto.randomUUID()
     const record: Created = { at: t, by: who.userId, ready: false }
     await this.ctx.storage.put({
@@ -758,10 +795,10 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
     if (!(await this.openTable(tableId, who))) {
       await this.ctx.storage.delete(`created:${tableId}`)
       await this.ctx.storage.put(creates.key, creates.made)
-      return full('Could not open a table just now. Try again in a moment.')
+      return null
     }
     await this.ctx.storage.put(`created:${tableId}`, { ...record, ready: true })
-    return { t: 'sit_at', tableId }
+    return tableId
   }
 
   /**
