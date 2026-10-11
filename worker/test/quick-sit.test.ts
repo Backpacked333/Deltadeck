@@ -157,6 +157,10 @@ async function until(what: string, done: () => boolean | Promise<boolean>) {
   expect(await done(), what).toBe(true)
 }
 
+/** A lobby answer to a quick-sit. */
+const answered = (f: LobbyMsg) =>
+  f.t === 'sit_at' || f.t === 'matched' || f.t === 'error'
+
 /**
  * Holds tables' /init (the first `count` of them, or all) until `letGo`.
  * The lobby's open is a call that lets other events in, and this keeps it
@@ -182,6 +186,12 @@ function holdInit(count = Infinity) {
     letGo: () => letGo(),
     restore: () => spy.mockRestore(),
   }
+}
+
+/** How often the lobby has read its list of tables since this was called. */
+function watchListReads() {
+  const spy = vi.spyOn(LobbyDO.prototype, 'tables')
+  return () => spy.mock.calls.length
 }
 
 describe('quick-sit picks a table', () => {
@@ -404,10 +414,29 @@ describe('quick-sit opens a table', () => {
   })
 
   it('two players who quick-sit at once at an empty lobby land at one table', async () => {
+    // At once for real: A's open is held at the table's /init, which lets
+    // other events into the lobby, and B asks meanwhile. B finds nothing
+    // to offer but A's open in flight, and waits for it (review B1).
     const a = await inLobby('once-a')
     const b = await inLobby('once-b')
-    const tableId = await sentTo(a)
-    expect(await sentTo(b)).toBe(tableId)
+    const init = holdInit()
+    const reads = watchListReads()
+    const [fa, fb] = [a.frames.length, b.frames.length]
+    a.send({ t: 'quick_sit' })
+    await until('A opens a table', () => init.held() === 1)
+    b.send({ t: 'quick_sit' })
+    // B has read the list, so it has made its choice.
+    await until('B reads the list', () => reads() >= 2)
+    init.letGo()
+    const [x, y] = await Promise.all([
+      a.next(answered, fa),
+      b.next(answered, fb),
+    ])
+    init.restore()
+    if (x.t !== 'sit_at') throw new Error(`A: ${JSON.stringify(x)}`)
+    const tableId = x.tableId
+    expect(y).toMatchObject({ t: 'sit_at', tableId })
+    expect(init.held()).toBe(1)
     const [ca, cb] = [
       await connect(tableId, 'once-a'),
       await connect(tableId, 'once-b'),
@@ -459,19 +488,57 @@ describe('quick-sit opens a table', () => {
   it('two concurrent quick-sits cannot overshoot the cap', async () => {
     await fullTables(SIX_TABLES_MAX - 1)
     const [a, b] = [await inLobby('race-a'), await inLobby('race-b')]
+    // A opens the 50th, its /init held. B asks meanwhile, naming that
+    // table as tried, so it has no table to be offered or to wait for
+    // (review B1: a bare quick-sit now waits for A's, below): it must
+    // count A's opening, written before the /init.
+    const fiftieth = crypto.randomUUID()
+    vi.spyOn(crypto, 'randomUUID').mockReturnValueOnce(
+      fiftieth as ReturnType<typeof crypto.randomUUID>,
+    )
+    const init = holdInit()
     const [fa, fb] = [a.frames.length, b.frames.length]
     a.send({ t: 'quick_sit' })
-    b.send({ t: 'quick_sit' })
+    await until('A opens a table', () => init.held() === 1)
+    b.send({ t: 'quick_sit', tried: [fiftieth] })
+    const refused = await b.next((f) => f.t === 'sit_at' || f.t === 'error', fb)
+    init.letGo()
     const answers = await Promise.all([
       a.next((f) => f.t === 'sit_at' || f.t === 'error', fa),
-      b.next((f) => f.t === 'sit_at' || f.t === 'error', fb),
+      refused,
     ])
+    init.restore()
     // One table opened, the 50th; the other quick-sit found the cap.
     expect(answers.map((f) => f.t).sort()).toEqual(['error', 'sit_at'])
     expect(answers.find((f) => f.t === 'error')).toMatchObject({
       code: 'tables_full',
     })
     expect(await createdIds()).toHaveLength(1)
+    expect(answers[0]).toMatchObject({ t: 'sit_at', tableId: fiftieth })
+  })
+
+  it('two bare quick-sits at once at 49 tables both land at the 50th', async () => {
+    // Review B1 at the cap: B, asking while A opens the 50th, is sent to
+    // it once it is open, not told every table is full.
+    await fullTables(SIX_TABLES_MAX - 1)
+    const [a, b] = [await inLobby('both-a'), await inLobby('both-b')]
+    const init = holdInit()
+    const reads = watchListReads()
+    const [fa, fb] = [a.frames.length, b.frames.length]
+    a.send({ t: 'quick_sit' })
+    await until('A opens a table', () => init.held() === 1)
+    b.send({ t: 'quick_sit' })
+    await until('B reads the list', () => reads() >= 2)
+    init.letGo()
+    const [x, y] = await Promise.all([
+      a.next(answered, fa),
+      b.next(answered, fb),
+    ])
+    init.restore()
+    if (x.t !== 'sit_at') throw new Error(`A: ${JSON.stringify(x)}`)
+    expect(y).toEqual({ t: 'sit_at', tableId: x.tableId, seq: y.seq })
+    expect(await createdIds()).toEqual([x.tableId])
+    expect(init.held()).toBe(1)
   })
 })
 

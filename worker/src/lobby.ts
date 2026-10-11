@@ -143,6 +143,14 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    * would both find it free, and both seat it.
    */
   private userLocks = new Map<string, Promise<unknown>>()
+  /**
+   * Quick-sit's opens still waiting on their table's /init, by table id.
+   * Each settles once its `created:` record says how it went (ready, or
+   * gone). An open is offered only once ready, and /init lets other events
+   * in: a quick-sit arriving meanwhile with nothing else to offer waits for
+   * it here, rather than open a second table beside it.
+   */
+  private opening = new Map<string, Promise<void>>()
 
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env)
@@ -718,6 +726,8 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    */
   private async pickTable(who: Who, tried: string[]): Promise<Answer> {
     const untried = (tableId: string) => !tried.includes(tableId)
+    // Opens this quick-sit has waited for: each at most once.
+    const waited = new Set<string>()
     let failed = false
     for (;;) {
       const t = this.clock()
@@ -733,10 +743,26 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
         listed.find((row) => row.seated < row.maxSeats && untried(row.tableId))
           ?.tableId ??
         unseated.find(([tableId, c]) => c.ready && untried(tableId))?.[0]
-      // Fewer than three tried: a seat comes first. Three are leave to open
-      // a table, never a ban on a seat (below).
-      if (seat && tried.length < QUICK_SIT_TABLES)
-        return { t: 'sit_at', tableId: seat }
+      // An open still waiting on its /init will be such a table: one this
+      // quick-sit has not tried, nor waited for already.
+      const pending = unseated.find(
+        ([tableId]) =>
+          this.opening.has(tableId) && untried(tableId) && !waited.has(tableId),
+      )?.[0]
+      const wait = async (tableId: string) => {
+        waited.add(tableId)
+        await this.opening.get(tableId)
+      }
+      // Fewer than three tried: a seat comes first, then the open coming.
+      // Three are leave to open a table, never a ban on a seat (below).
+      if (tried.length < QUICK_SIT_TABLES) {
+        if (seat) return { t: 'sit_at', tableId: seat }
+        if (pending) {
+          // Leaves the storage-only section: read again once it settles.
+          await wait(pending)
+          continue
+        }
+      }
       const refusal = failed
         ? 'Could not open a table just now. Try again in a moment.'
         : await this.refusal(who, listedIds, opened, unseated)
@@ -747,8 +773,13 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
         failed = true
         continue
       }
-      // No table opens for this account: a seat it has not tried, if any.
+      // No table opens for this account: a seat it has not tried, if any,
+      // or one about to be.
       if (seat) return { t: 'sit_at', tableId: seat }
+      if (pending) {
+        await wait(pending)
+        continue
+      }
       return { t: 'error', code: 'tables_full', message: refusal }
     }
   }
@@ -786,19 +817,33 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
     const creates = await this.createsToday(who.userId)
     const tableId = crypto.randomUUID()
     const record: Created = { at: t, by: who.userId, ready: false }
-    await this.ctx.storage.put({
-      [`created:${tableId}`]: record,
-      [creates.key]: creates.made + 1,
-    })
-    await this.forgetOldCreates(creates.today)
-    // The place is taken; only now a call that lets other events in.
-    if (!(await this.openTable(tableId, who))) {
-      await this.ctx.storage.delete(`created:${tableId}`)
-      await this.ctx.storage.put(creates.key, creates.made)
-      return null
+    // In flight from before its record is written: no quick-sit can see
+    // the record and not the open.
+    let settle = () => {}
+    this.opening.set(tableId, new Promise<void>((done) => (settle = done)))
+    try {
+      await this.ctx.storage.put({
+        [`created:${tableId}`]: record,
+        [creates.key]: creates.made + 1,
+      })
+      await this.forgetOldCreates(creates.today)
+      // The place is taken; only now a call that lets other events in.
+      if (!(await this.openTable(tableId, who))) {
+        await this.ctx.storage.delete(`created:${tableId}`)
+        await this.ctx.storage.put(creates.key, creates.made)
+        return null
+      }
+      await this.ctx.storage.put(`created:${tableId}`, {
+        ...record,
+        ready: true,
+      })
+      return tableId
+    } finally {
+      // Settled once the record says how it went, so whoever waited reads
+      // it afresh.
+      this.opening.delete(tableId)
+      settle()
     }
-    await this.ctx.storage.put(`created:${tableId}`, { ...record, ready: true })
-    return tableId
   }
 
   /**
