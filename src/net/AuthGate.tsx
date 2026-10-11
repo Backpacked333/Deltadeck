@@ -1,14 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { Mail, UserRound } from 'lucide-react'
-import {
-  loadProviders,
-  sendMagicLink,
-  signInWithProvider,
-  useAuth,
-} from './auth'
-import type { OAuthProvider, Providers } from './auth'
+import { UserRound } from 'lucide-react'
+import { signOutHere, useAuth } from './auth'
 import {
   loadPlayer,
   PLACEHOLDER,
@@ -17,6 +11,7 @@ import {
 } from './players'
 import type { Player } from './players'
 import type { Identity } from './api'
+import { SignIn } from './SignIn'
 import { readPendingClaim } from '../lib/landing'
 import { track } from '../lib/track'
 
@@ -90,7 +85,7 @@ function SignedIn({
   )
   const signOut = () => {
     setPlayer(null)
-    void client.auth.signOut()
+    void signOutHere(client)
   }
 
   if (auth.status === 'loading' || (userId && player === null))
@@ -101,7 +96,7 @@ function SignedIn({
     )
   if (auth.status === 'signed-out')
     return (
-      <SignIn
+      <SignInFor
         client={client}
         url={url}
         apiKey={apiKey}
@@ -134,12 +129,12 @@ function SignedIn({
   return <>{children({ player, getToken, signOut })}</>
 }
 
-const PROVIDER_LABELS: Record<OAuthProvider, string> = {
-  google: 'Continue with Google',
-  github: 'Continue with GitHub',
-}
-
-function SignIn({
+/**
+ * Signing up from the landing page leads with a new account, headed by the
+ * score waiting to be saved; elsewhere (the lobby, a friend's table link)
+ * the page asks for a sign-in first.
+ */
+function SignInFor({
   client,
   url,
   apiKey,
@@ -151,105 +146,29 @@ function SignIn({
   onboarding: boolean
 }) {
   const [pending] = useState(() => (onboarding ? readPendingClaim() : null))
-  const [providers, setProviders] = useState<Providers | null>(null)
-  const [email, setEmail] = useState('')
-  const [sent, setSent] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  useEffect(() => {
-    let live = true
-    loadProviders(url, apiKey).then((p) => live && setProviders(p))
-    return () => {
-      live = false
-    }
-  }, [url, apiKey])
-
-  const oauth = async (provider: OAuthProvider) => {
-    setBusy(true)
-    setError(await signInWithProvider(client, provider))
-    setBusy(false)
-  }
-  const submit = async (event: FormEvent) => {
-    event.preventDefault()
-    const address = email.trim()
-    if (!address) return
-    setBusy(true)
-    const problem = await sendMagicLink(client, address)
-    setBusy(false)
-    if (problem) setError(problem)
-    else {
-      setError(null)
-      setSent(address)
-    }
-  }
-
-  return (
-    <section className="panel live-signin" aria-labelledby="signin-title">
-      <h2 id="signin-title">
-        {pending
-          ? `Save your ${pending.accuracy} and get rated`
-          : onboarding
-            ? 'Create your account'
-            : 'Sign in to play real opponents'}
-      </h2>
-      <p className="live-muted">
-        Play money only. No prizes, no deposits. 18+. Your username and finished
-        hands are public; your email is not.
-      </p>
-      {providers === null ? (
-        <p className="live-status" role="status">
-          Loading sign-in options…
-        </p>
-      ) : (
-        <>
-          {(['google', 'github'] as const)
-            .filter((p) => providers[p])
-            .map((p) => (
-              <button
-                key={p}
-                className="btn btn-outline btn-lg live-wide"
-                disabled={busy}
-                onClick={() => void oauth(p)}
-              >
-                {PROVIDER_LABELS[p]}
-              </button>
-            ))}
-          {providers.email &&
-            (sent ? (
-              <p className="live-sent" role="status">
-                <Mail size={16} /> Check <b>{sent}</b> for a sign-in link. Open
-                it in this browser.
-              </p>
-            ) : (
-              <form className="live-email" onSubmit={(e) => void submit(e)}>
-                <label htmlFor="signin-email">Email</label>
-                <div className="live-row">
-                  <input
-                    id="signin-email"
-                    type="email"
-                    autoComplete="email"
-                    required
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                  />
-                  <button className="btn btn-primary" disabled={busy}>
-                    Email me a link
-                  </button>
-                </div>
-              </form>
-            ))}
-          {!providers.email && !providers.google && !providers.github && (
-            <p role="alert">Sign-in is turned off for this site right now.</p>
-          )}
-        </>
-      )}
-      {error && (
-        <p className="live-error" role="alert">
-          {error}
-        </p>
-      )}
-    </section>
+  return onboarding ? (
+    <SignIn
+      client={client}
+      url={url}
+      apiKey={apiKey}
+      mode="signup"
+      titles={
+        pending
+          ? { signup: `Save your score of ${pending.accuracy} and get rated` }
+          : {}
+      }
+    />
+  ) : (
+    <SignIn
+      client={client}
+      url={url}
+      apiKey={apiKey}
+      mode="signin"
+      titles={{
+        signin: 'Sign in to play real opponents',
+        signup: 'Create an account to play real opponents',
+      }}
+    />
   )
 }
 
