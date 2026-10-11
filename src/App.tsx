@@ -3,6 +3,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
@@ -82,7 +83,8 @@ import { Tour } from './components/Tour'
 import { CardDefs } from './components/cards/CardArt'
 import type { TourStep } from './components/Tour'
 import { backFromSignIn } from './lib/landing'
-import { signedIn, useAccount } from './lib/account'
+import { hadAccount, signedIn, useAccount } from './lib/account'
+import { rememberAuthReturn } from './lib/authReturn'
 import { AccountMenu } from './components/AccountMenu'
 import { track } from './lib/track'
 
@@ -95,7 +97,13 @@ type View =
   | 'live'
   | 'info'
   | 'landing'
+  /** A page that needs an account, while the visitor is on their way to one. */
+  | 'locked'
 type Route = { view: View; lesson: LessonId | null }
+/** Practice, the lessons and progress: for signed-in players only. */
+const ACCOUNT_VIEWS: View[] = ['play', 'progress', 'curriculum', 'quick']
+/** A new account's name until it chooses one. */
+const PLACEHOLDER_NAME = /^player_[0-9a-f]{12}$/
 const Curriculum = lazy(() => import('./curriculum/Curriculum'))
 const LiveApp = lazy(() => import('./net/LiveApp'))
 // Signed in: checks the stored session with the account service (lazy, so
@@ -280,10 +288,35 @@ export default function App() {
   const { spots, request } = useSpots()
   const hash = useHash()
   const search = useSearch()
-  const { view, lesson } = parseRoute(hash, search)
+  const route = parseRoute(hash, search)
+  const { lesson } = route
   // Signed in or not, as the entry chunk can tell; the online chunk confirms.
   const account = useAccount()
   const member = account.signedIn
+  // Practice, lessons and progress need an account, with a name chosen. A
+  // visitor without one goes to sign up (or sign in, on a browser that has
+  // had an account) and comes back here afterwards. Replace, not push, so
+  // Back leaves for the page before; ?seed and the like are kept.
+  const locked =
+    ACCOUNT_VIEWS.includes(route.view) &&
+    (!member ||
+      (account.username !== null && PLACEHOLDER_NAME.test(account.username)))
+  const view: View = locked ? 'locked' : route.view
+  useLayoutEffect(() => {
+    if (!locked) return
+    rememberAuthReturn(hash || '#table')
+    const target = member
+      ? '#welcome/onboard'
+      : hadAccount()
+        ? '#signin'
+        : '#signup'
+    window.history.replaceState(
+      null,
+      '',
+      `${window.location.pathname}${window.location.search}${target}`,
+    )
+    window.dispatchEvent(new HashChangeEvent('hashchange'))
+  }, [locked, member, hash])
   // Signed out elsewhere (another tab, or a session the service ended): start
   // afresh, so nothing of the account stays in this page.
   const wasMember = useRef(member)
@@ -335,7 +368,8 @@ export default function App() {
     !progress.onboarded &&
     view !== 'live' &&
     view !== 'info' &&
-    view !== 'landing'
+    view !== 'landing' &&
+    view !== 'locked'
   // Atlas waits while you are away from the table.
   const blocked = welcome || tour || view !== 'play'
   const legal = legalActions(game.turn === 0 ? game : { ...game, turn: 0 })

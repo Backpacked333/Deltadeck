@@ -1396,3 +1396,10 @@
     pointer-events: none;
   }
 }
+/* The hero's account buttons sit in the links row. */
+.landing-links-row {
+  align-items: center;
+}
+.landing-links-row .btn:hover {
+  text-decoration: none;
+}

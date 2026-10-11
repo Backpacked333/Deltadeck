@@ -171,14 +171,14 @@ for (const colorScheme of ['light', 'dark'] as const)
     await expect(page).toHaveURL(/#lobby$/)
     // CI builds have no account service, so the lobby says so plainly.
     await expect(
-      page.getByText('Online play is not set up on this site yet.'),
+      page.getByText('Accounts are not set up on this site yet.'),
     ).toBeVisible()
     const results = await new AxeBuilder({ page }).analyze()
     const serious = results.violations.filter((v) =>
       ['serious', 'critical'].includes(v.impact ?? ''),
     )
     expect(serious.map((v) => `${v.id}: ${v.help}`)).toEqual([])
-    await page.getByRole('link', { name: 'Practice vs Atlas' }).click()
+    await page.getByRole('button', { name: 'Play', exact: true }).click()
     await expect(
       page.getByRole('region', { name: 'Poker table' }),
     ).toBeVisible()
