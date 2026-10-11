@@ -21,6 +21,8 @@ export type PlateSeat = {
   /** Chips in front of them on this street. */
   bet: number
   status: SeatStatus
+  /** Stood up during the hand whose result is showing (SixTable). */
+  left?: boolean
 }
 
 export type SeatClock = NonNullable<SeatView['clock']>
@@ -87,7 +89,9 @@ export function SeatPlate({
           {(state === 'sitting-out' || (active && clock)) && (
             <span className="six-line">
               {state === 'sitting-out' && (
-                <span className="six-status">Sitting out</span>
+                <span className="six-status">
+                  {player.left ? 'Left the table' : 'Sitting out'}
+                </span>
               )}
               {active && clock && (
                 <PlateClock clock={clock} offset={clockOffset} />

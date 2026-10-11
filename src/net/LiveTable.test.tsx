@@ -2,7 +2,9 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MotionConfig } from 'motion/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act as engineAct } from '../engine/hand'
+import { act as engineAct, legalActions } from '../engine/hand'
+import type { HandState } from '../engine/types'
+import type { HandRecordV1 } from '../shared/protocol'
 import { seedRandom } from '../lib/random'
 import type { Identity } from './api'
 import { Lobby } from './Lobby'
@@ -668,7 +670,107 @@ describe('LiveTable at a six-casual table', () => {
       screen.getByText('You win · Two pair; carol wins · Flush'),
     ).toBeInTheDocument()
   })
+
+  it('names a side-pot winner who lost chips on the hand', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    // carol (1,500, all in) takes the 4,500 main pot with a flush. alice's
+    // two pair beats dave's eights for the 200 side pot: she wins a pot yet
+    // ends 1,400 down, and must still be named with her hand.
+    let hand = sixHand({
+      stacks: { 5: 1600 },
+      holes: { 0: '7d 2h', 2: 'As 9d', 3: 'Kc 2c', 5: '8d 8s' },
+      board: 'Ac 7c 9h Tc 3s',
+    })
+    hand = engineAct(hand, 5, { type: 'raise', to: 1600 })
+    hand = engineAct(hand, 0, { type: 'fold' })
+    hand = engineAct(hand, 2, { type: 'call' })
+    hand = engineAct(hand, 3, { type: 'call' })
+    expect(hand.result!.netBySeat[2]).toBe(-1400)
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+
+    expect(
+      screen.getByText('You win · Two pair; carol wins · Flush'),
+    ).toBeInTheDocument()
+  })
+
+  it('a table waiting for players promises no next hand', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    const done = playedOut(sixHand())
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 1, 2, 2, done, {
+          table: sixInfo(SIX_ROSTER, 'waiting'),
+        }),
+      ),
+    )
+    expect(screen.queryByText('Next hand in a few seconds.')).toBeNull()
+    expect(
+      screen.getByText('Waiting for players to deal the next hand.'),
+    ).toBeInTheDocument()
+  })
+
+  it('a player who stood keeps their seat on the ring while the hand result shows', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    // carol stood during hand 1: the server unseats her as it ends, while
+    // the finished hand stays on the table until the next deal.
+    const done = playedOut(sixHand())
+    const without = SIX_ROSTER.filter((p) => p.seat !== 3)
+    act(() => {
+      socket.emit({
+        t: 'hand_end',
+        seq: 1,
+        matchId: MATCH,
+        handNo: 1,
+        record: {
+          seats: SIX_ROSTER.map((p) => ({ ...p, userId: p.username })),
+        } as unknown as HandRecordV1,
+      })
+      socket.emit(
+        sixFrame('welcome', 2, 2, 2, done, { table: sixInfo(without) }),
+      )
+    })
+    expect(seat(3)).toHaveAccessibleName('Seat 4: carol')
+    expect(within(seat(3)).getByText('Left the table')).toBeInTheDocument()
+
+    // Someone sat in her seat: the ring shows them, not her.
+    const erin = [
+      ...without,
+      { seat: 3 as const, username: 'erin', stack: 2000 },
+    ]
+    act(() =>
+      socket.emit(sixFrame('state', 3, 2, 2, done, { table: sixInfo(erin) })),
+    )
+    expect(seat(3)).toHaveAccessibleName('Seat 4: erin')
+    expect(within(seat(3)).queryByText('Left the table')).toBeNull()
+
+    // The table waits for players: no hand is coming, so the seat is free.
+    act(() =>
+      socket.emit(
+        sixFrame('state', 4, 2, 2, done, {
+          table: sixInfo(without, 'waiting'),
+        }),
+      ),
+    )
+    expect(seat(3)).toHaveAccessibleName('Seat 4: empty')
+  })
 })
+
+/** Every remaining player checks or calls the hand down to showdown. */
+function playedOut(start: HandState) {
+  let hand = start
+  while (hand.toAct !== null) {
+    const legal = legalActions(hand)
+    hand = engineAct(
+      hand,
+      hand.toAct,
+      legal.canCheck ? { type: 'check' } : { type: 'call' },
+    )
+  }
+  return hand
+}
 
 /**
  * The move keys the page takes: a key is taken when a listener calls

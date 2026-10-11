@@ -126,7 +126,7 @@ export function SixTable({
         )}
       </div>
       <SixRing
-        players={plates(table, view)}
+        players={plates(table, view, nameOf)}
         you={seat}
         button={view?.button ?? null}
         sb={view?.sb ?? null}
@@ -166,8 +166,12 @@ export function SixTable({
  * shows its chips behind and in front from that hand; anyone else, the
  * stack the roster gives (as of the last deal, or their buy-in).
  */
-function plates(table: MatchInfo, view: SeatView | null): PlateSeat[] {
-  return table.players.map((p) => {
+function plates(
+  table: MatchInfo,
+  view: SeatView | null,
+  nameOf: (seat: SeatId) => string,
+): PlateSeat[] {
+  const seated: PlateSeat[] = table.players.map((p) => {
     const inHand = view?.players.find((h) => h.seat === p.seat)
     return {
       seat: p.seat,
@@ -177,6 +181,21 @@ function plates(table: MatchInfo, view: SeatView | null): PlateSeat[] {
       status: p.status ?? 'playing',
     }
   })
+  // A player who stood during the hand leaves the roster as it ends. While
+  // its result shows and the next hand is coming, their seat still shows
+  // them with what they had there, unless someone has sat in it since.
+  if (!view?.result || table.status !== 'playing') return seated
+  const left: PlateSeat[] = view.players
+    .filter((h) => !table.players.some((p) => p.seat === h.seat))
+    .map((h) => ({
+      seat: h.seat,
+      username: nameOf(h.seat),
+      stack: h.stack,
+      bet: h.bet,
+      status: 'sitting_out',
+      left: true,
+    }))
+  return [...seated, ...left]
 }
 
 /** The middle of the felt: the pot, the board, and the viewer's own cards. */
@@ -383,7 +402,11 @@ function SixStatus({
     ) : !seated && table.players.length < SEATS ? (
       'Take a seat to be dealt in from the next hand.'
     ) : result ? (
-      'Next hand in a few seconds.'
+      table.status === 'waiting' ? (
+        'Waiting for players to deal the next hand.'
+      ) : (
+        'Next hand in a few seconds.'
+      )
     ) : null
   return (
     // Focusable, so focus can land here when the control holding it goes
@@ -425,11 +448,13 @@ function resultText(
   result: NonNullable<SeatView['result']>,
   nameOf: (seat: SeatId) => string,
 ) {
-  const winners = view.players
-    .map((p) => p.seat)
-    .filter((s) => (result.netBySeat[s] ?? 0) > 0)
+  // Whoever was awarded a pot, even a side pot worth less than they put in.
+  const awarded = new Set(
+    result.awards.filter((a) => a.amount > 0).map((a) => a.seat),
+  )
+  const winners = view.players.map((p) => p.seat).filter((s) => awarded.has(s))
   // Everyone got back what they put in.
-  if (!winners.length) return 'Split pot'
+  if (winners.every((s) => (result.netBySeat[s] ?? 0) === 0)) return 'Split pot'
   const phrase = (seats: SeatId[]) => {
     const names = seats.map((s) => (s === view.you ? 'You' : nameOf(s)))
     const who =
