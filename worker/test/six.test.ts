@@ -1335,6 +1335,313 @@ describe('standing up at a six table', () => {
   })
 })
 
+/** `client` asks to rebuy; resolves with the welcome that answers it, or the error. */
+async function rebuy(client: Client) {
+  const from = client.frames.length
+  client.send({ t: 'rebuy' })
+  return client.next((f) => f.t === 'welcome' || f.t === 'error', from)
+}
+
+/** Seat `seat`'s stack in the roster a frame carries. */
+function rosterStack(f: ServerMsg, seat: SeatId) {
+  if (f.t !== 'welcome' && f.t !== 'state') throw new Error(`no roster: ${f.t}`)
+  return bySeat(f.table.players, seat).stack
+}
+
+/**
+ * The hand on the table, just ended, leaves `loser` with no chips: `winner`
+ * takes them, as a real all-in would. Changed in memory before the next
+ * deal settles the hand's stacks into the table's.
+ */
+async function bust(matchId: string, loser: SeatId, winner: SeatId) {
+  await runInDurableObject(stub(matchId), (instance: TableDO) => {
+    const { hand } = instance as unknown as { hand: HandState }
+    const won = hand.players.find((p) => p.seat === winner)!
+    const lost = hand.players.find((p) => p.seat === loser)!
+    won.stack += lost.stack
+    lost.stack = 0
+  })
+}
+
+describe('rebuying at a six table', () => {
+  it('rebuy refused during a hand and above 100 bb', async () => {
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2], 'rr')
+    await clients[0].next(isState(1))
+    // Both are dealt into hand 1, which is being played.
+    for (const seat of [0, 2])
+      expect(await rebuy(clients[seat])).toMatchObject({
+        t: 'error',
+        code: 'in_hand',
+      })
+    // Seat 4 sits during hand 1, so is not in it, but holds the buy-in:
+    // exactly 100 bb is not below it.
+    clients[4] = await sitDown(matchId, 'rr-4', 4)
+    expect(await rebuy(clients[4])).toMatchObject({ code: 'not_below' })
+    // An amount is never read: a rebuy that names one is not a rebuy.
+    for (const junk of [
+      { t: 'rebuy', amount: 500 },
+      { t: 'rebuy', stack: 100_000 },
+    ]) {
+      const from = clients[4].frames.length
+      clients[4].ws.send(JSON.stringify(junk))
+      expect(await clients[4].next((f) => f.t === 'error', from)).toMatchObject(
+        { code: 'illegal' },
+      )
+    }
+
+    // Hand 1: seat 0 folds its small blind (1,990 to 2,010). Hand 2:
+    // button 0, small blind 2, big blind 4, and seat 0 opens.
+    await nextHand(matchId, clients, () => ({ type: 'fold' }))
+    expect((await peek(matchId)).hand!.config).toMatchObject({
+      button: 0,
+      sb: 2,
+      bb: 4,
+    })
+    await move(matchId, clients, () => ({ type: 'raise', to: 100 }))
+    await move(matchId, clients, () => ({ type: 'call' }))
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    // Seat 4 folded its big blind (1,980 behind) and seat 0 is below
+    // 100 bb, but both are dealt into the hand being played.
+    expect(await rebuy(clients[4])).toMatchObject({ code: 'in_hand' })
+    expect(await rebuy(clients[0])).toMatchObject({ code: 'in_hand' })
+    expect((await seated(matchId)).map((p) => [p.seat, p.stack])).toEqual([
+      [0, 1990],
+      [2, 2010],
+      [4, 2000],
+    ])
+
+    // Flop: seat 2 checks, seat 0 bets 100 and seat 2 folds. Seat 0 began
+    // the hand below 100 bb and ends it on 2,110; seat 2 began above and
+    // ends on 1,910. The hand's final stacks decide, not the first ones.
+    await move(matchId, clients, () => ({ type: 'check' }))
+    await move(matchId, clients, () => ({ type: 'raise', to: 100 }))
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    expect(
+      (await peek(matchId)).hand!.players.map((p) => [p.seat, p.stack]),
+    ).toEqual([
+      [0, 2110],
+      [2, 1910],
+      [4, 1980],
+    ])
+    expect(await rebuy(clients[0])).toMatchObject({ code: 'not_below' })
+    const granted = await rebuy(clients[2])
+    expect(granted).toMatchObject({ t: 'welcome', seat: 2 })
+    expect(rosterStack(granted, 2)).toBe(2000)
+    expect(rosterStack(granted, 0)).toBe(2110)
+    expect(rosterStack(await rebuy(clients[4]), 4)).toBe(2000)
+    // Topped up by 90 and 20; nobody else's chips moved.
+    expect((await seated(matchId)).map((p) => [p.seat, p.stack])).toEqual([
+      [0, 2110],
+      [2, 2000],
+      [4, 2000],
+    ])
+    checkFrames(
+      Object.values(clients).flatMap((c) => c.frames),
+      'six-casual',
+    )
+  })
+
+  it("a rebuy between hands tops up from the hand's final stack, once", async () => {
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2], 'rb')
+    await clients[0].next(isState(1))
+    // Hand 1: seat 0 folds its small blind (1,990 to 2,010). Hand 2: seat
+    // 0 posts the big blind and folds to a raise, so it ends on 1,970 and
+    // tops up 30. The table settles hand 2's stacks at the next deal: a
+    // top-up that deal overwrote would leave it on 1,970.
+    await nextHand(matchId, clients, () => ({ type: 'fold' }))
+    expect((await peek(matchId)).hand!.config).toMatchObject({
+      seats: [
+        { seat: 0, stack: 1990 },
+        { seat: 2, stack: 2010 },
+      ],
+      button: 2,
+      bb: 0,
+    })
+    await move(matchId, clients, () => ({ type: 'raise', to: 100 }))
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    const ended = (await peek(matchId)).hand!
+    expect(ended.players.map((p) => [p.seat, p.stack])).toEqual([
+      [0, 1970],
+      [2, 2030],
+    ])
+    await clients[2].next((f) => f.t === 'reveal' && f.handNo === 2)
+
+    // Two rebuys sent together: the first tops up, the second finds the
+    // stack at 100 bb already.
+    const from = clients[0].frames.length
+    const seen = clients[2].frames.length
+    clients[0].send({ t: 'rebuy' })
+    clients[0].send({ t: 'rebuy' })
+    await clients[0].next((f) => f.t === 'error', from)
+    const answers = clients[0].frames
+      .slice(from)
+      .filter((f) => f.t === 'welcome' || f.t === 'error')
+    expect(answers.map((f) => (f.t === 'error' ? f.code : f.t))).toEqual([
+      'welcome',
+      'not_below',
+    ])
+    expect(rosterStack(answers[0], 0)).toBe(2000)
+    // Everyone sees the new stack.
+    const told = await clients[2].next(
+      (f) => f.t === 'state' && rosterStack(f, 0) === 2000,
+      seen,
+    )
+    expect(rosterStack(told, 2)).toBe(2030)
+    expect((await seated(matchId)).map((p) => [p.seat, p.stack])).toEqual([
+      [0, 2000],
+      [2, 2030],
+    ])
+
+    // The next deal settles hand 2's stacks and keeps the top-up: hand 3
+    // plays 2,000 against 2,030, 30 chips more than were at the table.
+    await elapse(matchId, NEXT_HAND_MS)
+    await clients[0].next(isState(3))
+    const three = (await peek(matchId)).hand!
+    expect(three.config.seats).toEqual([
+      { seat: 0, stack: 2000 },
+      { seat: 2, stack: 2030 },
+    ])
+    expect(three.players.reduce((sum, p) => sum + p.stack + p.bet, 0)).toBe(
+      4000 + 30,
+    )
+    // Still at 100 bb once dealt in: no second top-up while it plays.
+    expect(await rebuy(clients[0])).toMatchObject({ code: 'in_hand' })
+    checkFrames([...clients[0].frames, ...clients[2].frames], 'six-casual')
+  })
+
+  it('a rebuy at 0 chips deals the player in at the next hand', async () => {
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2, 4], 'rz')
+    await clients[0].next(isState(1))
+    // Hand 1 (seats 0 and 2; seat 4 sat during it): seat 2 loses every
+    // chip. Hand 2 deals only the two with chips.
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    await clients[2].next((f) => f.t === 'reveal' && f.handNo === 1)
+    await bust(matchId, 2, 0)
+    await elapse(matchId, NEXT_HAND_MS)
+    await clients[2].next(isState(2))
+    const two = (await peek(matchId)).hand!
+    expect(two.config.seats).toEqual([
+      { seat: 0, stack: 4000 },
+      { seat: 4, stack: 2000 },
+    ])
+    expect(rosterStack(last(clients[2].frames, 'state'), 2)).toBe(0)
+
+    // Seat 2 is not in hand 2, so it may rebuy while it is played.
+    const granted = await rebuy(clients[2])
+    expect(granted).toMatchObject({ t: 'welcome', seat: 2 })
+    expect(rosterStack(granted, 2)).toBe(2000)
+    // Still nobody's seat in hand 2: no cards, no moves.
+    for (const view of viewsOf(clients[2].frames, 2)) {
+      expect(view.you).toBeNull()
+      expect(view.legal).toBeNull()
+      for (const p of view.players) expect(p.cards).toBeNull()
+    }
+    expect((await peek(matchId)).hand!.config.handNo).toBe(2)
+
+    // Hand 3 deals it in with its 100 bb.
+    await nextHand(matchId, { 0: clients[0], 4: clients[4] }, () => ({
+      type: 'fold',
+    }))
+    const three = (await peek(matchId)).hand!
+    expect(three.config.seats.map((s) => [s.seat, s.stack])).toContainEqual([
+      2, 2000,
+    ])
+    expect(three.config.seats.map((s) => s.seat)).toEqual([0, 2, 4])
+    await clients[2].next((f) => f.t === 'hand_start' && f.handNo === 3)
+    const mine = viewsOf(clients[2].frames, 3).at(-1)!
+    expect(mine.you).toBe(2)
+    expect(bySeat(mine.players, 2).cards).toEqual(holesOf(three).cards[2])
+    checkFrames(
+      Object.values(clients).flatMap((c) => c.frames),
+      'six-casual',
+    )
+  })
+
+  it('a rebuy that funds a second player at a waiting table deals at once', async () => {
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2], 'rw')
+    await clients[0].next(isState(1))
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    await clients[2].next((f) => f.t === 'reveal' && f.handNo === 1)
+    await bust(matchId, 2, 0)
+    // One funded player: the table waits.
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).match.status).toBe('waiting')
+
+    const granted = await rebuy(clients[2])
+    expect(rosterStack(granted, 2)).toBe(2000)
+    await clients[2].next(isState(2))
+    const { hand, match } = await peek(matchId)
+    expect(match.status).toBe('playing')
+    expect(hand!.config.seats).toEqual([
+      { seat: 0, stack: 4000 },
+      { seat: 2, stack: 2000 },
+    ])
+    checkFrames([...clients[0].frames, ...clients[2].frames], 'six-casual')
+  })
+
+  it('a heads-up table refuses a rebuy', async () => {
+    const matchId = await createTable('hu-a')
+    const a = await connect(matchId, 'hu-a')
+    const b = await connect(matchId, 'hu-b')
+    await a.next(isState(1))
+    const from = a.frames.length
+    a.send({ t: 'rebuy' })
+    expect(await a.next((f) => f.t === 'error', from)).toMatchObject({
+      code: 'illegal',
+    })
+    expect((await peek(matchId)).hand!.config.seats).toEqual([
+      { seat: 0, stack: 2000 },
+      { seat: 1, stack: 2000 },
+    ])
+    // Heads-up frames keep their keys and codes (checkFrame's default).
+    checkFrames([...a.frames, ...b.frames])
+  })
+
+  it('rebuy frames carry only allowed keys', async () => {
+    const matchId = await sixTable()
+    const watcher = await connect(matchId, 'rf-w')
+    await watcher.next((f) => f.t === 'welcome')
+    const clients = await seatAll(matchId, [0, 2], 'rf')
+    await clients[0].next(isState(1))
+    const one = (await peek(matchId)).hand!
+    // Refused, typed: no seat; dealt into the hand; at 100 bb.
+    expect(await rebuy(watcher)).toMatchObject({ code: 'not_seated' })
+    expect(await rebuy(clients[0])).toMatchObject({ code: 'in_hand' })
+    clients[4] = await sitDown(matchId, 'rf-4', 4)
+    expect(await rebuy(clients[4])).toMatchObject({ code: 'not_below' })
+    // Hand 1 ends with seat 0's fold; between hands it tops up to 2,000,
+    // and the watcher sees the new stack.
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 1)
+    const seen = watcher.frames.length
+    expect(rosterStack(await rebuy(clients[0]), 0)).toBe(2000)
+    await watcher.next(
+      (f) => f.t === 'state' && rosterStack(f, 0) === 2000,
+      seen,
+    )
+    await elapse(matchId, NEXT_HAND_MS)
+    await clients[4].next(isState(2))
+    const two = (await peek(matchId)).hand!
+
+    const all = [watcher, ...Object.values(clients)].flatMap((c) => c.frames)
+    expect(checkFrames(all, 'six-casual')).toEqual(new Set(FLOW_TYPES.rebuy))
+    expect(analysisKeys(all)).toEqual([])
+    // The socket without a seat heard of the rebuy, never of a hand.
+    for (const f of watcher.frames) {
+      expect(['welcome', 'state', 'error']).toContain(f.t)
+      if (f.t === 'welcome' || f.t === 'state') expect(f.view).toBeNull()
+    }
+    const heard = JSON.stringify(watcher.frames)
+    for (const hand of [one, two])
+      for (const cards of Object.values(holesOf(hand).cards))
+        expect(heard).not.toContain(JSON.stringify(cards))
+  })
+})
+
 describe('six clients over many hands', () => {
   it('six clients sit and play, chips conserved across 200 hands', async () => {
     const matchId = await sixTable()

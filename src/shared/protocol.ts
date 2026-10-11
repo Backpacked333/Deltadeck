@@ -118,6 +118,13 @@ export type ErrorCode =
   | 'sit_cooldown'
   /** Six tables: a seat-only message from a socket without a seat. */
   | 'not_seated'
+  /**
+   * Six tables: a rebuy from a player dealt into the hand being played;
+   * it may be sent again once that hand is over.
+   */
+  | 'in_hand'
+  /** Six tables: a rebuy from a player not below 100 bb (the buy-in). */
+  | 'not_below'
 
 /**
  * Everything one seat may know about the table. There is deliberately no

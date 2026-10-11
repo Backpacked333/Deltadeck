@@ -14,7 +14,7 @@ import { act, assertInvariants, isOver, startHand } from '../../src/engine/hand'
 import { luckAdjusted } from '../../src/engine/luck'
 import type { Blinds } from '../../src/engine/positions'
 import { seatView } from '../../src/engine/redact'
-import { buyIn } from '../../src/engine/stacks'
+import { buyIn, rebuyTo } from '../../src/engine/stacks'
 import type { RevealedSlot } from '../../src/engine/deck'
 import { EngineError } from '../../src/engine/types'
 import type { HandState, SeatId } from '../../src/engine/types'
@@ -570,6 +570,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     if (msg.t === 'rematch') return this.pressRematch(ws, userId)
     if (msg.t === 'sit') return this.sit(ws, msg.seat)
     if (msg.t === 'stand') return this.stand(ws)
+    if (msg.t === 'rebuy') return this.rebuy(ws)
     if (msg.t !== 'act') return this.illegal(ws, userId, 'Not a table message')
     // Nobody without a seat acts, and the reply carries no hand.
     if (!this.atTable(userId))
@@ -775,6 +776,51 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const hand = this.hand
     if (!isOver(hand) && hand.toAct === seat)
       await this.applyAction(seat, act(hand, seat, { type: 'fold' }), 'client')
+  }
+
+  /**
+   * A six-table player tops up to 100 bb (ADR amendment 2026-10-10, "Stacks
+   * and rebuy"). Allowed while the account is not dealt into the hand being
+   * played (one who sat after the deal is not in it) and its stack is below
+   * 100 bb; the chips play from the next hand. The amount is the server's,
+   * from the stack: the frame carries none. Credited before any await, so a
+   * second rebuy finds the stack at 100 bb. The answer is a welcome, and
+   * everyone else sees the new stack.
+   */
+  private async rebuy(ws: WebSocket) {
+    const match = this.match!
+    const { userId } = ws.deserializeAttachment() as Attachment
+    if (!this.seatable())
+      return this.illegal(ws, userId, 'There is no stack to top up here')
+    const player = match.players.find((p) => p.userId === userId)
+    if (!player) return this.reject(ws, 'not_seated', 'You have no seat here')
+    const hand = this.hand
+    const inHand = !!hand && !isOver(hand) && this.handSeat(userId) !== null
+    // Between hands, the stack the last hand left, not the one it began with.
+    const stack = this.stackOf(player)
+    const topUp = rebuyTo(stack, match.config.blinds.bb, inHand)
+    if (topUp.refused)
+      return this.reject(
+        ws,
+        topUp.refused,
+        topUp.refused === 'in_hand'
+          ? 'You can rebuy once this hand is over'
+          : 'You already have 100 big blinds',
+      )
+    // The finished hand's stacks are settled now rather than at the next
+    // deal, which would otherwise set this player's stack back to the
+    // hand's final one; the deal finds them settled and leaves them.
+    this.settleStacks()
+    player.stack = stack + topUp.amount
+    this.seq++
+    await this.ctx.storage.put({ match, seq: this.seq })
+    this.send(ws, this.frame('welcome', userId))
+    this.broadcast('state', { skip: ws, roster: true })
+    // A table waiting for funded players deals once two are here.
+    if (match.status === 'waiting' && this.funded().length >= 2) {
+      match.status = 'playing'
+      await this.startNextHand()
+    }
   }
 
   /**
@@ -1155,14 +1201,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     // A six table deals only to people who are there: with fewer than two
     // funded, connected players it waits, and a reconnect or a sit deals
     // again (the 60 s grace and sitting out come with PR-16/17).
-    if (
-      six &&
-      match.players.filter(
-        (p) =>
-          p.stack! > 0 && p.status === 'playing' && this.connected(p.userId),
-      ).length < 2
-    )
-      return this.waitForPlayers()
+    if (six && this.funded().length < 2) return this.waitForPlayers()
     const handNo = six && match.sessionOver ? 1 : match.handNo + 1
     const plan = six
       ? this.sixController.nextHandPlan(handNo, match.config, this.roster())
@@ -1510,6 +1549,34 @@ export class TableDO extends DurableObject<WorkerEnv> {
       if (player) player.stack = p.stack
     }
     match.settled = latest
+  }
+
+  /**
+   * Six-casual: the chips `player` has outside the hand being played.
+   * Between hands, a player dealt into the hand just finished has its final
+   * stack (the next deal settles it into `stack`); otherwise `stack` holds
+   * it: as of the last deal, the buy-in, or after a rebuy.
+   */
+  private stackOf(player: Player) {
+    const match = this.match!
+    const hand = this.hand
+    if (
+      hand &&
+      isOver(hand) &&
+      (match.settled ?? 0) < (match.tableHands ?? 0)
+    ) {
+      const seat = this.handSeat(player.userId)
+      const final = hand.players.find((p) => p.seat === seat)
+      if (seat !== null && final) return final.stack
+    }
+    return player.stack!
+  }
+
+  /** Six-casual: the players a hand could deal in now. */
+  private funded() {
+    return this.match!.players.filter(
+      (p) => p.stack! > 0 && p.status === 'playing' && this.connected(p.userId),
+    )
   }
 
   /** A finished hand's net: per seat heads-up, per account at a six table. */
