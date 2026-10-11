@@ -985,6 +985,35 @@ describe('a socket that closes while its sit waits on the lobby', () => {
     expect(lobby.released).toEqual([])
     expect(await lobbyHolds('rt-0')).toBe(matchId)
   })
+
+  it('a sit whose seat went meanwhile leaves the claim to another sit still waiting', async () => {
+    // One page asks for seat 0, then seat 3, before the table answers.
+    // Someone else takes seat 0 meanwhile. The first sit takes no seat,
+    // but must not release the claim the second is about to sit under.
+    const matchId = await sixTable()
+    const lobby = await holdLobby(matchId)
+    const page = await connect(matchId, 'rw-0')
+    await page.next((f) => f.t === 'welcome')
+    const from = page.frames.length
+    page.send({ t: 'sit', seat: 0 })
+    await lobby.asked(1)
+    page.send({ t: 'sit', seat: 3 })
+    await lobby.asked(2)
+    const other = await connect(matchId, 'rw-x')
+    await other.next((f) => f.t === 'welcome')
+    other.send({ t: 'sit', seat: 0 })
+    await lobby.asked(3)
+    lobby.letGo(2)
+    await other.next((f) => f.t === 'welcome' && f.seat === 0)
+    lobby.letGo(0)
+    expect(
+      await page.next((f) => f.t === 'error' && f.code === 'seat_taken', from),
+    ).toBeTruthy()
+    lobby.letGo(1)
+    await page.next((f) => f.t === 'welcome' && f.seat === 3, from)
+    expect(lobby.released).toEqual([])
+    expect(await lobbyHolds('rw-0')).toBe(matchId)
+  })
 })
 
 describe('a grace and the seat it was for', () => {

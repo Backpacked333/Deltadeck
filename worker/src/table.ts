@@ -719,7 +719,10 @@ export class TableDO extends DurableObject<WorkerEnv> {
     if (ws.readyState !== OPEN)
       return this.claiming.has(userId) ? undefined : this.releaseSeats([userId])
     const seat = this.seatFor(ws, userId, wanted)
-    if (seat === null) return this.releaseSeats([userId])
+    // The seat went meanwhile; the claim goes back too, unless another sit
+    // of this account is still claiming (one page may ask for two seats).
+    if (seat === null)
+      return this.claiming.has(userId) ? undefined : this.releaseSeats([userId])
     const player: Player = {
       ...this.newPlayer(seat, { userId, username }),
       // The buy-in is the server's: the frame carries no amount.
