@@ -752,6 +752,19 @@
   }
 }
 
+/* On a phone the page scrolls the ring under the sticky header, whose blur
+   (styles.css) is redrawn on every frame that something moves beneath it,
+   chips in flight included (P2-06b). At a six table it is a solid bar
+   there instead; at 88% opacity the blur barely showed. The trainer's
+   header keeps it: this sheet loads with the online chunk only, and the
+   rule needs a six table on the page. */
+@media (max-width: 680px) {
+  body:has(.six-table) .header {
+    background: var(--surface);
+    backdrop-filter: none;
+  }
+}
+
 /* ---------- Casual 6-max at the live table (P2-05b) ----------
    The middle of the felt holds the pot, the board and the viewer's own
    cards; .six-mid sizes them to fit its width (P2-05a). */

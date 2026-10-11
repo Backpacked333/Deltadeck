@@ -278,3 +278,23 @@ test('the space under a six-seat ring keeps its height from turn to turn', async
     table.release()
   }
 })
+
+test('the header is solid over a six-seat table on a phone, and keeps its blur on the trainer', async ({
+  page,
+}) => {
+  await devSignIn(page, 'you_at_the_bottom')
+  await fakeSixTable(page)
+  const blur = () =>
+    page
+      .locator('.header')
+      .evaluate((el) => getComputedStyle(el).backdropFilter)
+  // The trainer's table is drawn as before.
+  await page.goto('/')
+  await expect(page.getByRole('region', { name: 'Poker table' })).toBeVisible()
+  await expect.poll(blur).toBe('blur(14px)')
+  // The six table scrolls under the header on a phone, where a blur would
+  // be redrawn on every frame the chips fly beneath it (P2-06b).
+  await page.goto(`/#play/${SIX_TABLE}`)
+  await expect(page.getByText('6-max · Hand 1')).toBeVisible()
+  await expect.poll(blur).toBe('none')
+})
