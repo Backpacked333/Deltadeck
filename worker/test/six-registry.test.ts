@@ -142,6 +142,25 @@ async function until(what: string, done: () => boolean | Promise<boolean>) {
   expect(await done(), what).toBe(true)
 }
 
+/**
+ * `work`, which must not wait on the lobby: it fails, named `what`, if it
+ * has not finished within 2 s (each step takes milliseconds).
+ */
+async function promptly<T>(what: string, work: Promise<T>) {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${what} waited on the lobby`)),
+      2000,
+    )
+  })
+  try {
+    return await Promise.race([work, late])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /** The table's clock now. */
 const clockOf = (matchId: string) =>
   runInDurableObject(stub(matchId), (instance: TableDO) =>
@@ -692,9 +711,72 @@ describe('when the lobby fails', () => {
     await playOut(matchId, seats, passive)
     await dealNext(matchId, a, 3)
   })
+
+  it('a lobby that does not answer holds up no alarm, deal or hand', async () => {
+    const matchId = await sixTable()
+    const lobby = await slowLobby(matchId)
+    const a = await sitDown(matchId, 'mute-a', 0)
+    const b = await sitDown(matchId, 'mute-b', 2)
+    const seats = { 0: a, 2: b }
+    await a.next(isState(1))
+    // The lobby does not answer the sit's report, and every later report
+    // waits behind it. 30 s on, hand 1 ends with a report due.
+    await setClock(matchId, (await clockOf(matchId)) + REPORT_MS)
+    await promptly('hand 1', playOut(matchId, seats, fold))
+    await promptly('the alarm that deals hand 2', elapse(matchId, NEXT_HAND_MS))
+    await a.next(isState(2))
+    // Hand 2 ends inside the window, held; 30 s on, the alarm that deals
+    // hand 3 sends it, and completes all the same.
+    await promptly('hand 2', playOut(matchId, seats, fold))
+    await setClock(matchId, (await clockOf(matchId)) + REPORT_MS)
+    await promptly('the alarm that deals hand 3', elapse(matchId, NEXT_HAND_MS))
+    await a.next(isState(3))
+    expect((await peek(matchId)).match.status).toBe('playing')
+    expect(lobby.seen.reports).toBe(1)
+    // The lobby answers: what was sent lands, in order.
+    lobby.letGo()
+    await settled(matchId)
+    expect(await entryOf(matchId)).toMatchObject(counts(2, 20, 2))
+  })
 })
 
 describe('restarts and sessions', () => {
+  it('a restart right after a report sent at once keeps the hand it reported, and the throttle', async () => {
+    const sent = watchReports()
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, 'now-a', 0)
+    const b = await sitDown(matchId, 'now-b', 2)
+    await a.next(isState(1))
+    // 30 s on, hand 1 ends (20) with a report due: it goes at once.
+    await setClock(matchId, (await clockOf(matchId)) + REPORT_MS)
+    expect(potOf(await playOut(matchId, { 0: a, 2: b }, fold))).toBe(20)
+    await settled(matchId)
+    expect(sent(matchId)).toEqual([counts(1, null, 0), counts(2, 20, 2)])
+    // The object restarts; both players are back 10 s later, and hand 2
+    // is dealt and checked down (40).
+    const t = await clockOf(matchId)
+    await abortAllDurableObjects()
+    await freezeClock(matchId, t + 10_000)
+    const a2 = await connect(matchId, 'now-a')
+    const b2 = await connect(matchId, 'now-b')
+    await a2.next((f) => f.t === 'welcome')
+    await b2.next((f) => f.t === 'welcome')
+    await elapse(matchId, 0)
+    await a2.next(isState(2))
+    expect(potOf(await playOut(matchId, { 0: a2, 2: b2 }, passive))).toBe(40)
+    // 10 s after hand 1's report, hand 2's end is held...
+    await settled(matchId)
+    expect(sent(matchId)).toHaveLength(2)
+    // ...until the window opens; that report averages both hands.
+    await elapse(matchId, REPORT_MS)
+    await settled(matchId)
+    expect(sent(matchId)).toEqual([
+      counts(1, null, 0),
+      counts(2, 20, 2),
+      counts(2, 30, 2),
+    ])
+  })
+
   it('a restart keeps the 30 s throttle and the hour of figures', async () => {
     const sent = watchReports()
     const matchId = await sixTable()
