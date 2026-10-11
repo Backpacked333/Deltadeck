@@ -142,8 +142,11 @@ test('a 3-way all-in runout with two side pots has no long frames', async ({
   await expect(
     page.getByText('maximilian_okafor wins', { exact: true }),
   ).toBeVisible()
-  // Its pot leaves 0.6 s after the result and lands 0.6 s later.
-  await page.waitForTimeout(1500)
+  // Sample until its pot has left (0.6 s after the result) and landed
+  // (0.6 s later), when the page takes the chip off.
+  const chips = page.locator('.six-ring .six-flight')
+  await expect(chips.and(page.locator('[data-from="pot"]'))).toHaveCount(1)
+  await expect(chips).toHaveCount(0)
   await expectNoLongFrames(page)
 
   // Each flight the page launched, in order, at its four launches.
@@ -207,6 +210,10 @@ test("Sit here takes a click through the chip flights' layer", async ({
   await page.getByRole('button', { name: 'Stand up' }).click()
   await expect(page.getByText('Pick an empty seat to play.')).toBeVisible()
   await expect(page.locator('.six-ring .six-flights')).toHaveCount(1)
-  await page.getByRole('button', { name: /^Sit here/ }).click()
+  // A layer that took the click would make it retry until the test times
+  // out; fail fast and say so instead.
+  await page
+    .getByRole('button', { name: /^Sit here/ })
+    .click({ timeout: 5_000 })
   await expect.poll(() => table.received.at(-1)).toEqual({ t: 'sit', seat: 0 })
 })
