@@ -597,6 +597,33 @@ describe('quick-sit and the history (review)', () => {
   })
 })
 
+describe('a Back pressed as a table refuses (review)', () => {
+  it('two Backs at once leave no quick-sit for a later lobby visit', async () => {
+    // A browser that applies the player's Back and the refusal's together
+    // lands two entries back, past the lobby page (jsdom lands both on
+    // one entry, so the refusal's is made to go two). What the quick-sit
+    // carried is dropped there.
+    window.location.hash = '#ladder'
+    await settle()
+    await inLobby()
+    await userEvent.click(quickSit())
+    const first = await sentTo(T1)
+    const back = vi
+      .spyOn(window.history, 'back')
+      .mockImplementation(() => window.history.go(-2))
+    act(() => first.emit(refusal(T1, 'table_full', 'Every seat is taken')))
+    await settle()
+    back.mockRestore()
+    expect(window.location.hash).toBe('#ladder')
+    act(() => {
+      window.location.hash = '#lobby'
+    })
+    await settle()
+    act(() => lobby().open())
+    expect(sent(lobby())).toEqual([{ t: 'tables' }])
+  })
+})
+
 describe('the hand-off says one thing (review)', () => {
   it.each([
     {
