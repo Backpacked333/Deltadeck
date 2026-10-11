@@ -382,9 +382,18 @@ describe('sitting out at a six table', () => {
     })
     roster = (await seated(matchId)).find((p) => p.seat === 4)!
     expect(roster).toMatchObject({ status: 'playing', timeouts: 0 })
-    // A sit_in from a player who is playing changes nothing.
-    const already = await sitIn(clients[0])
-    expect(rosterOf(already, 0)).toMatchObject({ status: 'playing' })
+    // A sit_in from a player who is playing changes nothing, not even
+    // their missed decisions: the player to act in hand 4 runs out of
+    // time (and folds), then sends one.
+    const actor = (await peek(matchId)).hand!.toAct as SeatId
+    await timeOut(matchId)
+    const already = await sitIn(clients[actor])
+    expect(rosterOf(already, actor)).toMatchObject({
+      status: 'playing',
+      consecutiveTimeouts: 1,
+    })
+    roster = (await seated(matchId)).find((p) => p.seat === actor)!
+    expect(roster).toMatchObject({ status: 'playing', timeouts: 1 })
 
     // Hand 5 deals it in.
     hand = await nextHand(matchId, { 0: clients[0], 2: clients[2] })
@@ -555,6 +564,11 @@ describe('standing up a player who sits out', () => {
     // in, so the table waits, and no orbit can pass to stand it up.
     const t = await clockOf(matchId)
     await sitOut(clients[2])
+    // The sit_out arms its own alarm, for five minutes from now.
+    expect(await storedDeadlines(matchId)).toContainEqual({
+      kind: 'sitout',
+      at: t + FIVE_MINUTES,
+    })
     await elapse(matchId, NEXT_HAND_MS)
     expect((await peek(matchId)).match.status).toBe('waiting')
     await elapse(matchId, FIVE_MINUTES - NEXT_HAND_MS - 1)
@@ -575,6 +589,12 @@ describe('standing up a player who sits out', () => {
     )
     await eventually(async () => !('fm-2' in (await claims())))
     expect(await claims()).toEqual({ 'fm-0': matchId })
+    // Stood up by the alarm, not standing: no cooldown, so it may sit
+    // again at once.
+    expect(await trySit(clients[2], 2)).toMatchObject({
+      t: 'welcome',
+      seat: 2,
+    })
     checkFrames(
       [watcher, ...Object.values(clients)].flatMap((c) => c.frames),
       'six-casual',
@@ -831,11 +851,21 @@ describe('a busted player at a six table', () => {
     expect((await peek(matchId)).hand!.config.seats.map((s) => s.seat)).toEqual(
       [0, 2],
     )
-    // A rebuy at 0 chips while hand 3 is played: 100 bb, and playing.
+    // A rebuy at 0 chips while hand 3 is played: 100 bb, and playing
+    // with no missed decisions, whatever it had missed before.
+    await runInDurableObject(stub(matchId), (instance: TableDO) => {
+      const { match } = instance as unknown as { match: { players: Stored[] } }
+      match.players.find((p) => p.seat === 4)!.timeouts = 1
+    })
     const topped = await answer(clients[4], { t: 'rebuy' })
     expect(rosterOf(topped, 4)).toMatchObject({
       stack: 2000,
       status: 'playing',
+      consecutiveTimeouts: 0,
+    })
+    expect((await seated(matchId)).find((p) => p.seat === 4)).toMatchObject({
+      status: 'playing',
+      timeouts: 0,
     })
     // Hand 4 deals it in, with no sit_in sent.
     const four = await nextHand(matchId, { 0: clients[0], 2: clients[2] })
