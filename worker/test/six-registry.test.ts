@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 // The lobby's list of six tables (P2-08a; ADR amendment 2026-10-10, "Table
 // list and quick-sit", and its clarifications from PR-23). A six table
 // tells the lobby its seats, average pot and players per hour, counts only,
@@ -54,6 +55,13 @@ import {
 import type { Client } from './helpers'
 
 afterEach(() => vi.restoreAllMocks())
+
+/** The Worker's own sources, for the exposure gate's routes. */
+const workerSources = import.meta.glob<string>('../src/*.ts', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
+})
 
 /** Every report the lobby receives from now on, by table. */
 function watchReports() {
@@ -992,32 +1000,68 @@ describe('restarts and sessions', () => {
 })
 
 describe('the exposure gate', () => {
-  it('no client path lists or creates six tables yet', async () => {
+  // PR-24 opens it, through the lobby socket only: quick-sit, and the list
+  // (ADR, clarifications from PR-24). Everything else stays shut.
+  it('quick-sit and the tables frame are the only client paths to six tables', async () => {
     // A six table is on the list...
     const matchId = await sixTable()
     await sitDown(matchId, 'gate-a', 0)
     await eventually(async () => (await entryOf(matchId)) !== undefined)
-    // ...but no route lists it (PR-24 adds GET /api/tables or a frame)...
+    const client = await lobby('gate-b')
+    await client.next((f) => f.t === 'presence')
+    // ...which no lobby frame names until the list is asked for...
+    expect(JSON.stringify(client.frames)).not.toContain(matchId)
+    // ...and then as its id and four counts, to that socket alone.
+    client.send({ t: 'tables' })
+    expect(await client.next((f) => f.t === 'tables')).toEqual({
+      t: 'tables',
+      seq: expect.any(Number),
+      tables: [
+        {
+          tableId: matchId,
+          seated: 1,
+          maxSeats: 6,
+          avgPot: null,
+          playersPerHour: 0,
+        },
+      ],
+    })
+    // Quick-sit sends a player to it, and opens a six table only when no
+    // listed table has a seat for them: an empty six-casual table.
+    let from = client.frames.length
+    client.send({ t: 'quick_sit' })
+    expect(await client.next((f) => f.t === 'sit_at', from)).toMatchObject({
+      tableId: matchId,
+    })
+    from = client.frames.length
+    client.send({ t: 'quick_sit', tried: [matchId] })
+    const opened = await client.next((f) => f.t === 'sit_at', from)
+    if (opened.t !== 'sit_at') throw new Error('no table opened')
+    expect(opened.tableId).not.toBe(matchId)
+    const { match } = await peek(opened.tableId)
+    expect(match).toMatchObject({
+      config: { kind: 'six-casual' },
+      players: [],
+      status: 'waiting',
+    })
+    for (const f of client.frames) checkLobbyFrame(f)
+  })
+
+  it('every other path to a six table stays shut', async () => {
+    // No route lists six tables: the list is a lobby frame.
     const route = await SELF.fetch(`${ORIGIN}/api/tables`, {
       headers: { Authorization: `Bearer ${token('gate-b')}` },
     })
     expect(route.status).toBe(404)
-    // ...no lobby message asks for the list or queues for a six table...
+    // The heads-up queue still refuses six-casual.
     const client = await lobby('gate-b')
     await client.next((f) => f.t === 'presence')
-    client.ws.send(JSON.stringify({ t: 'tables' }))
+    client.ws.send(JSON.stringify({ t: 'queue', kind: 'six-casual' }))
     expect(await client.next((f) => f.t === 'error')).toMatchObject({
       code: 'illegal',
     })
-    const from = client.frames.length
-    client.ws.send(JSON.stringify({ t: 'queue', kind: 'six-casual' }))
-    expect(await client.next((f) => f.t === 'error', from)).toMatchObject({
-      code: 'illegal',
-    })
-    // ...no lobby frame carries a table or its figures...
-    expect(JSON.stringify(client.frames)).not.toContain(matchId)
     for (const f of client.frames) checkLobbyFrame(f)
-    // ...and the invite route still makes heads-up tables only.
+    // The invite route still makes heads-up tables only...
     const made = await createMatch('gate-c')
     expect(made.status).toBe(201)
     const { matchId: invite } = (await made.json()) as { matchId: string }
@@ -1025,6 +1069,35 @@ describe('the exposure gate', () => {
     expect((match as unknown as { config: { kind: string } }).config.kind).toBe(
       'hu-casual',
     )
+    // ...and no route of the Worker names a six table: only the lobby and
+    // the invite route call a table's /init, and the routes never with
+    // that kind. The lobby's pairing and rematch take heads-up kinds only
+    // (HeadsUpKind), so its one six-casual /init is quick-sit's.
+    const callers = Object.entries(workerSources)
+      .filter(([, src]) => src.includes('https://table/init'))
+      .map(([path]) => path)
+    expect(callers.sort()).toEqual(['../src/index.ts', '../src/lobby.ts'])
+    expect(workerSources['../src/index.ts']).not.toContain('six-casual')
+    // The table's own init still refuses a six table with an opponent or
+    // a start deadline, the shape a pairing would give it.
+    for (const extra of [
+      { opponent: { userId: 'gate-d', username: 'gate-d' } },
+      { startWithinMs: 30_000 },
+    ]) {
+      const matchId = crypto.randomUUID()
+      const body: InitBody = {
+        matchId,
+        creator: { userId: 'gate-c', username: 'gate-c' },
+        kind: 'six-casual',
+        ...extra,
+      }
+      const refused = await stub(matchId).fetch('https://table/init', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })
+      expect(refused.status).toBe(400)
+      expect(await storageOf(matchId)).toEqual({ keys: [], alarm: null })
+    }
   })
 })
 

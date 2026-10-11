@@ -11,6 +11,7 @@ import type {
   LobbyMsg,
   MatchKind,
   ServerMsg,
+  TableRow,
 } from '../../src/shared/protocol'
 
 type Msg<T extends ServerMsg['t']> = Extract<ServerMsg, { t: T }>
@@ -76,6 +77,8 @@ export const ERROR_CODES = allOf<ErrorCode>()([
   'not_below',
   // A sit_in refused: no chips to be dealt in with (rebuy first).
   'no_chips',
+  // The lobby, to a quick-sit: no table for this account, and none opens.
+  'tables_full',
 ])
 /**
  * Codes only a six table sends, answering sit, stand, rebuy and sit_in,
@@ -91,6 +94,8 @@ const SIX_ERROR_CODES: ErrorCode[] = [
   'not_below',
   'no_chips',
 ]
+/** Codes only the lobby sends: checkFrame refuses them from any table. */
+const LOBBY_ERROR_CODES: ErrorCode[] = ['tables_full']
 
 // Exactly the keys each frame type may carry (optional ones marked '?').
 export const FRAME_KEYS: Record<ServerMsg['t'], string[]> = {
@@ -170,7 +175,7 @@ export const FRAME_KEYS: Record<ServerMsg['t'], string[]> = {
 }
 // The lobby socket's frames: presence goes to everyone online and the rest
 // to one socket. They carry counts, a table id and the player's own match,
-// never another account.
+// never another account. `tables` lists six tables (TABLE_ROW_KEYS each).
 export const LOBBY_FRAME_KEYS: Record<LobbyMsg['t'], string[]> = {
   queued: keysOf<Lobby<'queued'>>()(['t', 'seq', 'position', 'since']),
   matched: keysOf<Lobby<'matched'>>()(['t', 'seq', 'matchId', 'resumed?']),
@@ -182,7 +187,22 @@ export const LOBBY_FRAME_KEYS: Record<LobbyMsg['t'], string[]> = {
     'rated?',
   ]),
   error: keysOf<Lobby<'error'>>()(['t', 'seq', 'code', 'message']),
+  sit_at: keysOf<Lobby<'sit_at'>>()(['t', 'seq', 'tableId']),
+  tables: keysOf<Lobby<'tables'>>()(['t', 'seq', 'tables']),
 }
+// A listed six table: its id and four counts (ADR, clarifications from
+// PR-23 and PR-24). No account, and not the lobby's updatedAt.
+export const TABLE_ROW_KEYS = keysOf<TableRow>()([
+  'tableId',
+  'seated',
+  'maxSeats',
+  'avgPot',
+  'playersPerHour',
+])
+/** Table ids are the lobby's crypto.randomUUID(): never a name. */
+const TABLE_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const isCount = (n: unknown) => Number.isSafeInteger(n) && (n as number) >= 0
 type Change = Msg<'rating'>['change'][keyof Msg<'rating'>['change']]
 export const RATING_CHANGE_KEYS = keysOf<Change>()([
   'before',
@@ -379,6 +399,10 @@ export function checkFrame(f: ServerMsg, kind: MatchKind = 'hu-casual') {
       expectKeys(s, HAND_START_SEAT_KEYS, 'hand_start.seats')
   if (f.t === 'error') {
     expect(ERROR_CODES, 'error.code').toContain(f.code)
+    expect(
+      LOBBY_ERROR_CODES,
+      `error.code ${f.code} from a table`,
+    ).not.toContain(f.code)
     if (!six)
       expect(SIX_ERROR_CODES, `error.code ${f.code} heads-up`).not.toContain(
         f.code,
@@ -409,6 +433,20 @@ export function checkFrame(f: ServerMsg, kind: MatchKind = 'hu-casual') {
 export function checkLobbyFrame(f: LobbyMsg) {
   expectKeys(f, LOBBY_FRAME_KEYS[f.t], `lobby ${f.t}`)
   if (f.t === 'error') expect(ERROR_CODES, 'lobby error.code').toContain(f.code)
+  if (f.t === 'sit_at') expect(f.tableId, 'sit_at.tableId').toMatch(TABLE_ID)
+  // Each row by its keys and by value: an id, then counts. A name where a
+  // count or the id goes would fail here even under an allowed key.
+  if (f.t === 'tables')
+    for (const row of f.tables) {
+      expectKeys(row, TABLE_ROW_KEYS, 'lobby tables row')
+      expect(row.tableId, 'tables row tableId').toMatch(TABLE_ID)
+      for (const key of ['seated', 'maxSeats', 'playersPerHour'] as const)
+        expect(isCount(row[key]), `tables row ${key}`).toBe(true)
+      expect(
+        row.avgPot === null || isCount(row.avgPot),
+        'tables row avgPot',
+      ).toBe(true)
+    }
   expect(forbiddenKeys(f), `lobby ${f.t}: forbidden keys`).toEqual([])
 }
 
