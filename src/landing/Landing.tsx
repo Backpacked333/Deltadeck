@@ -478,7 +478,7 @@ function YourAccount({
             <Check size={14} /> Free, play money only
           </li>
           <li>
-            <Check size={14} /> Google or an email link, no password
+            <Check size={14} /> Sign up in under a minute
           </li>
           <li>
             <Check size={14} /> Your email is never shown
