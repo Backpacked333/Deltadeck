@@ -19,7 +19,7 @@ No API keys, database, account or environment variables are needed for the train
 
 ### The landing page
 
-A first visit to the bare URL (no progress, no account, never landed before) opens the landing page instead of the welcome dialog. `#start` opens it any time.
+The bare URL is the home page: it always opens the landing page, and the logo leads back to it. The trainer is at `#table` (the Play tab). `#start` also opens the landing page. The one exception is a return from a sign-in redirect (`?code=…`) with no route to restore, which opens the app so the sign-in can finish. Signed-in visitors get "Play online" in place of the sign-up buttons.
 
 - **The challenge:** one of six curated hands against Atlas, played from preset buttons (keys `1`–`6`), each decision graded on the spot.
   - With WebGL, it plays on a cinematic 3D table (`src/landing/stage/`, ADR-001): Atlas's likeliest hands rise as a cloud on the first decision, and a slow-motion verdict plays on the last.
@@ -34,7 +34,7 @@ A first visit to the bare URL (no progress, no account, never landed before) ope
 
 ### Online play
 
-`#lobby` (the **Online** tab) signs you in with an email link, or with Google or GitHub when the Supabase project enables them, and asks for a public username. **Find a match** pairs you with the next player waiting; **Play a friend by link** opens a table and gives you a link to send. A match is 20 hands of heads-up no-limit hold'em for play money, on the same table UI as the trainer, with the quant lab switched off during play. Each decision has a 20-second clock plus a 60-second bank for the match; three missed decisions in a row forfeit. After each hand you can open its review; **Deck verified** means your browser checked the board, the shown hands and your own two cards against the deck commitment it received before the deal. [Fair play](https://quantpoker.bbcroysalman.workers.dev/#fair-play) and [Terms](https://quantpoker.bbcroysalman.workers.dev/#terms) (in the app: `#fair-play`, `#terms`) say what is and is not guaranteed.
+`#signup` and `#signin` (the header's **Create free account** and **Sign in**) create an account with an email and password, confirmed with a 6-digit code, or with Google or Apple when the Supabase project enables them, and ask for a public username. A signed-in player's practice hands, settings and lesson progress are saved to their account (`practice_hands`, `learning_state`) and follow them between devices; signing out removes them from that browser. **Find a match** pairs you with the next player waiting; **Play a friend by link** opens a table and gives you a link to send. A match is 20 hands of heads-up no-limit hold'em for play money, on the same table UI as the trainer, with the quant lab switched off during play. Each decision has a 20-second clock plus a 60-second bank for the match; three missed decisions in a row forfeit. After each hand you can open its review; **Deck verified** means your browser checked the board, the shown hands and your own two cards against the deck commitment it received before the deal. [Fair play](https://quantpoker.bbcroysalman.workers.dev/#fair-play) and [Terms](https://quantpoker.bbcroysalman.workers.dev/#terms) (in the app: `#fair-play`, `#terms`) say what is and is not guaranteed.
 
 How it is built (decisions in `.10x/decisions/architect/multiplayer-platform.md`):
 

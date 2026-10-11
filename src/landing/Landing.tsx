@@ -2,8 +2,9 @@
 // table (ADR-001) where the visitor plays one graded hand; the 2D trainer
 // table stands in without WebGL or with reduced motion. Below it the page
 // says what QuantPoker is, how the grading and the ladder work, and what a
-// free account gives you, with a way to create one on every screen.
-// Lazy-loaded; first-time visitors start fetching it with the first paint.
+// free account gives you, with a way to create one on every screen (or, for
+// a signed-in visitor, a way to play online). Lazy-loaded: it is the home
+// page at the bare URL.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ArrowRight,
@@ -19,7 +20,7 @@ import {
   UserRound,
 } from 'lucide-react'
 import { CHALLENGE_HANDS } from '../challenge/hands'
-import { markLanded } from '../lib/landing'
+import { rememberAuthReturn } from '../lib/authReturn'
 import { hashString } from '../lib/random'
 import { track, visitorId } from '../lib/track'
 import { ChallengeHand } from './ChallengeHand'
@@ -48,11 +49,31 @@ export type Rival = {
 /** Sign-up, from any of the page's account buttons. */
 function createAccount() {
   track('signup_start')
-  markLanded()
-  window.location.hash = '#welcome/onboard'
+  window.location.hash = '#signup'
 }
 
-export default function Landing() {
+/** Scrolls to the explanation; #how is not a route, so the hash stays. */
+function toHow(e: React.MouseEvent) {
+  e.preventDefault()
+  const reduced = window.matchMedia?.(
+    '(prefers-reduced-motion: reduce)',
+  ).matches
+  document
+    .getElementById('how')
+    ?.scrollIntoView?.({ behavior: reduced ? 'auto' : 'smooth' })
+}
+
+/** A signed-in visitor's account buttons go online instead. */
+const playOnline = () => (window.location.hash = '#lobby')
+/** Onboarding claims the waiting score for a signed-in account too. */
+const saveScore = () => (window.location.hash = '#welcome/onboard')
+/** A new account goes to onboarding anyway; a returning one claims it there. */
+function signUpToSave() {
+  rememberAuthReturn('#welcome/onboard')
+  createAccount()
+}
+
+export default function Landing({ signedIn = false }: { signedIn?: boolean }) {
   const [index, setIndex] = useState(firstHand)
   const [round, setRound] = useState(1)
   const [finished, setFinished] = useState<FinishedChallenge | null>(null)
@@ -104,7 +125,6 @@ export default function Landing() {
 
   const onDone = useCallback(
     (result: FinishedChallenge) => {
-      markLanded()
       setFinished(result)
       stage?.wide()
     },
@@ -160,8 +180,10 @@ export default function Landing() {
             </p>
           )}
           <p className="landing-links-row">
-            <a href="#how">How it works</a>
-            <a href="#table" onClick={markLanded}>
+            <a href="#how" onClick={toHow}>
+              How it works
+            </a>
+            <a href="#table">
               Skip to free practice <ArrowRight size={14} />
             </a>
           </p>
@@ -175,7 +197,8 @@ export default function Landing() {
             <ScoreCard
               finished={finished}
               rival={against}
-              onSave={createAccount}
+              signedIn={signedIn}
+              onSave={signedIn ? saveScore : signUpToSave}
               onAgain={again}
             />
           ) : (
@@ -197,7 +220,7 @@ export default function Landing() {
       </section>
 
       <HowItWorks onPlay={toPlay} />
-      <YourAccount onPlay={toPlay} />
+      <YourAccount onPlay={toPlay} signedIn={signedIn} />
 
       <Reveal
         as="section"
@@ -228,9 +251,18 @@ export default function Landing() {
           <button className="btn btn-accent btn-lg" onClick={toPlay}>
             Play the hand <ArrowRight size={16} />
           </button>
-          <button className="btn btn-ghost-desk btn-lg" onClick={createAccount}>
-            <UserRound size={16} /> Create free account
-          </button>
+          {signedIn ? (
+            <button className="btn btn-ghost-desk btn-lg" onClick={playOnline}>
+              <Swords size={16} /> Play online
+            </button>
+          ) : (
+            <button
+              className="btn btn-ghost-desk btn-lg"
+              onClick={createAccount}
+            >
+              <UserRound size={16} /> Create free account
+            </button>
+          )}
         </div>
       </Reveal>
     </div>
@@ -427,7 +459,13 @@ const PERKS = [
   },
 ] as const
 
-function YourAccount({ onPlay }: { onPlay: () => void }) {
+function YourAccount({
+  onPlay,
+  signedIn,
+}: {
+  onPlay: () => void
+  signedIn: boolean
+}) {
   return (
     <section className="landing-account" aria-labelledby="account-title">
       <Reveal as="div" className="landing-account-head">
@@ -440,16 +478,22 @@ function YourAccount({ onPlay }: { onPlay: () => void }) {
             <Check size={14} /> Free, play money only
           </li>
           <li>
-            <Check size={14} /> Google or an email link, no password
+            <Check size={14} /> Sign up in under a minute
           </li>
           <li>
             <Check size={14} /> Your email is never shown
           </li>
         </ul>
         <div className="landing-account-cta">
-          <button className="btn btn-accent btn-lg" onClick={createAccount}>
-            Create free account <ArrowRight size={16} />
-          </button>
+          {signedIn ? (
+            <button className="btn btn-accent btn-lg" onClick={playOnline}>
+              Play online <ArrowRight size={16} />
+            </button>
+          ) : (
+            <button className="btn btn-accent btn-lg" onClick={createAccount}>
+              Create free account <ArrowRight size={16} />
+            </button>
+          )}
           <button className="landing-inline" onClick={onPlay}>
             Or play the hand first
           </button>

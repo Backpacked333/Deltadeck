@@ -267,3 +267,53 @@ export const createMatch = (user: string, headers: HeadersInit = {}) =>
     method: 'POST',
     headers: { Authorization: `Bearer ${token(user)}`, ...headers },
   })
+
+/** A six-casual table, made through the table's own /init, clock frozen. */
+export async function sixTable() {
+  const matchId = crypto.randomUUID()
+  const body: InitBody = {
+    matchId,
+    creator: { userId: 'host', username: 'host' },
+    kind: 'six-casual',
+  }
+  const response = await stub(matchId).fetch('https://table/init', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+  if (response.status !== 201) throw new Error(`init ${response.status}`)
+  await freezeClock(matchId)
+  return matchId
+}
+
+/** `user` connects to a six table and sits (in `seat`, or the lowest free). */
+export async function sitDown(matchId: string, user: string, seat?: SeatId) {
+  const client = await connect(matchId, user)
+  await client.next((f) => f.t === 'welcome')
+  const from = client.frames.length
+  client.send(seat === undefined ? { t: 'sit' } : { t: 'sit', seat })
+  await client.next((f) => f.t === 'welcome' && f.seat !== null, from)
+  return client
+}
+
+/** Plays the hand on the table to its end, each move chosen by `choose`. */
+export async function playOut(
+  matchId: string,
+  seats: Record<SeatId, Client>,
+  choose: (hand: HandState) => PlayerAction,
+) {
+  for (let guard = 0; guard < 200; guard++) {
+    const { hand } = await peek(matchId)
+    if (!hand || hand.street === 'showdown') return hand!
+    await move(matchId, seats, choose)
+  }
+  throw new Error('the hand did not end')
+}
+
+/** Waits for `test` to hold (work a table does after its frames go out). */
+export async function eventually(test: () => Promise<boolean>) {
+  for (let i = 0; i < 400; i++) {
+    if (await test()) return
+    await new Promise((r) => setTimeout(r, 5))
+  }
+  throw new Error('never happened')
+}

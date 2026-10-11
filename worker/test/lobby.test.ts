@@ -8,20 +8,29 @@ import {
   SELF,
 } from 'cloudflare:test'
 import { afterEach, describe, expect, it } from 'vitest'
+import { legalActions } from '../../src/engine/hand'
+import type { HandState, PlayerAction } from '../../src/engine/types'
 import type { LobbyMsg } from '../../src/shared/protocol'
 import { lobbyStub, REPAIR_MS, START_WITHIN_MS } from '../src/lobby'
 import type { LobbyDO } from '../src/lobby'
+import { REGISTRY_STALE_MS, REPORT_MS } from '../src/registry'
+import type { TableEntry, TableReport } from '../src/registry'
+import { NEXT_HAND_MS } from '../src/table'
 import { checkLobbyFrame, LOBBY_FRAME_KEYS } from './frames'
 import {
   connect,
   createTable,
   elapse,
+  eventually,
   freezeClock,
   isState,
   lobby,
   ORIGIN,
   peek,
+  playOut,
   setLobbyClock,
+  sitDown,
+  sixTable,
   token,
   tryConnect,
 } from './helpers'
@@ -513,5 +522,146 @@ describe('lobby frames', () => {
       new Set(Object.keys(LOBBY_FRAME_KEYS)),
     )
     for (const f of all) checkLobbyFrame(f)
+  })
+})
+
+describe('the six-table registry (P2-08)', () => {
+  /** The lobby's clock while these tests run, so updatedAt is exact. */
+  const LOBBY_AT = 1_900_000_000_000
+  const entryOf = (tableId: string) =>
+    runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
+      state.storage.get<TableEntry>(`table:${tableId}`),
+    )
+  const listed = () =>
+    runInDurableObject(lobbyStub(env), (instance: LobbyDO) => instance.tables())
+  const report = (tableId: string, entry: TableReport) =>
+    lobbyStub(env).reportTable(tableId, entry)
+  const counts = (seated: number): TableReport => ({
+    seated,
+    maxSeats: 6,
+    avgPot: 40,
+    playersPerHour: 3,
+  })
+  const fold = (): PlayerAction => ({ type: 'fold' })
+  const passive = (hand: HandState): PlayerAction =>
+    legalActions(hand).canCheck ? { type: 'check' } : { type: 'call' }
+  /** What a finished hand's winners were awarded. */
+  const potOf = (hand: HandState) =>
+    hand.result!.awards.reduce((sum, a) => sum + a.amount, 0)
+
+  it('the table list shows seats, average pot and players/hour', async () => {
+    await setLobbyClock(LOBBY_AT)
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, 'list-a', 0)
+    const b = await sitDown(matchId, 'list-b', 2)
+    await a.next(isState(1))
+    // C sits during hand 1: seated at once, dealt in from hand 2.
+    const c = await sitDown(matchId, 'list-c', 4)
+    const clients = { 0: a, 2: b, 4: c }
+    // Hand 1, heads-up: the small blind folds. Its pot is what the big
+    // blind was awarded, 20; the uncalled half of the big blind went back.
+    expect(potOf(await playOut(matchId, clients, fold))).toBe(20)
+    // Hand 2 deals all three in, and they check it down: 60.
+    await elapse(matchId, NEXT_HAND_MS)
+    await a.next(isState(2))
+    expect(potOf(await playOut(matchId, clients, passive))).toBe(60)
+    // A table reports at most every 30 s; the first alarm after that sends
+    // the table as it is then (hand 3 is dealt meanwhile).
+    await elapse(matchId, REPORT_MS)
+    await eventually(async () => (await entryOf(matchId))?.avgPot === 40)
+    // Three seats of six, the mean of 20 and 60, and three accounts dealt
+    // in this hour: counts only.
+    const entry = {
+      seated: 3,
+      maxSeats: 6,
+      avgPot: 40,
+      playersPerHour: 3,
+      updatedAt: LOBBY_AT,
+    }
+    expect(await entryOf(matchId)).toEqual(entry)
+    expect(await listed()).toContainEqual({ tableId: matchId, ...entry })
+  })
+
+  it('lists the fullest table with a free seat first, and full tables last', async () => {
+    await setLobbyClock(LOBBY_AT)
+    await report('d-full', counts(6))
+    await report('c-two', counts(2))
+    await report('b-five', counts(5))
+    await report('a-two', counts(2))
+    await report('e-empty', counts(0))
+    // Quick-sit's order: a free seat first, fullest first, ties by id.
+    expect((await listed()).map((t) => t.tableId)).toEqual([
+      'b-five',
+      'a-two',
+      'c-two',
+      'e-empty',
+      'd-full',
+    ])
+  })
+
+  it('an entry not refreshed for 20 minutes is not listed, and is dropped', async () => {
+    await setLobbyClock(LOBBY_AT)
+    await report('old', counts(2))
+    await setLobbyClock(LOBBY_AT + 60_000)
+    await report('new', counts(2))
+    // Exactly 20 minutes old: still listed.
+    await setLobbyClock(LOBBY_AT + REGISTRY_STALE_MS)
+    expect((await listed()).map((t) => t.tableId)).toEqual(['new', 'old'])
+    // Older than that: treated as gone (its table died without removing
+    // itself), and the read drops it.
+    await setLobbyClock(LOBBY_AT + REGISTRY_STALE_MS + 1)
+    expect((await listed()).map((t) => t.tableId)).toEqual(['new'])
+    expect(await entryOf('old')).toBeUndefined()
+    expect(await entryOf('new')).toBeDefined()
+  })
+
+  it('an entry holds counts only, whatever a report carries', async () => {
+    await setLobbyClock(LOBBY_AT)
+    // A report that names accounts (no table sends one) is stored without them.
+    await report('named', {
+      ...counts(2),
+      username: 'eve',
+      userIds: ['eve-id'],
+    } as TableReport)
+    expect(await entryOf('named')).toEqual({
+      ...counts(2),
+      updatedAt: LOBBY_AT,
+    })
+    const stored = await lobbyState()
+    expect(JSON.stringify(stored['table:named'])).not.toMatch(/eve/)
+    // By value too: a field that is not a count (a name where a number
+    // goes, NaN, a fraction, a negative) is refused whole. Nothing is
+    // stored, and an entry already there stays as it was.
+    const mangled: Record<string, unknown>[] = [
+      { avgPot: 'eve' },
+      { seated: 'eve' },
+      { seated: Number.NaN },
+      { playersPerHour: Infinity },
+      { maxSeats: 6.5 },
+      { seated: -1 },
+      { avgPot: undefined },
+    ]
+    for (const fields of mangled) {
+      // A native promise: vitest's rejects does not see an RPC promise
+      // that resolves as a failure.
+      for (const tableId of ['mangled', 'named'])
+        await expect(
+          (async () =>
+            report(tableId, { ...counts(3), ...fields } as TableReport))(),
+        ).rejects.toThrow('A table report is four counts')
+      expect(await entryOf('mangled')).toBeUndefined()
+      expect(await entryOf('named')).toEqual({
+        ...counts(2),
+        updatedAt: LOBBY_AT,
+      })
+    }
+  })
+
+  it('a table removed from the list is no longer listed', async () => {
+    await setLobbyClock(LOBBY_AT)
+    await report('gone', counts(1))
+    await lobbyStub(env).removeTable('gone')
+    expect(await entryOf('gone')).toBeUndefined()
+    expect(await listed()).toEqual([])
   })
 })

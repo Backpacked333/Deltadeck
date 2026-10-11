@@ -503,6 +503,7 @@ kbd {
   font-weight: 700;
   letter-spacing: -0.04em;
   color: var(--text);
+  text-decoration: none;
 }
 .brand-mark {
   display: grid;
@@ -4720,7 +4721,8 @@ html.resizing * {
   user-select: none !important;
 }
 
-/* The landing page's account buttons in the header (src/landing). */
+/* The account in the header: Sign in and Create free account, or the
+   signed-in player's menu (src/components/AccountMenu.tsx). */
 .header-account {
   display: inline-flex;
   align-items: center;
@@ -4746,7 +4748,14 @@ html.resizing * {
   display: none;
 }
 @media (max-width: 720px) {
-  .header-signin,
+  .header-account {
+    gap: 8px;
+    margin-right: 2px;
+  }
+  .header-signin {
+    font-size: 13px;
+    white-space: nowrap;
+  }
   .header-join-long {
     display: none;
   }
@@ -4758,8 +4767,83 @@ html.resizing * {
     font-size: 12.5px;
     white-space: nowrap;
   }
-  /* On the landing page the account button replaces the tool buttons. */
+  /* Signed out on a phone, the account buttons replace the tool buttons. */
   .header-account ~ .icon-btn {
     display: none;
   }
+}
+/* Below 900 px the account needs the header's room: the destinations show
+   as icons, each named by its label (and a tooltip). */
+@media (max-width: 900px) {
+  .nav button svg {
+    display: block;
+  }
+  .nav button span {
+    display: none;
+  }
+}
+.account-menu {
+  position: relative;
+  margin-right: 6px;
+}
+.account-button {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: linear-gradient(145deg, var(--brand-2), var(--brand));
+  color: var(--brand-ink);
+  font-weight: 700;
+  font-size: 15px;
+}
+.account-button:hover {
+  filter: brightness(1.08);
+}
+.account-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 40;
+  min-width: 220px;
+  padding: 8px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+.account-who {
+  margin: 0;
+  padding: 8px 10px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.account-who b {
+  color: var(--text);
+}
+.account-panel ul {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.account-panel a {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.account-panel a:hover,
+.account-panel a:focus-visible {
+  background: var(--surface-3);
+}
+.account-signout {
+  color: var(--text-2) !important;
 }

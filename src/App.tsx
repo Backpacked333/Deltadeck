@@ -55,7 +55,7 @@ import type {
   Settings,
 } from './lib/storage'
 import { useMediaQuery } from './hooks'
-import { isLearningRoute, useHash } from './lib/navigation'
+import { isLearningRoute, useHash, useSearch } from './lib/navigation'
 import type { LearningSession } from './curriculum/core/session'
 import { spotKey, useSpots } from './state/spots'
 import { guessKey, initialTrainer, trainerReducer } from './state/trainer'
@@ -81,7 +81,9 @@ import {
 import { Tour } from './components/Tour'
 import { CardDefs } from './components/cards/CardArt'
 import type { TourStep } from './components/Tour'
-import { isFirstVisit } from './lib/landing'
+import { backFromSignIn } from './lib/landing'
+import { signedIn, useAccount } from './lib/account'
+import { AccountMenu } from './components/AccountMenu'
 import { track } from './lib/track'
 
 type View =
@@ -96,27 +98,31 @@ type View =
 type Route = { view: View; lesson: LessonId | null }
 const Curriculum = lazy(() => import('./curriculum/Curriculum'))
 const LiveApp = lazy(() => import('./net/LiveApp'))
+// Signed in: checks the stored session with the account service (lazy, so
+// the account client never reaches the entry chunk).
+const SessionKeeper = lazy(() => import('./net/Session'))
 const InfoPage = lazy(() => import('./info/InfoPages'))
 const Gallery = lazy(() => import('./dev/Gallery'))
-const loadLanding = () => import('./landing/Landing')
-const Landing = lazy(loadLanding)
+const Landing = lazy(() => import('./landing/Landing'))
 // The lab is the heaviest view; it loads in parallel with the first paint.
 const labModule = import('./components/lab/Lab')
 const Lab = lazy(() => labModule.then((module) => ({ default: module.Lab })))
 
 /**
- * Hash routes: the landing page (the bare URL on a first visit, #start, or
- * #c/<receipt> for a friend's challenge),
- * #table (default), #progress, #lobby[/find], #play/<id>,
- * #ladder[/month], #u/<username> and #match/<id> (online play), #fair-play,
- * #terms and #method, #learn/...
- * and #learn/quick[/id].
+ * Hash routes: the landing page (the bare URL, #start, or #c/<receipt> for a
+ * friend's challenge), #table (default), #progress, #lobby[/find],
+ * #play/<id>, #ladder[/month], #u/<username> and #match/<id> (online play),
+ * #signup and #signin, #fair-play, #terms and #method, #learn/...
+ * and #learn/quick[/id]. A return from a sign-in provider (?code=…) opens the
+ * online area, which finishes the sign-in, whatever the hash.
  */
-function parseRoute(hash: string, firstVisit = false): Route {
+function parseRoute(hash: string, search = ''): Route {
+  if (backFromSignIn(search)) return { view: 'live', lesson: null }
   if (
     hash === '#start' ||
     /^#c\/[0-9a-f]{32}$/.test(hash) ||
-    (firstVisit && (hash === '' || hash === '#'))
+    hash === '' ||
+    hash === '#'
   )
     return { view: 'landing', lesson: null }
   const quick = hash.match(/^#learn\/quick(?:\/([\w-]+))?$/)
@@ -132,7 +138,10 @@ function parseRoute(hash: string, firstVisit = false): Route {
     /^#ladder(?:\/month)?$/.test(hash) ||
     /^#u\/[a-z0-9_]{3,20}$/.test(hash) ||
     /^#match\/[0-9a-f-]{36}$/.test(hash) ||
-    hash === '#welcome/onboard'
+    hash === '#welcome/onboard' ||
+    hash === '#signup' ||
+    hash === '#signin' ||
+    hash === '#signout'
   )
     return { view: 'live', lesson: null }
   if (hash === '#fair-play' || hash === '#terms' || hash === '#method')
@@ -147,8 +156,16 @@ function parseRoute(hash: string, firstVisit = false): Route {
  * app resolves the transition.
  */
 function go(hash: string) {
-  const target = `#${hash}`
+  const target = hash ? `#${hash}` : ''
   if (window.location.hash === target) return
+  // Home is the bare URL: no trailing '#', and no sign-in ?code left over.
+  const navigate = () => {
+    if (hash) window.location.hash = hash
+    else {
+      window.history.pushState(null, '', window.location.pathname)
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    }
+  }
   const doc = document as Document & {
     startViewTransition?: (update: () => Promise<void>) => unknown
   }
@@ -156,7 +173,7 @@ function go(hash: string) {
     typeof window.matchMedia === 'function' &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches
   if (!doc.startViewTransition || reduced || motionOff) {
-    window.location.hash = hash
+    navigate()
     return
   }
   doc.startViewTransition(
@@ -167,7 +184,7 @@ function go(hash: string) {
           () => requestAnimationFrame(() => resolve()),
           { once: true },
         )
-        window.location.hash = hash
+        navigate()
       }),
   )
 }
@@ -262,14 +279,19 @@ export default function App() {
   )
   const { spots, request } = useSpots()
   const hash = useHash()
-  // Decided once, so the landing page never disappears mid-hand. A first
-  // visit starts loading it in parallel with the first paint.
-  const [firstVisit] = useState(() => {
-    const first = isFirstVisit(progress)
-    if (first) void loadLanding()
-    return first
-  })
-  const { view, lesson } = parseRoute(hash, firstVisit)
+  const search = useSearch()
+  const { view, lesson } = parseRoute(hash, search)
+  // Signed in or not, as the entry chunk can tell; the online chunk confirms.
+  const account = useAccount()
+  const member = account.signedIn
+  // Signed out elsewhere (another tab, or a session the service ended): start
+  // afresh, so nothing of the account stays in this page.
+  const wasMember = useRef(member)
+  useEffect(() => {
+    if (wasMember.current && !member)
+      window.location.replace(window.location.pathname)
+    wasMember.current = member
+  }, [member])
   const learningSession = useRef<LearningSession | null>(null)
   const [dialog, setDialog] = useState<Dialog>(null)
   const [paused, setPaused] = useState(false)
@@ -300,7 +322,16 @@ export default function App() {
   const style = trainer.style
   const model = settings.opponentModel
   // Not over an invite link: a friend opening #play/<id> goes straight in.
+  // A signed-in player's history (and so whether they were onboarded) may
+  // be on the account: the welcome waits for it, 1.5 s at most.
+  const [historyReady, setHistoryReady] = useState(() => !signedIn())
+  useEffect(() => {
+    if (historyReady) return
+    const timer = setTimeout(() => setHistoryReady(true), 1500)
+    return () => clearTimeout(timer)
+  }, [historyReady])
   const welcome =
+    historyReady &&
     !progress.onboarded &&
     view !== 'live' &&
     view !== 'info' &&
@@ -833,10 +864,15 @@ export default function App() {
         Skip to content
       </a>
       <header className="header">
-        <button
+        <a
           className="brand"
-          onClick={() => go('table')}
-          aria-label="QuantPoker, back to the table"
+          href="/"
+          onClick={(e) => {
+            if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+            e.preventDefault()
+            go('')
+          }}
+          aria-label="QuantPoker home"
         >
           <span className="brand-mark">
             <Spade size={18} fill="currentColor" />
@@ -844,7 +880,7 @@ export default function App() {
           <span>
             quant<span className="brand-light">poker</span>
           </span>
-        </button>
+        </a>
         <nav className="nav" aria-label="Main">
           {(
             [
@@ -864,31 +900,34 @@ export default function App() {
                 className={on ? 'on' : ''}
                 aria-current={on ? 'page' : undefined}
                 data-tour={key === 'progress' ? 'progress' : undefined}
+                aria-label={label}
+                title={label}
                 onClick={() => go(hash)}
               >
-                <Icon size={15} /> <span>{label}</span>
+                <Icon size={15} aria-hidden="true" /> <span>{label}</span>
               </button>
             )
           })}
         </nav>
         <div className="header-tools">
-          {view === 'landing' ? (
+          <span className="pill">
+            <i /> Play money
+          </span>
+          {member ? (
+            <AccountMenu username={account.username} />
+          ) : (
             <span className="header-account">
-              <a href="#welcome/onboard" className="header-signin">
+              <a href="#signin" className="header-signin">
                 Sign in
               </a>
               <a
-                href="#welcome/onboard"
+                href="#signup"
                 className="btn btn-accent header-join"
                 onClick={() => track('signup_start')}
               >
                 <span className="header-join-long">Create free account</span>
                 <span className="header-join-short">Join free</span>
               </a>
-            </span>
-          ) : (
-            <span className="pill">
-              <i /> Play money
             </span>
           )}
           <button
@@ -1160,7 +1199,7 @@ export default function App() {
               </div>
             }
           >
-            <Landing />
+            <Landing signedIn={member} />
           </Suspense>
         )}
         {view === 'gallery' && (
@@ -1172,19 +1211,39 @@ export default function App() {
           <ProgressView
             progress={progress}
             sessionId={sessionId.current}
-            onReplace={(next) => setProgress({ ...next, onboarded: true })}
+            onReplace={(next) =>
+              setProgress((p) => ({
+                ...next,
+                onboarded: true,
+                owner: p.owner,
+                historyClearedAt: p.historyClearedAt,
+              }))
+            }
             onClear={() =>
               setProgress((p) => ({
                 ...emptyProgress(),
                 settings: p.settings,
                 onboarded: true,
                 guidedComplete: p.guidedComplete,
+                owner: p.owner,
+                // On the account too: no device brings these hands back.
+                historyClearedAt: Date.now(),
               }))
             }
             onPlay={() => go('table')}
           />
         )}
       </main>
+      {member && (
+        <Suspense fallback={null}>
+          <SessionKeeper
+            progress={progress}
+            onMerge={setProgress}
+            onLearningReplaced={() => learningSession.current?.reloadSaved()}
+            onReady={() => setHistoryReady(true)}
+          />
+        </Suspense>
+      )}
 
       <footer className="footer">
         <span>

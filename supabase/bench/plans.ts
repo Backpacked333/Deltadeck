@@ -167,7 +167,10 @@ async function plan(
       await db
         .query<{
           'QUERY PLAN': string
-        }>(`explain (analyze, costs off, timing off, summary on) ${sql}`, params)
+        }>(
+          `explain (analyze, costs off, timing off, summary on) ${sql}`,
+          params,
+        )
         .finally(() => role && db.exec('reset role'))
     ).rows.map((r) => r['QUERY PLAN'])
     const exec = rows.find((l) => l.startsWith('Execution Time'))

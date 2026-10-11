@@ -2,9 +2,9 @@ import AxeBuilder from '@axe-core/playwright'
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 
-// The landing page (L-1, L-2, L-11): a first visit at the bare URL plays a
-// graded challenge hand by keyboard, with no account, and reaches the score
-// card. The preview server has no Worker, so the percentile is unavailable
+// The landing page (L-1, L-2, L-11): the bare URL is the home page. A visit
+// plays a graded challenge hand by keyboard, with no account, and reaches the
+// score card. The preview server has no Worker, so the percentile is unavailable
 // here; the Worker's own suite covers ranking (worker/test/challenge.test.ts).
 
 async function axe(page: Page) {
@@ -48,19 +48,29 @@ for (const colorScheme of ['light', 'dark'] as const)
     await expect(card).toContainText(/graded Best/)
     await expect(card).toContainText(/Percentile unavailable/)
     await axe(page)
-    // Finished: the next visit opens the app, not the landing page again.
-    await page.reload()
-    await expect(page.locator('.table')).toBeVisible()
-    await expect(page.getByRole('heading', { name: /misprice/ })).toHaveCount(0)
   })
 
-test('skipping goes to free practice and is remembered', async ({ page }) => {
+test('skipping goes to free practice; the bare URL stays home', async ({
+  page,
+}) => {
   await page.goto('/')
   await page.getByRole('link', { name: /Skip to free practice/ }).click()
   await expect(page).toHaveURL(/#table$/)
   await expect(page.getByRole('dialog')).toBeVisible()
   await page.goto('/')
-  await expect(page.getByRole('heading', { name: /misprice/ })).toHaveCount(0)
-  await page.goto('/#start')
   await expect(page.getByRole('heading', { name: /misprice/ })).toBeVisible()
+})
+
+test('the logo leads home from the trainer', async ({ page }) => {
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      'quantpoker.progress.v2',
+      JSON.stringify({ onboarded: true }),
+    ),
+  )
+  await page.goto('/#table')
+  await expect(page.locator('.table')).toBeVisible()
+  await page.getByRole('link', { name: 'QuantPoker home' }).click()
+  await expect(page.getByRole('heading', { name: /misprice/ })).toBeVisible()
+  expect(new URL(page.url()).hash).toBe('')
 })

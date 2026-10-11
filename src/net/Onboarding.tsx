@@ -8,7 +8,6 @@
 import { useEffect, useState } from 'react'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { BookOpen, Check, GraduationCap, RotateCcw, Swords } from 'lucide-react'
-import { markLanded } from '../lib/landing'
 import { track } from '../lib/track'
 import type { Identity } from './api'
 import { claimPendingScore } from './claim'
@@ -44,7 +43,6 @@ export function Onboarding({
 
   useEffect(() => {
     track('signup_complete')
-    markLanded()
     let live = true
     void claimPendingScore(getToken).then((c) => live && setClaimed(c))
     return () => {

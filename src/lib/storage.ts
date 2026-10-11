@@ -77,6 +77,14 @@ export type Progress = {
   settings: Settings
   onboarded: boolean
   guidedComplete: boolean
+  /**
+   * The account this progress belongs to, once a signed-in player's history
+   * was merged into it; absent for play before signing in. Kept inside the
+   * stored progress, so another tab saving its copy keeps it too.
+   */
+  owner?: string
+  /** When the player last cleared their history (ms); older hands stay gone. */
+  historyClearedAt?: number
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -101,6 +109,8 @@ export const emptyProgress = (): Progress => ({
 })
 
 export const STORAGE_KEY = 'quantpoker.progress.v2'
+/** Fired by the curriculum after it saves, for the account's copy. */
+export const LEARNING_SAVED_EVENT = 'qp-learning-saved'
 export const LEGACY_KEY = 'quantpoker.progress.v1'
 export const HAND_LIMIT = 100
 
@@ -249,10 +259,16 @@ export function sanitizeProgress(parsed: unknown): Progress {
     settings: cleanSettings(value.settings),
     onboarded: value.onboarded === true,
     guidedComplete: value.guidedComplete === true,
+    ...(typeof value.owner === 'string' && /^[\w-]{1,64}$/.test(value.owner)
+      ? { owner: value.owner }
+      : {}),
+    ...(finite(value.historyClearedAt)
+      ? { historyClearedAt: value.historyClearedAt as number }
+      : {}),
   }
 }
 
-/** Storage seam. A future cloud adapter can implement the same contract. */
+/** Storage seam: the account's copy is synced by src/net/sync.ts. */
 export interface SyncAdapter {
   load(): Progress
   save(progress: Progress): boolean
@@ -317,7 +333,11 @@ export function importProgress(text: string): Progress | null {
   try {
     const parsed: unknown = JSON.parse(text)
     if (!isObject(parsed) || !Array.isArray(parsed.hands)) return null
-    return sanitizeProgress(parsed)
+    // An exported file says nothing about which account owns this browser.
+    const progress = sanitizeProgress(parsed)
+    delete progress.owner
+    delete progress.historyClearedAt
+    return progress
   } catch {
     return null
   }
