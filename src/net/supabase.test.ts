@@ -55,3 +55,16 @@ describe('loadOnline', () => {
     expect(fetcher).not.toHaveBeenCalled()
   })
 })
+
+describe('storageKeyFor', () => {
+  it("names the key supabase-js keeps this project's session under", async () => {
+    vi.stubEnv('VITE_SUPABASE_URL', 'https://abcd1234.supabase.co')
+    vi.stubEnv('VITE_SUPABASE_ANON_KEY', 'sb_publishable_k')
+    const online = await (await fresh())()
+    const { storageKeyFor } = await import('./sessionKey')
+    const key = (online!.client.auth as unknown as { storageKey: string })
+      .storageKey
+    expect(storageKeyFor('https://abcd1234.supabase.co')).toBe(key)
+    expect(key).toBe('sb-abcd1234-auth-token')
+  })
+})
