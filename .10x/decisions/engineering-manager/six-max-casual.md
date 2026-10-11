@@ -547,6 +547,11 @@ The plan gave `rebuy` (here) and `stand` (PR-12) server messages but no control 
 
 - **Files:** the ring and pot rendering, from `view.pot.layers` and `result.awards`.
 - **Tests (red):** `Table.test › side pots render separately and pay out in award order` (last side pot first, `types.ts:175-176`).
+- **As built** (`SixTable.tsx` `SidePots`, `live.css`, lazy chunk; no frame field, no server change):
+  - **What the wire carries.** `pot.layers` is the engine's `state.pots`: during a hand, the chips gathered on finished streets only (pre-flop it is empty; this street's bets are on the plates, and in `pot.total`), with eligibility already narrowed by folds. At the result it is the final pots, which `result.awards[].pot` indexes.
+  - **One pot keeps today's look.** With fewer than two layers the middle reads "Pot <total>" during the hand and nothing at the result, as before. With a side pot the total line stays and a list "Pots" follows it: "Main pot", "Side pot 1", "Side pot 2", each with its amount, and for screen readers who can still win it by name ("between bob, you and dave"; "for dave" when one seat is left).
+  - **The result.** An ordered list "Pots paid" in award order (the order of each pot's first award, so the last side pot first and the main pot last), each pot "to <winner>" or "split: <name> <share>, …"; zero-chip shares of a tiny split pot are left out. The result line under the table (`resultText`) is unchanged.
+  - **Tests.** `src/net/LiveTable.test.tsx`: `side pots render separately and pay out in award order`, `a split side pot shows each winner's share`, guard `a hand with a single pot still reads Pot and its total`. e2e: `a six-seat table with two side pots fits 320 px, in the hand and at its result` (`fakeSixTable({ sidePots })` scripts two all-ins to the river; the board and the pot list clear every plate from 320 to 860 px, during the hand and with three "Pots paid" lines naming the longest username).
 
 **PR-22 · P2-06b per-seat chip motion and the frame gate**
 
