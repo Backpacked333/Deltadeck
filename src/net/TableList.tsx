@@ -5,6 +5,7 @@
 // page's (useSitOnArrival).
 import { useEffect, useLayoutEffect, useRef } from 'react'
 import { SIX_BLINDS } from '../engine/stacks'
+import { LIMITED } from './lobbyClient'
 import type { LobbyConnection, LobbyState } from './lobbyClient'
 
 /** How often the list is asked for while it is shown (ADR, PR-25). */
@@ -19,11 +20,12 @@ export type Passed = 'table_full' | 'sit_cooldown' | 'closed'
 
 /**
  * A quick-sit on its way between pages (LiveApp): to table `at`, or back
- * to the lobby (`at` null) to ask again, naming every table tried.
+ * from table `from` to the lobby (`at` null) to ask again, naming every
+ * table tried.
  */
 export type QuickSit =
   | { tried: string[]; at: string }
-  | { tried: string[]; at: null; passed: Passed }
+  | { tried: string[]; at: null; passed: Passed; from: string }
 
 const AGAIN: Record<Passed, string> = {
   table_full: 'That table filled up. Finding you another…',
@@ -82,6 +84,21 @@ export function TableList({
       button.current?.focus()
   })
 
+  // What the card says: the search, or why the lobby is out of reach. A
+  // lobby away ends any search (no answer will come).
+  const said = seating
+    ? retry
+      ? AGAIN[retry]
+      : 'Finding you a seat…'
+    : state.status === 'replaced'
+      ? 'The lobby is open in another tab. Reload this page to sit from here.'
+      : state.status === 'failed'
+        ? (state.error ?? 'The lobby is unavailable. Reload to try again.')
+        : ''
+  // The lobby's refusal stays up through a reconnect, so it is not
+  // announced again; the reconnect's own notice is the 1v1 card's.
+  const refusal =
+    !away && !state.seating && state.error !== LIMITED ? state.error : null
   const rows = state.tables
   const more = rows ? rows.length - TABLES_SHOWN : 0
   return (
@@ -95,16 +112,11 @@ export function TableList({
         Quick sit
       </button>
       <p className="live-muted" role="status">
-        {seating ? (retry ? AGAIN[retry] : 'Finding you a seat…') : ''}
+        {said}
       </p>
-      {open && !state.seating && state.error && (
+      {refusal && (
         <p className="live-error" role="alert">
-          {state.error}
-        </p>
-      )}
-      {state.status === 'replaced' && (
-        <p className="live-muted">
-          The lobby is open in another tab. Reload this page to sit from here.
+          {refusal}
         </p>
       )}
       {rows &&

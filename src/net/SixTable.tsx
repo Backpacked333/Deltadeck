@@ -124,12 +124,14 @@ export function SixTable({
     `Seat ${s + 1}`
 
   const [flash, setFlash] = useState<string | null>(null)
+  // Not while a quick-sit's sit is on its way: a refusal it moves on from
+  // is said on the lobby page, and one it stops at once it has stopped.
   useEffect(() => {
-    if (!state.error || state.error.code === 'unauthorized') return
+    if (taking || !state.error || state.error.code === 'unauthorized') return
     setFlash(state.error.message)
     const timer = window.setTimeout(() => setFlash(null), 3000)
     return () => window.clearTimeout(timer)
-  }, [state.error])
+  }, [state.error, taking])
 
   // "Sit here" and the action bar unmount under the keyboard: the welcome
   // takes the one away, our own move the other. Focus would fall to <body>

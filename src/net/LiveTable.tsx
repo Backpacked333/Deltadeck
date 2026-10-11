@@ -61,7 +61,7 @@ export function LiveTable({
 }) {
   const { state, act, rematch, sit, resync, rebuy, stand, sitOut, sitIn } =
     useTable(matchId, identity.getToken)
-  const taking = useSitOnArrival(
+  const { taking, arrived } = useSitOnArrival(
     matchId,
     state,
     sit,
@@ -71,7 +71,9 @@ export function LiveTable({
   )
   const { status, table, view, seat } = state
 
-  if (status === 'elsewhere')
+  // While a quick-sit hands off to the next page, this one says only that
+  // it is taking a seat: no closed or elsewhere page on the way out.
+  if (status === 'elsewhere' && !taking)
     return (
       <div className="empty live-empty" role="alert">
         <h3>You are already playing at another table.</h3>
@@ -83,7 +85,21 @@ export function LiveTable({
         )}
       </div>
     )
-  if (status === 'closed')
+  // A six table has no invites and no heads-up search to offer.
+  if (
+    status === 'closed' &&
+    !taking &&
+    (arrived || table?.kind === 'six-casual')
+  )
+    return (
+      <div className="empty live-empty" role="alert">
+        <h3>This table has closed.</h3>
+        <a className="btn btn-primary" href="#lobby">
+          Back to the lobby
+        </a>
+      </div>
+    )
+  if (status === 'closed' && !taking)
     return (
       <div className="empty live-empty" role="alert">
         <h3>This table has closed</h3>
@@ -520,24 +536,28 @@ function useSitOnArrival(
   const { status, table, seat, error, elsewhere } = state
   useEffect(() => {
     if (!tried || step.current === 'done') return
-    const end = () => {
+    // Leaving for another page: still taking a seat until it unmounts,
+    // so this page puts up no refusal of its own on the way out.
+    const end = (leaving = false) => {
       step.current = 'done'
       window.clearTimeout(timer.current)
-      setTaking(false)
+      if (!leaving) setTaking(false)
     }
     const moveOn = (passed: Passed) => {
-      end()
       // A whole quick-sit asks the lobby at most 1 + QUICK_SIT_TABLES times.
-      if (tried.length < QUICK_SIT_TABLES)
+      const again = tried.length < QUICK_SIT_TABLES
+      end(again)
+      if (again)
         setQuickSit({
           tried: [...new Set([...tried, matchId])],
           at: null,
           passed,
+          from: matchId,
         })
     }
     if (status === 'closed') return moveOn('closed')
     if (status === 'elsewhere') {
-      end()
+      end(!!elsewhere)
       if (elsewhere) window.location.replace(`#play/${elsewhere}`)
       return
     }
@@ -572,5 +592,5 @@ function useSitOnArrival(
     resync,
     setQuickSit,
   ])
-  return taking
+  return { taking, arrived: tried !== null }
 }

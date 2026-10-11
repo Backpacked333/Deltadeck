@@ -25,11 +25,29 @@ const M = '33333333-3333-4333-8333-333333333333'
 
 const sent = (s: FakeSocket) => s.sent.map((m) => JSON.parse(m))
 const lobbyFrame = (msg: object) => ({ seq: 1, ...msg }) as never
-/** Lets a navigation land: jsdom fires hashchange a task later. */
+/**
+ * Lets a navigation land: jsdom fires hashchange a task later, and runs a
+ * history traversal (Back) several tasks deep.
+ */
 const settle = () =>
   act(async () => {
-    await new Promise((r) => setTimeout(r, 0))
+    for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0))
   })
+
+/** Every role=alert put on the page from now on, the node or within it. */
+function alertsAdded() {
+  const added: string[] = []
+  const observer = new MutationObserver((records) => {
+    for (const r of records)
+      for (const node of r.addedNodes)
+        if (node instanceof HTMLElement)
+          for (const el of [node, ...node.querySelectorAll('*')])
+            if (el.getAttribute('role') === 'alert')
+              added.push(el.textContent ?? '')
+  })
+  observer.observe(document.body, { childList: true, subtree: true })
+  return { added, stop: () => observer.disconnect() }
+}
 
 const lobbies = () => FakeSocket.all.filter((s) => s.url.endsWith('/ws/lobby'))
 const lobby = () => lobbies().at(-1)!
@@ -504,6 +522,168 @@ describe('quick-sit across pages', () => {
   })
 })
 
+describe('quick-sit and the history (review)', () => {
+  it('Back on the lobby page while it asks again leaves it, and ends the quick-sit', async () => {
+    window.location.hash = '#ladder'
+    await settle()
+    await inLobby()
+    await userEvent.click(quickSit())
+    const first = await sentTo(T1)
+    act(() => first.emit(refusal(T1, 'table_full', 'Every seat is taken')))
+    await bounced()
+    const asking = lobby()
+    act(() => window.history.back())
+    await settle()
+    expect(window.location.hash).toBe('#ladder')
+    expect(asking.closedWith).toBe(1000)
+    act(() => asking.emit(lobbyFrame({ t: 'sit_at', tableId: T2 })))
+    await settle()
+    expect(window.location.hash).toBe('#ladder')
+    expect(tables(T2)).toEqual([])
+  })
+
+  it('after a refusal and a retry the lobby refuses, one Back leaves the lobby page', async () => {
+    window.location.hash = '#ladder'
+    await settle()
+    await inLobby()
+    await userEvent.click(quickSit())
+    const first = await sentTo(T1)
+    act(() => first.emit(refusal(T1, 'table_full', 'Every seat is taken')))
+    await bounced()
+    act(() =>
+      lobby().emit(
+        lobbyFrame({ t: 'error', code: 'tables_full', message: 'Full.' }),
+      ),
+    )
+    act(() => window.history.back())
+    await settle()
+    expect(window.location.hash).toBe('#ladder')
+  })
+
+  it('Back from the table a retry found returns to the lobby', async () => {
+    window.location.hash = '#ladder'
+    await settle()
+    await inLobby()
+    await userEvent.click(quickSit())
+    const first = await sentTo(T1)
+    act(() => first.emit(refusal(T1, 'table_full', 'Every seat is taken')))
+    await bounced()
+    const next = await sentTo(T2)
+    act(() => next.emit(six(T2, 4, { seq: 2 })))
+    act(() => window.history.back())
+    await settle()
+    expect(window.location.hash).toBe('#lobby')
+    act(() => window.history.back())
+    await settle()
+    expect(window.location.hash).toBe('#ladder')
+  })
+
+  it('a quick-sit the player left in the same moment as a refusal is not taken by a later lobby visit', async () => {
+    await inLobby()
+    await userEvent.click(quickSit())
+    const first = await sentTo(T1)
+    act(() => {
+      first.emit(refusal(T1, 'table_full', 'Every seat is taken'))
+      window.location.hash = '#ladder'
+    })
+    await settle()
+    expect(window.location.hash).toBe('#ladder')
+    act(() => {
+      window.location.hash = '#lobby'
+    })
+    await settle()
+    act(() => lobby().open())
+    expect(sent(lobby())).toEqual([{ t: 'tables' }])
+  })
+})
+
+describe('the hand-off says one thing (review)', () => {
+  it.each([
+    {
+      case: 'table_full',
+      refuse: (s: FakeSocket) =>
+        s.emit(refusal(T1, 'table_full', 'Every seat is taken')),
+    },
+    {
+      case: 'a 4404',
+      refuse: (s: FakeSocket) => s.drop(CLOSE_GONE, 'closed'),
+    },
+  ])(
+    'a table refusing a quick-sit puts up no alert of its own on the way back: $case',
+    async ({ refuse }) => {
+      await inLobby()
+      await userEvent.click(quickSit())
+      const socket = await sentTo(T1)
+      const alerts = alertsAdded()
+      act(() => refuse(socket))
+      await bounced()
+      alerts.stop()
+      expect(alerts.added).toEqual([])
+    },
+  )
+
+  it('a refusal at the fourth table still says why, and a closed fourth table offers the lobby, not a heads-up search', async () => {
+    await inLobby()
+    await userEvent.click(quickSit())
+    for (const id of [T1, T2, T3]) {
+      const socket = await sentTo(id)
+      act(() => socket.emit(refusal(id, 'table_full', 'Every seat is taken')))
+      await bounced()
+    }
+    act(() => lobby().emit(lobbyFrame({ t: 'sit_at', tableId: T4 })))
+    await settle()
+    act(() => tableAt(T4).drop(CLOSE_GONE, 'closed'))
+    await settle()
+    expect(window.location.hash).toBe(`#play/${T4}`)
+    expect(screen.queryByRole('link', { name: 'Find a match' })).toBeNull()
+    expect(
+      screen.getByRole('link', { name: 'Back to the lobby' }),
+    ).toHaveAttribute('href', '#lobby')
+  })
+})
+
+describe('the lobby away (review)', () => {
+  it('a lobby that cannot be reached says so in the 6-max card', async () => {
+    await inLobby()
+    act(() => lobby().emit(lobbyFrame({ t: 'presence', online: 2, queued: 0 })))
+    await userEvent.click(quickSit())
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    for (let i = 0; i < 9; i++) {
+      act(() => lobby().drop(1006))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(9000)
+      })
+    }
+    expect(line()).toHaveTextContent(
+      'Could not reach the lobby. Reload to try again.',
+    )
+    expect(quickSit()).toBeDisabled()
+  })
+
+  it('a refusal stays put through a reconnect, not announced again', async () => {
+    await inLobby()
+    await userEvent.click(quickSit())
+    act(() =>
+      lobby().emit(
+        lobbyFrame({ t: 'error', code: 'tables_full', message: 'Full.' }),
+      ),
+    )
+    const said = within(card()).getByRole('alert')
+    act(() => lobby().drop(1006))
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 600))
+    })
+    act(() => lobby().open())
+    expect(within(card()).getByRole('alert')).toBe(said)
+  })
+
+  it('the lobby closing a flood says nothing in the 6-max card', async () => {
+    await inLobby()
+    act(() => lobby().drop(4429, 'Too many messages'))
+    expect(within(card()).queryByRole('alert')).toBeNull()
+  })
+})
+
 describe('the 6-max card', () => {
   it('one search at a time: Quick sit and the Find buttons wait for each other', async () => {
     await inLobby()
@@ -531,10 +711,212 @@ describe('the 6-max card', () => {
     expect(line()).toHaveTextContent('')
     await userEvent.click(quickSit())
     act(() => lobby().drop(CLOSE_REPLACED, 'replaced'))
-    expect(line()).toHaveTextContent('')
+    expect(line()).toHaveTextContent(
+      'The lobby is open in another tab. Reload this page to sit from here.',
+    )
     expect(quickSit()).toBeDisabled()
+  })
+})
+
+// Each pins a behaviour the mutation review found no test for: the
+// review's mutant is named in the test's comment.
+describe('pinned by mutation (review)', () => {
+  it('Quick sit waits for the lobby, while it asks and once it is away', async () => {
+    // TL14, TL15.
+    await app()
+    expect(quickSit()).toBeDisabled()
+    act(() => lobby().open())
+    expect(quickSit()).toBeEnabled()
+    await userEvent.click(quickSit())
+    expect(quickSit()).toBeDisabled()
+    act(() =>
+      lobby().emit(
+        lobbyFrame({ t: 'error', code: 'tables_full', message: 'Full.' }),
+      ),
+    )
+    expect(quickSit()).toBeEnabled()
+    act(() => lobby().drop(CLOSE_REPLACED, 'replaced'))
+    expect(quickSit()).toBeDisabled()
+  })
+
+  it('the list is asked once per tick after a reconnect, not once per socket so far', async () => {
+    // TL4, TL5: the interval and the visibility listener go with the socket.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    await inLobby()
+    act(() => lobby().drop(1006))
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 600))
+    })
+    act(() => lobby().open())
+    const asks = () => sent(lobby()).filter((m) => m.t === 'tables').length
+    expect(asks()).toBe(1)
+    act(() => vi.advanceTimersByTime(TABLES_EVERY_MS))
+    expect(asks()).toBe(2)
+    act(() => document.dispatchEvent(new Event('visibilitychange')))
+    expect(asks()).toBe(3)
+  })
+
+  it('a fresh Quick sit after a stopped retry starts over', async () => {
+    // LO5: it names no table tried, and says so.
+    await inLobby()
+    await userEvent.click(quickSit())
+    const first = await sentTo(T1)
+    act(() => first.emit(refusal(T1, 'table_full', 'Every seat is taken')))
+    await bounced()
+    act(() =>
+      lobby().emit(
+        lobbyFrame({ t: 'error', code: 'tables_full', message: 'Full.' }),
+      ),
+    )
+    await userEvent.click(quickSit())
+    expect(sent(lobby()).at(-1)).toEqual({ t: 'quick_sit' })
+    expect(line()).toHaveTextContent('Finding you a seat…')
+    const next = await sentTo(T2)
+    act(() => next.emit(refusal(T2, 'table_full', 'Every seat is taken')))
+    await bounced()
+    expect(sent(lobby())[0]).toEqual({ t: 'quick_sit', tried: [T2] })
+  })
+
+  it('arriving already seated sends nothing, then or later', async () => {
+    // LT6.
+    await inLobby()
+    await userEvent.click(quickSit())
+    act(() => lobby().emit(lobbyFrame({ t: 'sit_at', tableId: T1 })))
+    await settle()
+    const socket = tableAt(T1)
+    act(() => socket.open())
+    act(() => socket.emit(six(T1, 1)))
+    act(() => socket.emit(six(T1, null, { seq: 2 })))
+    expect(sent(socket)).toEqual([])
+    expect(sitHere().length).toBeGreaterThan(0)
+    expect(screen.queryByText('Taking a seat…')).toBeNull()
+  })
+
+  it('the table page takes the quick-sit, so coming back to it later sits nobody', async () => {
+    // LT22.
+    await inLobby()
+    await userEvent.click(quickSit())
+    const socket = await sentTo(T1)
+    act(() => socket.emit(six(T1, 1, { seq: 2 })))
+    act(() => {
+      window.location.hash = '#ladder'
+    })
+    await settle()
+    act(() => {
+      window.location.hash = `#play/${T1}`
+    })
+    await settle()
+    const again = tableAt(T1)
+    expect(again).not.toBe(socket)
+    act(() => again.open())
+    act(() => again.emit(six(T1, null)))
+    expect(sent(again)).toEqual([])
+    expect(sitHere().length).toBeGreaterThan(0)
+  })
+
+  it('a lobby refusal brings focus back to Quick sit from nowhere, not from elsewhere', async () => {
+    // TL21, TL22.
+    await inLobby()
+    await userEvent.click(quickSit())
+    const temporary = document.createElement('button')
+    document.body.append(temporary)
+    temporary.focus()
+    temporary.remove()
+    expect(document.activeElement).toBe(document.body)
+    act(() =>
+      lobby().emit(
+        lobbyFrame({ t: 'error', code: 'tables_full', message: 'Full.' }),
+      ),
+    )
+    expect(quickSit()).toHaveFocus()
+
+    await userEvent.click(quickSit())
+    const signOut = screen.getByRole('button', { name: 'Sign out' })
+    signOut.focus()
+    act(() =>
+      lobby().emit(
+        lobbyFrame({ t: 'error', code: 'tables_full', message: 'Full.' }),
+      ),
+    )
+    expect(signOut).toHaveFocus()
+  })
+
+  it('a sit that ends leaves focus where the player put it', async () => {
+    // ST4.
+    await inLobby()
+    await userEvent.click(quickSit())
+    const socket = await sentTo(T1)
+    const outside = document.createElement('button')
+    document.body.append(outside)
+    outside.focus()
+    act(() => socket.emit(six(T1, 1, { seq: 2 })))
+    expect(outside).toHaveFocus()
+    outside.remove()
+  })
+
+  it('a sit that ends with focus nowhere and no seat puts it on the table status', async () => {
+    // ST5.
+    await inLobby()
+    await userEvent.click(quickSit())
+    const lost = await sentTo(T1)
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    act(() => lost.drop(1006))
+    expect(document.querySelector('.six-wait')).toHaveFocus()
+  })
+
+  it('the table moves focus only when a quick-sit ends, not on a welcome or a seat change', async () => {
+    // ST6, ST7.
+    await app(`#play/${T2}`)
+    act(() => tableAt(T2).open())
+    act(() => tableAt(T2).emit(six(T2, null)))
+    expect(document.activeElement).toBe(document.body)
+    act(() => tableAt(T2).emit(six(T2, 1, { seq: 2 })))
+    expect(document.activeElement).toBe(document.body)
+    act(() => tableAt(T2).emit(six(T2, null, { seq: 3 })))
+    expect(document.activeElement).toBe(document.body)
+  })
+
+  it('while the sit is on its way the table says only that', async () => {
+    // ST3.
+    await inLobby()
+    await userEvent.click(quickSit())
+    await sentTo(T1)
+    expect(screen.getByText('Taking a seat…')).toBeVisible()
     expect(
-      within(card()).getByText(/The lobby is open in another tab\./),
-    ).toBeVisible()
+      screen.queryByText('Take a seat to be dealt in from the next hand.'),
+    ).toBeNull()
+  })
+
+  it('ten tables are all shown, with no count of more', async () => {
+    // TL8.
+    await inLobby()
+    const ten = Array.from({ length: 10 }, (_, i) =>
+      row(`${T1.slice(0, -2)}${String(i).padStart(2, '0')}`, 3),
+    )
+    act(() => lobby().emit(lobbyFrame({ t: 'tables', tables: ten })))
+    expect(
+      within(
+        screen.getByRole('table', { name: 'Six-max tables' }),
+      ).getAllByRole('row'),
+    ).toHaveLength(1 + 10)
+    expect(within(card()).queryByText(/more\.$/)).toBeNull()
+  })
+
+  it('leaving the table page with the sit unanswered leaves no timer behind', async () => {
+    // LT25.
+    await inLobby()
+    await userEvent.click(quickSit())
+    act(() => lobby().emit(lobbyFrame({ t: 'sit_at', tableId: T1 })))
+    await settle()
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const socket = tableAt(T1)
+    act(() => socket.open())
+    act(() => socket.emit(six(T1, null)))
+    act(() => {
+      window.location.hash = '#ladder'
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    })
+    expect(() => act(() => vi.advanceTimersByTime(SIT_ANSWER_MS))).not.toThrow()
+    expect(sent(socket)).toEqual([{ t: 'sit' }])
   })
 })

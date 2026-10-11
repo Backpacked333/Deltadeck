@@ -88,16 +88,27 @@ export default function LiveApp() {
   // clarifications from PR-25): the page that leaves sets it, the page that
   // arrives takes it. This component navigates, once the quick-sit has
   // committed: the hashchange render is synchronous, and could mount the
-  // next page before an update queued by the one leaving. The first table
-  // is a new history entry; every later hop replaces it, so Back from any
-  // table returns to the lobby, never to a table that refused.
+  // next page before an update queued by the one leaving. Each table is a
+  // new history entry pushed from the lobby page, and a refusal goes back
+  // to that entry, so Back from any table returns to the lobby, and Back
+  // on the lobby page leaves it (ending the quick-sit with its socket).
   const [quickSit, setQuickSit] = useState<QuickSit | null>(null)
   useEffect(() => {
     if (!quickSit) return
-    const to = quickSit.at ? `#play/${quickSit.at}` : '#lobby'
-    if (quickSit.tried.length) window.location.replace(to)
-    else window.location.hash = to
+    if (quickSit.at !== null) window.location.hash = `#play/${quickSit.at}`
+    // Still on the table that refused: back to the lobby page under it.
+    else if (window.location.hash === `#play/${quickSit.from}`)
+      window.history.back()
+    // The player went elsewhere meanwhile: the quick-sit ends.
+    else setQuickSit(null)
   }, [quickSit])
+  // Carried only between the lobby and a table: anywhere else (Back
+  // pressed as a table refused, say), it is dropped, so a later visit to
+  // the lobby asks nothing.
+  const between = matchId !== null || /^#lobby(\/find)?$/.test(hash)
+  useEffect(() => {
+    if (quickSit && !between) setQuickSit(null)
+  }, [quickSit, between])
 
   if (hash === '#signout')
     return (
