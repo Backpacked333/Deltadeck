@@ -13,6 +13,8 @@
 //   created:<tableId>       { at, by, ready }  a six table quick-sit opened,
 //                           counted against the cap for CREATED_MS (never
 //                           sent to a client)
+//   quicksit:<day>:<userId> { tokens, at }  the account's quick-sit budget
+//                           (the day before's carries over; older go)
 import { DurableObject } from 'cloudflare:workers'
 import {
   CLOSE_ABUSE,
@@ -31,7 +33,9 @@ import {
   MATCH_CREATES_PER_DAY,
   QUICK_SIT_WINDOW_MS,
   QUICK_SITS,
+  spendToken,
 } from './limits'
+import type { Bucket } from './limits'
 import { describeError, logEvent } from './log'
 import { ratingWindow, REPAIR_MS } from './pairing'
 import { isStale, listTables, REGISTRY_STALE_MS, tableRow } from './registry'
@@ -120,14 +124,12 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
   /** A player's current rating; tests replace it. */
   ratingOf: (userId: string) => Promise<number> = (userId) =>
     currentRating(this.env, userId)
-  /** Every player shares this object: each account gets a frame budget. */
+  /**
+   * Every player shares this object: each account gets a frame budget. And
+   * a budget for quick-sits, which cost more than a frame, kept in storage
+   * (spendQuickSit).
+   */
   private budget = new FrameBudget(() => this.clock())
-  /** And a budget for quick-sits, which cost more than a frame. */
-  private quickSits = new FrameBudget(
-    () => this.clock(),
-    QUICK_SITS,
-    QUICK_SIT_WINDOW_MS,
-  )
   /**
    * Each player's latest queue request. A request awaits lookups (the
    * table's liveness, the rating) before it writes its row, and other
@@ -646,7 +648,7 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    */
   private async quickSit(ws: WebSocket, tried: string[]) {
     const { userId, username } = this.who(ws)
-    if (!this.quickSits.spend(userId)) {
+    if (!(await this.spendQuickSit(userId))) {
       logEvent('limit_hit', { userId, code: 429, reason: 'quick_sit' })
       return this.reject(
         ws,
@@ -687,6 +689,42 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
       }
     }
     this.send(ws, answer)
+  }
+
+  /**
+   * Spends one of the account's quick-sits (QUICK_SITS per
+   * QUICK_SIT_WINDOW_MS); false when none is left. The bucket is stored: a
+   * quiet lobby hibernates within seconds, and a bucket kept in memory came
+   * back full. It is keyed by day so that old ones can be pruned, and the
+   * day before's carries over, so midnight refills nothing.
+   */
+  private async spendQuickSit(userId: string) {
+    const t = this.clock()
+    const yesterday = day(t - DAY_MS)
+    const keys = [
+      `quicksit:${day(t)}:${userId}`,
+      `quicksit:${yesterday}:${userId}`,
+    ]
+    const stored = await this.ctx.storage.get<Bucket>(keys)
+    const bucket = spendToken(
+      stored.get(keys[0]) ?? stored.get(keys[1]),
+      t,
+      QUICK_SITS,
+      QUICK_SIT_WINDOW_MS,
+    )
+    if (!bucket) return false
+    await this.ctx.storage.put(keys[0], bucket)
+    // An account's first quick-sit of the day prunes days before yesterday,
+    // at most one storage delete's worth at a time.
+    if (!stored.has(keys[0])) {
+      const old = await this.ctx.storage.list({
+        prefix: 'quicksit:',
+        end: `quicksit:${yesterday}`,
+        limit: 128,
+      })
+      if (old.size) await this.ctx.storage.delete([...old.keys()])
+    }
+    return true
   }
 
   /**

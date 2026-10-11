@@ -1,6 +1,7 @@
 // Tests reuse the same player names, and an unfinished table from an earlier
 // test would (correctly) keep them busy. Each test starts with an empty lobby
-// on the real clock, with every account's frame and quick-sit budgets full.
+// on the real clock, with every account's frame and quick-sit budgets full
+// (the quick-sit budgets are in the lobby's storage).
 import { env, runInDurableObject } from 'cloudflare:test'
 import { beforeEach } from 'vitest'
 import { now } from '../src/clock'
@@ -13,12 +14,10 @@ beforeEach(async () => {
     const inside = lobby as unknown as {
       ctx: DurableObjectState
       budget: FrameBudget
-      quickSits: FrameBudget
     }
     for (const ws of inside.ctx.getWebSockets()) ws.close(1000, 'test reset')
     await inside.ctx.storage.deleteAll()
     inside.budget.clear()
-    inside.quickSits.clear()
     lobby.clock = now
   })
 })

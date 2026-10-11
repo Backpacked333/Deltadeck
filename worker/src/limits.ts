@@ -9,7 +9,11 @@
 //
 // Buckets live in memory, keyed by account. Hibernation drops them, which is
 // harmless: an object only hibernates after it has been quiet, and a quiet
-// bucket is full again within WINDOW_MS.
+// bucket is full again within WINDOW_MS. The lobby's quick-sit buckets are
+// the exception: their window is a minute, longer than the lobby stays
+// awake when quiet, so the lobby keeps those in storage (spendToken).
+
+import { QUICK_SIT_TABLES } from '../../src/shared/protocol'
 
 export { CLOSE_RATE_LIMITED } from '../../src/shared/protocol'
 
@@ -23,12 +27,15 @@ export const ILLEGAL_PER_HAND = 5
  */
 export const MATCH_CREATES_PER_DAY = 30
 /**
- * Quick-sits one account may ask of the lobby: a burst of QUICK_SITS (two
- * whole quick-sits of three tries), refilled at that many per
- * QUICK_SIT_WINDOW_MS. A quick-sit reads the list, may ask tables whether
- * they still exist and may open one, so it costs more than a frame.
+ * Quick-sits one account may ask of the lobby: a burst of QUICK_SITS,
+ * refilled at that many per QUICK_SIT_WINDOW_MS. A whole quick-sit is up to
+ * QUICK_SIT_TABLES + 1 requests (a bare one, then one per table tried), so
+ * the burst is two whole quick-sits. A quick-sit reads the list, may ask
+ * tables whether they still exist and may open one, so it costs more than
+ * a frame. The lobby stores each account's bucket: one kept in memory came
+ * back full whenever the quiet lobby hibernated, within seconds.
  */
-export const QUICK_SITS = 6
+export const QUICK_SITS = 2 * (QUICK_SIT_TABLES + 1)
 export const QUICK_SIT_WINDOW_MS = 60_000
 /**
  * Signed-in requests (socket upgrades, /api/matches, /api/me) per client
@@ -37,10 +44,41 @@ export const QUICK_SIT_WINDOW_MS = 60_000
  */
 export const UPGRADES_PER_IP_PER_MINUTE = 300
 
-type Bucket = { tokens: number; at: number }
+/** Tokens left in an account's bucket, as of `at`. */
+export type Bucket = { tokens: number; at: number }
 
 /** Buckets kept before full (idle) ones are dropped. */
 const MAX_BUCKETS = 1000
+
+/**
+ * `bucket` (full when there is none) refilled up to `t`: it holds `burst`
+ * at most and earns that many per `windowMs`.
+ */
+function refilled(
+  bucket: Bucket | undefined,
+  t: number,
+  burst: number,
+  windowMs: number,
+): Bucket {
+  const from = bucket ?? { tokens: burst, at: t }
+  const earned = (Math.max(0, t - from.at) * burst) / windowMs
+  return { tokens: Math.min(burst, from.tokens + earned), at: t }
+}
+
+/**
+ * Spends one token from `bucket` at `t`: the bucket to keep, or null when
+ * it has none left (keep the old one). Pure, for a bucket the caller
+ * stores itself.
+ */
+export function spendToken(
+  bucket: Bucket | undefined,
+  t: number,
+  burst: number,
+  windowMs: number,
+): Bucket | null {
+  const now = refilled(bucket, t, burst, windowMs)
+  return now.tokens < 1 ? null : { tokens: now.tokens - 1, at: t }
+}
 
 export class FrameBudget {
   private buckets = new Map<string, Bucket>()
@@ -76,11 +114,12 @@ export class FrameBudget {
   }
 
   private refill(userId: string) {
-    const t = this.clock()
-    const bucket = this.buckets.get(userId) ?? { tokens: this.burst, at: t }
-    const earned = (Math.max(0, t - bucket.at) * this.burst) / this.windowMs
-    bucket.tokens = Math.min(this.burst, bucket.tokens + earned)
-    bucket.at = t
+    const bucket = refilled(
+      this.buckets.get(userId),
+      this.clock(),
+      this.burst,
+      this.windowMs,
+    )
     this.buckets.set(userId, bucket)
     return bucket
   }

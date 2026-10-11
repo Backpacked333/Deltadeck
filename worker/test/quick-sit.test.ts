@@ -13,6 +13,7 @@ import {
 } from 'cloudflare:test'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { PlayerAction } from '../../src/engine/types'
+import { QUICK_SIT_TABLES } from '../../src/shared/protocol'
 import type {
   LobbyMsg,
   MatchConfig,
@@ -21,7 +22,11 @@ import type {
 import { CashController } from '../src/controller'
 import type { Roster } from '../src/controller'
 import { IDLE_MS } from '../src/deadlines'
-import { MATCH_CREATES_PER_DAY, QUICK_SITS } from '../src/limits'
+import {
+  MATCH_CREATES_PER_DAY,
+  QUICK_SIT_WINDOW_MS,
+  QUICK_SITS,
+} from '../src/limits'
 import { CREATED_MS, LobbyDO, lobbyStub, SIX_TABLES_MAX } from '../src/lobby'
 import type { TableEntry, TableReport } from '../src/registry'
 import { REPORT_MS } from '../src/registry'
@@ -793,6 +798,87 @@ describe('abuse', () => {
     ).toBe(true)
     expect(await createdIds()).toEqual([])
     for (const f of q.frames) checkLobbyFrame(f)
+  })
+
+  it('the quick-sit budget holds two whole quick-sits of four requests', async () => {
+    // Review B7: a whole quick-sit is a bare request and three retries.
+    expect(QUICK_SITS).toBe(2 * (QUICK_SIT_TABLES + 1))
+    expect(QUICK_SITS).toBe(8)
+    await setLobbyClock(AT)
+    // Three live tables, one player each (a sit after the first is held
+    // by the report throttle), in the order quick-sit offers them.
+    for (const user of ['whole-a', 'whole-b', 'whole-c']) await tableWith(user)
+    const [t1, t2, t3] = await listedIds()
+    const q = await inLobby('whole-q')
+    let mine: string | null = null
+    for (let round = 0; round < 2; round++) {
+      expect(await sentTo(q)).toBe(t1)
+      expect(await sentTo(q, [t1])).toBe(t2)
+      expect(await sentTo(q, [t1, t2])).toBe(t3)
+      // Three tried: it opens one, then is sent back to it.
+      const last = await sentTo(q, [t1, t2, t3])
+      expect([t1, t2, t3]).not.toContain(last)
+      mine ??= last
+      expect(last).toBe(mine)
+    }
+    expect(await quickSit(q, [t1])).toMatchObject({
+      t: 'error',
+      code: 'rate_limited',
+    })
+    for (const f of q.frames) checkLobbyFrame(f)
+  })
+
+  it('a lobby restart does not refill the quick-sit budget', async () => {
+    // Review B7: a quiet lobby hibernates within seconds, and a budget
+    // kept only in memory came back full.
+    await setLobbyClock(AT)
+    const tableId = await listed(3)
+    const q = await inLobby('restart-q')
+    for (let i = 0; i < QUICK_SITS; i++)
+      expect(await quickSit(q)).toMatchObject({ t: 'sit_at', tableId })
+    expect(await quickSit(q)).toMatchObject({ code: 'rate_limited' })
+    await abortAllDurableObjects()
+    await setLobbyClock(AT)
+    const again = await inLobby('restart-q')
+    expect(await quickSit(again)).toMatchObject({
+      t: 'error',
+      code: 'rate_limited',
+    })
+    // The window still refills it.
+    await setLobbyClock(AT + QUICK_SIT_WINDOW_MS / QUICK_SITS)
+    expect(await quickSit(again)).toMatchObject({ t: 'sit_at', tableId })
+  })
+
+  it('the stored quick-sit budget carries over midnight, and older days are pruned', async () => {
+    const midnight = Date.UTC(2030, 2, 18)
+    // A bucket left from three days before.
+    const old = 'quicksit:2030-03-15:prune-x'
+    await runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
+      state.storage.put(old, { tokens: 0, at: midnight - 3 * 86_400_000 }),
+    )
+    await setLobbyClock(midnight - 1)
+    const tableId = await listed(3)
+    const q = await inLobby('midnight-q')
+    for (let i = 0; i < QUICK_SITS; i++)
+      expect(await quickSit(q)).toMatchObject({ t: 'sit_at', tableId })
+    // A new UTC day starts no new budget: yesterday's is read.
+    await setLobbyClock(midnight + 1)
+    expect(await quickSit(q)).toMatchObject({ code: 'rate_limited' })
+    // Another account's first quick-sit of the day prunes days before
+    // yesterday; yesterday's buckets stay.
+    expect(await quickSit(await inLobby('midnight-r'))).toMatchObject({
+      t: 'sit_at',
+    })
+    const keys = await runInDurableObject(
+      lobbyStub(env),
+      async (_: LobbyDO, state) => [
+        ...(await state.storage.list({ prefix: 'quicksit:' })).keys(),
+      ],
+    )
+    expect(keys.sort()).toEqual([
+      'quicksit:2030-03-17:midnight-q',
+      'quicksit:2030-03-18:midnight-r',
+    ])
   })
 
   it('one account cannot open more than one table at a time', async () => {
