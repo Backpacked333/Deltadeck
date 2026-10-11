@@ -1511,6 +1511,44 @@ describe('rebuying at a six table', () => {
     checkFrames([...clients[0].frames, ...clients[2].frames], 'six-casual')
   })
 
+  it('a rebuy between hands survives a restart before the next deal', async () => {
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2], 'rp')
+    await clients[0].next(isState(1))
+    // Hand 1: seat 0 folds its small blind (1,990 to 2,010), then tops up
+    // the 10 chips. The player is told at once; the next deal is 3 s away
+    // and would store the stacks anyway, so only the rebuy's own write
+    // keeps the top-up through a restart in between.
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 1)
+    expect(rosterStack(await rebuy(clients[0]), 0)).toBe(2000)
+
+    await abortAllDurableObjects()
+    await freezeClock(matchId)
+    expect((await seated(matchId)).map((p) => [p.seat, p.stack])).toEqual([
+      [0, 2000],
+      [2, 2010],
+    ])
+    const back = {
+      0: await connect(matchId, 'rp-0'),
+      2: await connect(matchId, 'rp-2'),
+    }
+    await back[0].next((f) => f.t === 'welcome' && f.seat === 0)
+    await back[2].next((f) => f.t === 'welcome' && f.seat === 2)
+    await elapse(matchId, NEXT_HAND_MS)
+    await back[0].next(isState(2))
+    expect((await peek(matchId)).hand!.config.seats).toEqual([
+      { seat: 0, stack: 2000 },
+      { seat: 2, stack: 2010 },
+    ])
+    checkFrames(
+      [...Object.values(clients), ...Object.values(back)].flatMap(
+        (c) => c.frames,
+      ),
+      'six-casual',
+    )
+  })
+
   it('a rebuy at 0 chips deals the player in at the next hand', async () => {
     const matchId = await sixTable()
     const clients = await seatAll(matchId, [0, 2, 4], 'rz')
