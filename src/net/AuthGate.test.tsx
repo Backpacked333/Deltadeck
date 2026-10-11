@@ -192,7 +192,7 @@ describe('AuthGate', () => {
     expect(await screen.findByText('That name is taken.')).toBeInTheDocument()
   })
 
-  it('goes straight to the lobby for a named player and signs out', async () => {
+  it('goes straight to the lobby for a named player, remembers the name and signs out', async () => {
     settings({ email: true })
     const client = fakeClient({
       signedIn: true,
@@ -202,12 +202,10 @@ describe('AuthGate', () => {
     expect(await screen.findByText('Lobby for alice')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Token' }))
     await waitFor(() => expect(document.title).toBe('jwt-for-u1'))
+    expect(localStorage.getItem('qp.username')).toBe('alice')
     await userEvent.click(screen.getByRole('button', { name: 'Leave' }))
-    await waitFor(() =>
-      expect(screen.getByLabelText('Email')).toBeInTheDocument(),
-    )
-    // This browser only: the player's other devices stay signed in.
-    expect(client.auth.signOut).toHaveBeenCalledWith({ scope: 'local' })
+    // The sign-out page signs this browser out and starts afresh.
+    expect(window.location.hash).toBe('#signout')
   })
 
   it('shows an error when the profile row cannot be loaded', async () => {

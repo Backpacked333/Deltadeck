@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { UserRound } from 'lucide-react'
-import { signOutHere, useAuth } from './auth'
+import { useAuth } from './auth'
 import {
   loadPlayer,
   PLACEHOLDER,
@@ -12,6 +12,7 @@ import {
 import type { Player } from './players'
 import type { Identity } from './api'
 import { SignIn } from './SignIn'
+import { rememberHadAccount, rememberUsername } from '../lib/account'
 import { readPendingClaim } from '../lib/landing'
 import { track } from '../lib/track'
 
@@ -70,7 +71,13 @@ function SignedIn({
     if (!userId) return
     let live = true
     loadPlayer(client, userId)
-      .then((p) => live && setPlayer(p ?? 'error'))
+      .then((p) => {
+        if (p) {
+          rememberHadAccount()
+          rememberUsername(p.username)
+        }
+        if (live) setPlayer(p ?? 'error')
+      })
       .catch(() => live && setPlayer('error'))
     return () => {
       live = false
@@ -83,9 +90,9 @@ function SignedIn({
       (await client.auth.getSession()).data.session?.access_token ?? null,
     [client],
   )
+  // The #signout page signs this browser out and starts afresh.
   const signOut = () => {
-    setPlayer(null)
-    void signOutHere(client)
+    window.location.hash = '#signout'
   }
 
   if (auth.status === 'loading' || (userId && player === null))
@@ -120,6 +127,7 @@ function SignedIn({
         player={player}
         onSaved={(saved) => {
           track('username_set')
+          rememberUsername(saved.username)
           setPlayer(saved)
         }}
         onSignOut={signOut}

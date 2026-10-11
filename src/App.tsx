@@ -81,7 +81,9 @@ import {
 import { Tour } from './components/Tour'
 import { CardDefs } from './components/cards/CardArt'
 import type { TourStep } from './components/Tour'
-import { backFromSignIn, signedIn } from './lib/landing'
+import { backFromSignIn } from './lib/landing'
+import { useAccount } from './lib/account'
+import { AccountMenu } from './components/AccountMenu'
 import { track } from './lib/track'
 
 type View =
@@ -135,7 +137,8 @@ function parseRoute(hash: string, search = ''): Route {
     /^#match\/[0-9a-f-]{36}$/.test(hash) ||
     hash === '#welcome/onboard' ||
     hash === '#signup' ||
-    hash === '#signin'
+    hash === '#signin' ||
+    hash === '#signout'
   )
     return { view: 'live', lesson: null }
   if (hash === '#fair-play' || hash === '#terms' || hash === '#method')
@@ -275,8 +278,9 @@ export default function App() {
   const hash = useHash()
   const search = useSearch()
   const { view, lesson } = parseRoute(hash, search)
-  // The landing page's account buttons, or the app's, for a signed-in visitor.
-  const member = view === 'landing' && signedIn()
+  // Signed in or not, as the entry chunk can tell; the online chunk confirms.
+  const account = useAccount()
+  const member = account.signedIn
   const learningSession = useRef<LearningSession | null>(null)
   const [dialog, setDialog] = useState<Dialog>(null)
   const [paused, setPaused] = useState(false)
@@ -876,15 +880,22 @@ export default function App() {
                 className={on ? 'on' : ''}
                 aria-current={on ? 'page' : undefined}
                 data-tour={key === 'progress' ? 'progress' : undefined}
+                aria-label={label}
+                title={label}
                 onClick={() => go(hash)}
               >
-                <Icon size={15} /> <span>{label}</span>
+                <Icon size={15} aria-hidden="true" /> <span>{label}</span>
               </button>
             )
           })}
         </nav>
         <div className="header-tools">
-          {view === 'landing' && !member ? (
+          <span className="pill">
+            <i /> Play money
+          </span>
+          {member ? (
+            <AccountMenu username={account.username} />
+          ) : (
             <span className="header-account">
               <a href="#signin" className="header-signin">
                 Sign in
@@ -897,10 +908,6 @@ export default function App() {
                 <span className="header-join-long">Create free account</span>
                 <span className="header-join-short">Join free</span>
               </a>
-            </span>
-          ) : (
-            <span className="pill">
-              <i /> Play money
             </span>
           )}
           <button

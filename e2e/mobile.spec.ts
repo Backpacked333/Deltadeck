@@ -319,3 +319,37 @@ test('the header is solid over a six-seat table on a phone, and keeps its blur o
   await page.setViewportSize({ width: 681, height: 800 })
   await expect.poll(blur).toBe('blur(14px)')
 })
+
+test('the header fits a 320 px phone, signed out and signed in', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 320, height: 640 })
+  await page.goto('/?motion=off')
+  const header = page.locator('header.header')
+  await expect(header.getByRole('link', { name: 'Sign in' })).toBeVisible()
+  await expect(header.getByRole('link', { name: 'Join free' })).toBeVisible()
+  await expectNoOverflow(page)
+
+  await page.evaluate(() => {
+    localStorage.setItem(
+      'sb-test-auth-token',
+      JSON.stringify({
+        access_token: 'a',
+        refresh_token: 'r',
+        expires_at: 4102444800,
+        user: { id: '11111111-1111-4111-8111-111111111111' },
+      }),
+    )
+    localStorage.setItem('qp.username', 'bartholomew_99')
+  })
+  await page.reload()
+  const account = header.getByRole('button', {
+    name: 'Account: bartholomew_99',
+  })
+  await expect(account).toBeVisible()
+  await expect(header.getByRole('link', { name: 'Sign in' })).toHaveCount(0)
+  await account.click()
+  const signOut = header.getByRole('link', { name: 'Sign out' })
+  await expect(signOut).toBeInViewport()
+  await expectNoOverflow(page)
+})

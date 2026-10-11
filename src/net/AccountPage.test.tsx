@@ -3,7 +3,8 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { rememberAuthReturn } from '../lib/authReturn'
-import { AccountPage, AuthCallback } from './AccountPage'
+import { seedSession, TEST_SESSION_KEY } from '../test/session'
+import { AccountPage, AuthCallback, SignOut } from './AccountPage'
 import type { Online } from './supabase'
 
 /** Auth and the players table: signed in (as a named or new player) or not. */
@@ -137,5 +138,37 @@ describe('AuthCallback', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'opened in a different browser',
     )
+  })
+})
+
+describe('SignOut', () => {
+  it('signs this browser out, forgets the account and starts at the home page', async () => {
+    seedSession({ username: 'alice' })
+    at('/#signout')
+    const replace = vi.fn()
+    vi.stubGlobal('location', { ...window.location, replace })
+    const service = online()
+    const signOut = vi.fn(async () => ({ error: null }))
+    Object.assign(service.client.auth, { signOut })
+    render(<SignOut online={service} />)
+    await waitFor(() => expect(replace).toHaveBeenCalledWith('/'))
+    expect(signOut).toHaveBeenCalledWith({ scope: 'local' })
+    expect(localStorage.getItem(TEST_SESSION_KEY)).toBeNull()
+    expect(localStorage.getItem('qp.username')).toBeNull()
+  })
+
+  it('still signs out when the account service cannot be reached', async () => {
+    seedSession()
+    const replace = vi.fn()
+    vi.stubGlobal('location', { ...window.location, replace })
+    const service = online()
+    Object.assign(service.client.auth, {
+      signOut: vi.fn(async () => {
+        throw new Error('offline')
+      }),
+    })
+    render(<SignOut online={service} />)
+    await waitFor(() => expect(replace).toHaveBeenCalled())
+    expect(localStorage.getItem(TEST_SESSION_KEY)).toBeNull()
   })
 })

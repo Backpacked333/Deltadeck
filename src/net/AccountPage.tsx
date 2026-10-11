@@ -5,12 +5,17 @@
 import { useEffect, useRef, useState } from 'react'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import {
+  forgetAccount,
+  rememberHadAccount,
+  rememberUsername,
+} from '../lib/account'
+import {
   rememberAuthReturn,
   replaceRoute,
   takeAuthReturn,
 } from '../lib/authReturn'
 import { readPendingClaim } from '../lib/landing'
-import { useAuth } from './auth'
+import { signOutHere, useAuth } from './auth'
 import { NotConfigured } from './AuthGate'
 import { loadPlayer, PLACEHOLDER } from './players'
 import { SignIn } from './SignIn'
@@ -34,6 +39,8 @@ async function onward(
   try {
     const player = await loadPlayer(client, userId)
     named = !!player && !PLACEHOLDER.test(player.username)
+    rememberHadAccount()
+    rememberUsername(player?.username ?? null)
   } catch {
     // Unreadable now: onboarding checks again and asks for a name if needed.
     named = false
@@ -165,5 +172,34 @@ function CallbackFailed({
         Try again
       </button>
     </div>
+  )
+}
+
+/** How long sign-out waits for the account service before going anyway. */
+export const SIGN_OUT_WAIT_MS = 3000
+
+/**
+ * #signout: this browser forgets the session (other devices stay signed in),
+ * then reloads at the home page, so nothing of the account stays in memory.
+ */
+export function SignOut({ online }: { online: Online | null }) {
+  const started = useRef(false)
+  useEffect(() => {
+    if (started.current) return
+    started.current = true
+    void (async () => {
+      if (online)
+        await Promise.race([
+          signOutHere(online.client).catch(() => {}),
+          new Promise((resolve) => setTimeout(resolve, SIGN_OUT_WAIT_MS)),
+        ])
+      forgetAccount()
+      window.location.replace(window.location.pathname)
+    })()
+  }, [online])
+  return (
+    <p className="live-status" role="status">
+      Signing you out…
+    </p>
   )
 }
