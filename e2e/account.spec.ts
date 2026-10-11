@@ -58,9 +58,28 @@ async function fakeAuth(page: Page) {
 test.beforeEach(async ({ page }) => {
   await fakeAccountService(page, {
     tables: {
-      players: [{ user_id: USER.id, username: 'carol' }],
+      players: [
+        {
+          user_id: USER.id,
+          username: 'carol',
+          country: null,
+          bio: '',
+          school: 'uni.edu',
+          created_at: '2026-09-01T00:00:00Z',
+        },
+      ],
       practice_hands: [],
       learning_state: [],
+      ratings: [],
+      rating_history: [],
+      challenge_scores: [
+        {
+          user_id: USER.id,
+          hand: 'overpair',
+          accuracy: 87,
+          played_at: '2026-10-02T00:00:00Z',
+        },
+      ],
     },
   })
 })
@@ -140,4 +159,33 @@ test('signing out from the menu goes home and locks practice again', async ({
   await expect(
     page.getByRole('heading', { level: 1, name: 'Welcome back' }),
   ).toBeVisible()
+})
+
+test("the account menu opens Your profile, with the account's history", async ({
+  page,
+}) => {
+  await fakeAuth(page)
+  await page.goto('/#signin')
+  await page.getByLabel('Email').fill('carol@uni.edu')
+  await page.getByLabel('Password').fill(PASSWORD)
+  await page
+    .locator('form')
+    .getByRole('button', { name: 'Sign in', exact: true })
+    .click()
+  await page.getByRole('button', { name: /new to poker/ }).click()
+  await page.getByRole('button', { name: 'Skip tour' }).click()
+
+  await page.getByRole('button', { name: 'Account: carol' }).click()
+  await page.getByRole('link', { name: 'Your profile' }).click()
+  await expect(page).toHaveURL(/#me$/)
+  await expect(
+    page.getByRole('heading', { level: 1, name: 'carol' }),
+  ).toBeVisible()
+  await expect(page.getByText(/Playing since .* · uni\.edu/)).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Online' })).toContainText(
+    'No rated matches yet',
+  )
+  await expect(
+    page.getByRole('region', { name: 'Challenge scores' }),
+  ).toContainText('Overpair under pressure')
 })
