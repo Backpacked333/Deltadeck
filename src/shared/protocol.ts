@@ -86,6 +86,12 @@ export type ClientMsg =
    * hand ends; otherwise it frees at once.
    */
   | { t: 'stand' }
+  /**
+   * At a six table: top up to 100 bb from the next hand. Bare on purpose:
+   * the server computes the amount from the stack, so a frame can never
+   * choose it (ADR amendment 2026-10-10, "Stacks and rebuy").
+   */
+  | { t: 'rebuy' }
 
 /** A seated six-casual player: dealt in, or sitting out (P2-04). */
 export type SeatStatus = 'playing' | 'sitting_out'
@@ -409,6 +415,7 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case 'dequeue':
     case 'rematch':
     case 'stand':
+    case 'rebuy':
       return onlyKeys(v, ['t']) ? { t: v.t } : null
     case 'sit':
       if (!onlyKeys(v, ['t', 'seat'])) return null
