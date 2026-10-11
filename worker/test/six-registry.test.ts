@@ -27,8 +27,8 @@ import {
   reportOf,
   REPORT_MS,
 } from '../src/registry'
-import type { TableEntry, TableReport } from '../src/registry'
-import { NEXT_HAND_MS, TableDO } from '../src/table'
+import type { Listing, TableEntry, TableReport } from '../src/registry'
+import { NEXT_HAND_MS, SIT_OUT_MS, TableDO } from '../src/table'
 import { checkLobbyFrame } from './frames'
 import {
   connect,
@@ -148,6 +148,12 @@ const clockOf = (matchId: string) =>
     instance.clock(),
   ) as Promise<number>
 
+/** What the table keeps for its entry, as stored. */
+const listingOf = (matchId: string) =>
+  runInDurableObject(stub(matchId), (_: TableDO, state) =>
+    state.storage.get<Listing>('listing'),
+  )
+
 /** The lobby's stored entry for a table, if any. */
 const entryOf = (tableId: string) =>
   runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
@@ -180,6 +186,21 @@ async function dealNext(matchId: string, client: Client, handNo: number) {
 async function standUp(client: Client) {
   const from = client.frames.length
   client.send({ t: 'stand' })
+  return client.next((f) => f.t === 'welcome', from)
+}
+
+/** Who holds a seat at the table now, as it stores them. */
+async function seated(matchId: string) {
+  const { match } = await peek(matchId)
+  return (
+    match as unknown as { players: { seat: number; standing?: boolean }[] }
+  ).players
+}
+
+/** `client` sits out; resolves with the welcome that answers it. */
+async function sitOut(client: Client) {
+  const from = client.frames.length
+  client.send({ t: 'sit_out' })
   return client.next((f) => f.t === 'welcome', from)
 }
 
@@ -311,6 +332,103 @@ describe('reporting to the lobby', () => {
       'updatedAt',
     ])
     expect(JSON.stringify(entry)).not.toMatch(/anon/)
+  })
+
+  it('a stand between hands reports the seat it frees, with no change held', async () => {
+    const sent = watchReports()
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, 'free-a', 0)
+    const b = await sitDown(matchId, 'free-b', 2)
+    await a.next(isState(1))
+    // 30 s on, hand 1 ends with a report due: it goes at once, and leaves
+    // nothing held.
+    await setClock(matchId, (await clockOf(matchId)) + REPORT_MS)
+    await playOut(matchId, { 0: a, 2: b }, fold)
+    await settled(matchId)
+    expect(sent(matchId)).toEqual([counts(1, null, 0), counts(2, 20, 2)])
+    expect(await listingOf(matchId)).toMatchObject({ pending: false })
+    // 30 s more, before any alarm: A stands, and the stand itself reports.
+    await setClock(matchId, (await clockOf(matchId)) + REPORT_MS)
+    expect(await standUp(a)).toMatchObject({ seat: null })
+    await settled(matchId)
+    expect(sent(matchId).at(-1)).toEqual(counts(1, 20, 2))
+  })
+
+  it('a removal by the sitout alarm reports the seat it frees', async () => {
+    const sent = watchReports()
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, 'gone-a', 0)
+    const b = await sitDown(matchId, 'gone-b', 2)
+    await a.next(isState(1))
+    await playOut(matchId, { 0: a, 2: b }, fold)
+    // B sits out between hands; the next deal finds one player, and waits.
+    await sitOut(b)
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).match.status).toBe('waiting')
+    // The first alarm after the window sends what was held, and leaves
+    // nothing held.
+    await elapse(matchId, REPORT_MS)
+    await settled(matchId)
+    expect(sent(matchId).at(-1)).toEqual(counts(2, 20, 2))
+    expect(await listingOf(matchId)).toMatchObject({ pending: false })
+    // Five minutes after B sat out, the sitout alarm stands B up: a seat
+    // freed, reported by the removal itself.
+    await elapse(matchId, SIT_OUT_MS - NEXT_HAND_MS - REPORT_MS)
+    expect((await seated(matchId)).map((p) => p.seat)).toEqual([0])
+    await settled(matchId)
+    expect(sent(matchId).at(-1)).toEqual(counts(1, 20, 2))
+  })
+
+  it('seated counts a player who stood during a hand, until it ends', async () => {
+    const sent = watchReports()
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, 'mid-a', 0)
+    const b = await sitDown(matchId, 'mid-b', 2)
+    await a.next(isState(1))
+    const c = await sitDown(matchId, 'mid-c', 4)
+    await playOut(matchId, { 0: a, 2: b }, fold)
+    await dealNext(matchId, a, 2)
+    // C, dealt into hand 2, stands during it: the seat is C's until the
+    // hand ends.
+    expect(await standUp(c)).toMatchObject({ seat: 4 })
+    expect((await seated(matchId)).map((p) => [p.seat, !!p.standing])).toEqual([
+      [0, false],
+      [2, false],
+      [4, true],
+    ])
+    // After the window D sits, which reports: four seats are held.
+    await setClock(matchId, (await clockOf(matchId)) + REPORT_MS)
+    await sitDown(matchId, 'mid-d', 5)
+    await settled(matchId)
+    expect(sent(matchId).at(-1)).toEqual(counts(4, 20, 2))
+  })
+
+  it('a hand over at the deal counts in the figures', async () => {
+    const sent = watchReports()
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, 'deal-a', 0)
+    const b = await sitDown(matchId, 'deal-b', 2)
+    await a.next(isState(1))
+    expect(potOf(await playOut(matchId, { 0: a, 2: b }, passive))).toBe(40)
+    // Seat 2 keeps 10 chips: hand 2 makes it the small blind, all in as it
+    // posts, and the hand is over at the deal, nobody acting (pot 20).
+    await runInDurableObject(stub(matchId), (instance: TableDO) => {
+      const { hand } = instance as unknown as { hand: HandState }
+      const zero = hand.players.find((p) => p.seat === 0)!
+      const two = hand.players.find((p) => p.seat === 2)!
+      zero.stack += two.stack - 10
+      two.stack = 10
+    })
+    await elapse(matchId, NEXT_HAND_MS)
+    const two = (await peek(matchId)).hand!
+    expect(two.config.handNo).toBe(2)
+    expect(two.actions).toEqual([])
+    expect(two.street).toBe('showdown')
+    expect(potOf(two)).toBe(20)
+    // The next report averages both hands: (40 + 20) / 2.
+    await elapse(matchId, REPORT_MS)
+    await settled(matchId)
+    expect(sent(matchId).at(-1)).toEqual(counts(2, 30, 2))
   })
 
   it('a heads-up table never reports, nor leaves a list it was never on', async () => {
