@@ -1,6 +1,42 @@
 # Handoff
 
-## Current handoff: SDE → SDE (casual 6-max, PR-24 onward)
+## Current handoff: SDE → SDE (casual 6-max, PR-25 onward)
+
+Date: 2026-10-11 · Status: **#34 to #65 merged and verified live (PR-01 to PR-24, PR-20 optional and not built). Quick-sit opened the gate through the lobby socket; the lobby page shows no list or Quick sit button until PR-25.**
+
+- **Read first:**
+  - the plan: `.10x/decisions/engineering-manager/six-max-casual.md`, above all "Left for PR-25";
+  - the ADR amendment in `.10x/decisions/architect/multiplayer-platform.md`, with its clarifications from PR-12 to PR-24;
+  - `.10x/status.md` §Casual 6-max.
+- **Order:**
+  1. PR-25 `TableList` and the client's retry loop: navigating to `#play/<id>` unmounts the lobby page and closes its socket, so the retry needs a lobby connection that outlives the navigation.
+  2. PR-26 smoke evidence.
+- **Constraints:**
+  - heads-up stays byte-identical;
+  - every new message or frame field gets a redaction/allowlist test (`FRAME_KEYS`, `LOBBY_FRAME_KEYS`);
+  - the entry chunk stays under 150 kB (144.7 kB on main after the sign-in PRs #60 to #63);
+  - the registry holds counts only, and the list goes only to the socket that asks.
+- **Recorded decisions to keep:**
+  - removal sets no sit cooldown;
+  - "active" means connected;
+  - flapping is accepted for play money;
+  - a player who sits in at a waiting table keeps the seat;
+  - a grace ends by the clock;
+  - a payout lands only on the plate of the winner it left for;
+  - the registry's removal goes out after `deleteAll`;
+  - a refused report is held in storage;
+  - rosters of listed tables are public to signed-in accounts (ADR D1);
+  - a quick-sit ends a heads-up search, even when its budget refuses it, and a heads-up search ends a pending quick-sit (Devin, #65).
+- **Open:**
+  - Devin's security threads on #44 and #46, fixed but left for the owner to resolve;
+  - the declined #52 finding, for the user to confirm;
+  - the meaning of "players/hour" (PM).
+
+---
+
+## Handoff history
+
+### 2026-10-11 — SDE → SDE (casual 6-max, PR-24 onward)
 
 Date: 2026-10-11 · Status: **#34 to #58 merged and verified live (PR-01 to PR-23, PR-20 optional and not built). Six tables are still unreachable from outside; PR-24 and PR-25 open them.**
 
@@ -31,10 +67,6 @@ Date: 2026-10-11 · Status: **#34 to #58 merged and verified live (PR-01 to PR-2
   - Devin's security threads on #44 and #46, fixed but left for the owner to resolve;
   - the declined #52 finding, for the user to confirm;
   - the meaning of "players/hour" (PM).
-
----
-
-## Handoff history
 
 ### 2026-10-11 — SDE → SDE (casual 6-max, PR-21 onward)
 
