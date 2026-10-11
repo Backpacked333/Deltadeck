@@ -280,6 +280,34 @@ describe('quick-sit picks a table', () => {
     expect(q.frames.some((f) => f.t === 'matched')).toBe(false)
   })
 
+  it('a quick-sit refused by its budget still ends the heads-up search', async () => {
+    // Devin's review: the client stops looking when it asks to quick-sit,
+    // so the lobby must too, even when it has no quick-sit left to give.
+    await setLobbyClock(AT)
+    const tableId = await listed(3)
+    const q = await inLobby('spent-q')
+    for (let i = 0; i < QUICK_SITS; i++)
+      expect(await quickSit(q)).toMatchObject({ t: 'sit_at', tableId })
+    q.send({ t: 'queue', kind: 'hu-casual' })
+    await q.next((f) => f.t === 'queued')
+    expect(await quickSit(q)).toMatchObject({
+      t: 'error',
+      code: 'rate_limited',
+    })
+    expect(
+      await runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
+        state.storage.get('queue:spent-q'),
+      ),
+    ).toBeUndefined()
+    // Another player looking for heads-up is not paired with it.
+    const other = await inLobby('spent-o')
+    other.send({ t: 'queue', kind: 'hu-casual' })
+    await other.next((f) => f.t === 'queued')
+    await new Promise((r) => setTimeout(r, 50))
+    expect(other.frames.some((f) => f.t === 'matched')).toBe(false)
+    expect(q.frames.some((f) => f.t === 'matched')).toBe(false)
+  })
+
   it('a claim whose table is gone is not resumed, and is cleared', async () => {
     // The claim is checked with its table, not taken on trust: a table
     // that ended (its release lost) holds nobody.

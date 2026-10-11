@@ -648,6 +648,14 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    */
   private async quickSit(ws: WebSocket, tried: string[]) {
     const { userId, username } = this.who(ws)
+    // One search at a time: a heads-up search left running could pair the
+    // account while it sits down at a six table. It ends even when the
+    // budget refuses the quick-sit, as the client has stopped looking.
+    this.requests.delete(userId)
+    if (await this.ctx.storage.get(`queue:${userId}`)) {
+      await this.ctx.storage.delete(`queue:${userId}`)
+      await this.presence()
+    }
     if (!(await this.spendQuickSit(userId))) {
       logEvent('limit_hit', { userId, code: 429, reason: 'quick_sit' })
       return this.reject(
@@ -655,13 +663,6 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
         'rate_limited',
         'Too many quick sits. Try again in a moment.',
       )
-    }
-    // One search at a time: a heads-up search left running could pair the
-    // account while it sits down at a six table.
-    this.requests.delete(userId)
-    if (await this.ctx.storage.get(`queue:${userId}`)) {
-      await this.ctx.storage.delete(`queue:${userId}`)
-      await this.presence()
     }
     let answer: Answer
     try {
