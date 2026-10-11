@@ -32,7 +32,7 @@ export function LiveTable({
   matchId: string
   identity: Identity
 }) {
-  const { state, act, rematch, sit, rebuy, stand } = useTable(
+  const { state, act, rematch, sit, rebuy, stand, sitOut, sitIn } = useTable(
     matchId,
     identity.getToken,
   )
@@ -92,6 +92,8 @@ export function LiveTable({
         sit={sit}
         rebuy={rebuy}
         stand={stand}
+        sitOut={sitOut}
+        sitIn={sitIn}
       />
     )
   if (!table || seat === null)

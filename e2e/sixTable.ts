@@ -38,7 +38,9 @@ const SEATS = [
  * Rebuy and stand are answered as the table does (PR-14): a rebuy out of
  * the hand below 100 bb tops up to 2,000; a stand frees the seat at once
  * between hands, or folds the viewer and frees it as the hand ends. Once
- * the hand is over the roster carries the stacks it left.
+ * the hand is over the roster carries the stacks it left. Sit out and sit
+ * in are answered as the table does (PR-16): the viewer's roster status
+ * changes, and a sit_in with no chips is refused.
  */
 export async function fakeSixTable(
   page: Page,
@@ -58,9 +60,10 @@ export async function fakeSixTable(
   /** The roster's stacks: as of the deal, then as the hand left them. */
   const stacks = SEATS.map(({ stack }) => stack)
   let settled = false
-  /** The viewer has a seat; they stood during the hand. */
+  /** The viewer has a seat; they stood during the hand; they sit out. */
   let seated = true
   let standing = false
+  let status: 'playing' | 'sitting_out' = 'playing'
   const table = (): MatchInfo => ({
     kind: 'six-casual',
     status: 'playing',
@@ -74,7 +77,7 @@ export async function fakeSixTable(
               connected: true,
               consecutiveTimeouts: 0,
               stack: stacks[seat],
-              status: 'playing' as const,
+              status: seat === 0 ? status : ('playing' as const),
             },
           ],
     ),
@@ -157,6 +160,13 @@ export async function fakeSixTable(
         if (stacks[0] >= 2000)
           return error('not_below', 'You already have 100 big blinds')
         stacks[0] = 2000
+        return send(frame('welcome'))
+      }
+      if (msg.t === 'sit_out' || msg.t === 'sit_in') {
+        if (!seated) return error('not_seated', 'You have no seat here')
+        if (msg.t === 'sit_in' && status === 'sitting_out' && !stacks[0])
+          return error('no_chips', 'Rebuy to be dealt in')
+        status = msg.t === 'sit_out' ? 'sitting_out' : 'playing'
         return send(frame('welcome'))
       }
       if (msg.t === 'stand') {

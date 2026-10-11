@@ -229,12 +229,29 @@ test('keyboard loop at a six-seat table', async ({ browser }) => {
   await expect(rebuy).toHaveCount(0)
   await expect(own).toContainText('2,000')
   await expect(own).toBeFocused()
+  // Sit out, by keyboard: the seat stays, its plate and the seat controls'
+  // live line say so, and Sit in takes the button's place.
+  const seatLine = page
+    .getByRole('group', { name: 'Your seat' })
+    .getByRole('status')
+  await page.getByRole('button', { name: 'Sit out' }).focus()
+  await page.keyboard.press('Enter')
+  await expect(seatLine).toHaveText('Sitting out: sit in to be dealt in.')
+  await expect(own).toContainText('Sitting out')
+  await expect(page.getByRole('button', { name: 'Sit out' })).toHaveCount(0)
+  // Sit in, by keyboard: back from the next hand.
+  await page.getByRole('button', { name: 'Sit in' }).focus()
+  await page.keyboard.press('Enter')
+  await expect(seatLine).toHaveText('Back in from the next hand.')
+  await expect(own).not.toContainText('Sitting out')
   // Stand up between hands frees the seat at once.
   await page.getByRole('button', { name: 'Stand up' }).focus()
   await page.keyboard.press('Enter')
   await expect(page.getByText('Pick an empty seat to play.')).toBeVisible()
   expect(table.received.filter((m) => m.t !== 'act')).toEqual([
     { t: 'rebuy' },
+    { t: 'sit_out' },
+    { t: 'sit_in' },
     { t: 'stand' },
   ])
   await me.close()

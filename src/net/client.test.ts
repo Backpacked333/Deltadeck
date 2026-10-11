@@ -147,6 +147,27 @@ describe('TableConnection', () => {
     ])
   })
 
+  it('sends a bare sit_out and sit_in from a seat at a six table only', async () => {
+    const { connection } = connect()
+    await flush()
+    const socket = FakeSocket.last()
+    expect(connection.sitOut()).toBe(false)
+    expect(connection.sitIn()).toBe(false)
+    socket.open()
+    socket.emit(sixFrame('welcome', 1, null, null, null))
+    expect(connection.sitOut()).toBe(false)
+    expect(connection.sitIn()).toBe(false)
+    expect(socket.sent).toEqual([])
+    // Seated: the type alone, for the socket account's own seat.
+    socket.emit(sixFrame('welcome', 2, 2, null, null))
+    expect(connection.sitOut()).toBe(true)
+    expect(connection.sitIn()).toBe(true)
+    expect(socket.sent.map((m) => JSON.parse(m))).toEqual([
+      { t: 'sit_out' },
+      { t: 'sit_in' },
+    ])
+  })
+
   it('reconnects with backoff and a fresh token, then gives up', async () => {
     vi.useFakeTimers()
     const { connection, getToken } = connect('jwt', 2)

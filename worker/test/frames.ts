@@ -74,10 +74,12 @@ export const ERROR_CODES = allOf<ErrorCode>()([
   // A rebuy refused: dealt into the hand being played, or not below 100 bb.
   'in_hand',
   'not_below',
+  // A sit_in refused: no chips to be dealt in with (rebuy first).
+  'no_chips',
 ])
 /**
- * Codes only a six table sends, answering sit, stand and rebuy, which a
- * heads-up table refuses as `illegal`. checkFrame refuses them in a
+ * Codes only a six table sends, answering sit, stand, rebuy and sit_in,
+ * which a heads-up table refuses as `illegal`. checkFrame refuses them in a
  * heads-up flow, so heads-up error frames keep the codes they had.
  */
 const SIX_ERROR_CODES: ErrorCode[] = [
@@ -87,6 +89,7 @@ const SIX_ERROR_CODES: ErrorCode[] = [
   'not_seated',
   'in_hand',
   'not_below',
+  'no_chips',
 ]
 
 // Exactly the keys each frame type may carry (optional ones marked '?').
@@ -475,4 +478,10 @@ export const FLOW_TYPES = {
    * and granted between hands, seen by a socket without a seat too.
    */
   rebuy: ['welcome', 'state', 'hand_start', 'hand_end', 'reveal', 'error'],
+  /**
+   * six-sitout.test.ts: sit_out and sit_in refused without a seat, a
+   * sit_out during a hand, a bust and its no_chips sit_in, and a sit_in
+   * that deals at a waiting table, seen by a socket without a seat too.
+   */
+  sitOut: ['welcome', 'state', 'hand_start', 'hand_end', 'reveal', 'error'],
 } satisfies Record<string, ServerMsg['t'][]>
