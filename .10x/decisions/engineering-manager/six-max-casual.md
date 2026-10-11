@@ -503,7 +503,6 @@ The plan gave `rebuy` (here) and `stand` (PR-12) server messages but no control 
   - Decisions where the ADR was silent are in the ADR's "Clarifications from PR-17".
 - **Left by PR-17:**
   - Every item on the exposure gate is now built: PR-12 landed in #46, PR-14 is in this branch's base, and PR-16 and PR-17 are on `six-w16`. The gate can lift once this branch is reviewed and merged.
-  - After a restart, a waiting table finds a stranded seat at its next alarm, which can be the idle check 10 minutes on. If that matters in production, arm a one-off check on the first event after a restart instead.
 
 ### Phase C: UI (spike first; PR-18 can start after PR-09; PR-19 needs PR-11)
 

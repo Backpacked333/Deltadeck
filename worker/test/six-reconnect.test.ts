@@ -31,6 +31,7 @@ import {
   move,
   peek,
   setClock,
+  storageOf,
   stub,
 } from './helpers'
 import type { Client } from './helpers'
@@ -731,18 +732,27 @@ describe('a restart while a player is away', () => {
     await abortAllDurableObjects()
     await freezeClock(matchId, t0 + 10_000)
     expect(await graces(matchId)).toEqual([])
-    // Seat 0 comes back and folds hand 1; seat 2 never does. The next
-    // deal finds one player to deal in and waits, and the alarm that ran
-    // it gives seat 2 its grace.
+    // Nobody is back when seat 0's turn runs out at 50 s (a fold, ending
+    // hand 1): the alarm that plays it gives both seats their grace.
+    await at(matchId, t0 + 50_000)
+    expect((await peek(matchId)).hand!.street).toBe('showdown')
+    const dueAt = t0 + 50_000 + GRACE_MS
+    expect(await graces(matchId)).toEqual([
+      { kind: 'grace', at: dueAt, seat: 0, userId: 'ru-0' },
+      { kind: 'grace', at: dueAt, seat: 2, userId: 'ru-2' },
+    ])
+    // Seat 0 is back 5 s later, which ends its own grace; seat 2 never
+    // is, and keeps the one the alarm gave it. The next deal finds one
+    // player to deal in and waits, its alarm set for the grace's end
+    // rather than the idle check ten minutes on.
+    await setClock(matchId, t0 + 55_000)
     const zero = await comeBack(matchId, 'ru-0')
-    await move(matchId, { 0: zero.client }, fold)
-    await zero.client.next((f) => f.t === 'reveal' && f.handNo === 1)
-    await elapse(matchId, NEXT_HAND_MS)
-    expect((await peek(matchId)).match.status).toBe('waiting')
-    const dueAt = t0 + 10_000 + NEXT_HAND_MS + GRACE_MS
     expect(await graces(matchId)).toEqual([
       { kind: 'grace', at: dueAt, seat: 2, userId: 'ru-2' },
     ])
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).match.status).toBe('waiting')
+    expect((await storageOf(matchId)).alarm).toBe(dueAt)
     await at(matchId, dueAt - 1)
     expect((await storedSeat(matchId, 2)).status).toBe('playing')
     await at(matchId, dueAt)
@@ -750,6 +760,37 @@ describe('a restart while a player is away', () => {
     // Five minutes later the seat frees (PR-16's removal).
     await at(matchId, dueAt + 5 * 60_000)
     expect((await seated(matchId)).map((p) => p.seat)).toEqual([0])
+    checkFrames(zero.client.frames, 'six-casual')
+  }, 30_000)
+
+  it('the first player back after a restart starts the grace of everyone still away', async () => {
+    // Without waiting for an alarm, which at a waiting table can be the
+    // idle check ten minutes on: a join looks for absent players too.
+    const matchId = await sixTable()
+    const clients: Record<SeatId, Client> = {
+      0: await sitDown(matchId, 'rj-0', 0),
+      2: await sitDown(matchId, 'rj-2', 2),
+    }
+    await clients[0].next(isState(1))
+    const t0 = await clockOf(matchId)
+    await abortAllDurableObjects()
+    await freezeClock(matchId, t0 + 10_000)
+    // Seat 0 is back before any alarm; seat 2 never is. Its grace starts
+    // with seat 0's join, and is stored at once.
+    const zero = await comeBack(matchId, 'rj-0')
+    const dueAt = t0 + 10_000 + GRACE_MS
+    const grace = { kind: 'grace', at: dueAt, seat: 2, userId: 'rj-2' }
+    expect(await graces(matchId)).toEqual([grace])
+    expect(await storedDeadlines(matchId)).toContainEqual(grace)
+    // Seat 0 folds hand 1; the next deal waits, with the alarm set for the
+    // grace's end, and then seat 2 sits out.
+    await move(matchId, { 0: zero.client }, fold)
+    await zero.client.next((f) => f.t === 'reveal' && f.handNo === 1)
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).match.status).toBe('waiting')
+    expect((await storageOf(matchId)).alarm).toBe(dueAt)
+    await at(matchId, dueAt)
+    expect((await storedSeat(matchId, 2)).status).toBe('sitting_out')
     checkFrames(zero.client.frames, 'six-casual')
   }, 30_000)
 })

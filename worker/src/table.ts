@@ -543,6 +543,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const [client, server] = [pair[0], pair[1]]
     this.ctx.acceptWebSocket(server, [userId])
     server.serializeAttachment({ userId, username } satisfies Attachment)
+    // Six-casual: after a restart the first socket back starts the grace
+    // of every player still away (the restart closed their sockets unseen),
+    // rather than leaving it to the next alarm, which at a waiting table
+    // can be the idle check. Run once this socket counts as connected.
+    if (six && this.graceForAbsent()) await this.armAlarm()
     this.send(server, this.frame('welcome', userId))
     this.sendEnded(server)
     this.sendMatchEnd(server)
@@ -1377,11 +1382,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
    * (other than `exclude`, which is closing) and no grace running yet
    * gets the 60 s grace from now (ADR "Reconnect"). A player sitting out
    * needs none: being back changes nothing for them until sit_in. Run as
-   * a socket closes, and as the table's alarm runs, since a restart drops
-   * every socket without the restarted object hearing a close; then the
-   * grace starts at the first alarm after it (a turn, the next deal, or
-   * at the latest the idle check). True when it started any; the caller
-   * stores the deadlines (armAlarm).
+   * a socket closes, and also as a socket joins and as the table's alarm
+   * runs, since a restart drops every socket without the restarted object
+   * hearing a close; then the grace starts at the first join or alarm
+   * after it. True when it started any; the caller stores the deadlines
+   * (armAlarm).
    */
   private graceForAbsent(exclude?: WebSocket) {
     const match = this.match
