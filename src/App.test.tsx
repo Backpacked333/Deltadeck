@@ -376,7 +376,7 @@ describe('the header', () => {
     expect(within(header).getByText('alice')).toBeVisible()
     expect(
       within(header).getByRole('link', { name: 'Your profile' }),
-    ).toHaveAttribute('href', '#u/alice')
+    ).toHaveAttribute('href', '#me')
     expect(
       within(header).getByRole('link', { name: 'Play online' }),
     ).toHaveAttribute('href', '#lobby')
@@ -406,7 +406,13 @@ describe('the account gate', () => {
 
   it('sends a signed-out visitor from practice, lessons or progress to sign up, and remembers the way back', async () => {
     signedOut()
-    for (const hash of ['#table', '#progress', '#learn/path', '#learn/quick']) {
+    for (const hash of [
+      '#table',
+      '#progress',
+      '#me',
+      '#learn/path',
+      '#learn/quick',
+    ]) {
       window.history.replaceState(null, '', `/?seed=3${hash}`)
       const length = window.history.length
       const { unmount } = render(<App />)
