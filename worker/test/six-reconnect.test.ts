@@ -17,6 +17,7 @@ import { dealSlots } from '../../src/engine/deck'
 import { legalActions } from '../../src/engine/hand'
 import type { HandState, PlayerAction, SeatId } from '../../src/engine/types'
 import type { ClientMsg, ServerMsg } from '../../src/shared/protocol'
+import { IDLE_MS } from '../src/deadlines'
 import { lobbyStub } from '../src/lobby'
 import type { LobbyDO } from '../src/lobby'
 import { GRACE_MS } from '../src/rated'
@@ -489,6 +490,9 @@ describe('coming back to a six table', () => {
     await at(matchId, dealtAt + 110_000 - 1)
     expect((await peek(matchId)).hand!.actions).toHaveLength(7)
     await at(matchId, dealtAt + 110_000)
+    // Sitting out and still gone, it gets no new grace from the alarms
+    // since: being back would change nothing for it until sit_in.
+    expect(await graces(matchId)).toEqual([])
     // Seat 0 bets, seat 2 folds, and seat 4 times out facing it: a fold,
     // its fourth miss. A six table never forfeits anyone.
     await move(matchId, clients, bet)
@@ -565,6 +569,71 @@ describe('coming back to a six table', () => {
       'six-casual',
     )
   }, 30_000)
+
+  it('reconnecting within the grace keeps the decisions missed during it', async () => {
+    // Only the player's own move or sit_in resets missed decisions (ADR
+    // clarification from PR-17); coming back does not.
+    const { matchId, clients, dealtAt } = await handTwo('rm')
+    // Seat 4, the big blind, drops as hand 2 starts; seats 0 and 2 call,
+    // and its option runs out at 50 s: a check, one missed decision.
+    await leave(matchId, clients[4], 'rm-4')
+    await move(matchId, clients, call)
+    await move(matchId, clients, call)
+    await at(matchId, dealtAt + 50_000)
+    expect(await storedSeat(matchId, 4)).toMatchObject({
+      status: 'playing',
+      timeouts: 1,
+    })
+    // Back at 55 s, within the grace: still one missed decision.
+    await setClock(matchId, dealtAt + 55_000)
+    const { client: back, welcome } = await comeBack(matchId, 'rm-4')
+    expect(rosterOf(welcome, 4)).toMatchObject({
+      connected: true,
+      status: 'playing',
+      consecutiveTimeouts: 1,
+    })
+    expect(await graces(matchId)).toEqual([])
+    // On the flop seat 2 checks; seat 4, here but idle, misses again (20 s,
+    // its bank spent), the second in a row: it sits out from the next hand.
+    const seats = { 0: clients[0], 2: clients[2], 4: back }
+    await move(matchId, seats, check)
+    expect(clockAt(back, 2, 4)).toEqual({
+      toAct: 4,
+      deadline: dealtAt + 75_000,
+      bankMs: 0,
+    })
+    await at(matchId, dealtAt + 75_000)
+    expect(await storedSeat(matchId, 4)).toMatchObject({
+      status: 'sitting_out',
+      timeouts: 2,
+    })
+    checkFrames(
+      [back, ...Object.values(clients)].flatMap((c) => c.frames),
+      'six-casual',
+    )
+  }, 30_000)
+
+  it('a grace begun at a waiting table arms the alarm for its end', async () => {
+    // One player at a table that cannot deal: nothing else is due for
+    // minutes, so the alarm must be set for the grace's end as it starts,
+    // or the grace would run out at the idle check instead.
+    const matchId = await sixTable()
+    const client = await sitDown(matchId, 'rg-0', 0)
+    expect((await peek(matchId)).match.status).toBe('waiting')
+    // The idle check /init armed (on the real clock, before the test froze
+    // it) runs, and keeps the table for its seated player until IDLE_MS
+    // from now on the table's clock.
+    await elapse(matchId, 0)
+    const t = await clockOf(matchId)
+    expect((await storageOf(matchId)).alarm).toBe(t + IDLE_MS)
+    await leave(matchId, client, 'rg-0')
+    expect(await graces(matchId)).toEqual([
+      { kind: 'grace', at: t + GRACE_MS, seat: 0, userId: 'rg-0' },
+    ])
+    expect((await storageOf(matchId)).alarm).toBe(t + GRACE_MS)
+    await at(matchId, t + GRACE_MS)
+    expect((await storedSeat(matchId, 0)).status).toBe('sitting_out')
+  })
 
   it('a table whose active players drop below two pauses and resumes', async () => {
     const { matchId, clients, dealtAt } = await handTwo('rz')
@@ -990,6 +1059,23 @@ describe('heads-up away rules', () => {
     }
     expect(players.map((p) => p.timeouts)).toEqual([1, 0])
     expect((await peek(casual)).match.status).toBe('playing')
+    // Seat 1 plays its own decisions; seat 0, still gone, misses two more,
+    // and the third in a row forfeits the match.
+    for (
+      let i = 0;
+      i < 30 && (await peek(casual)).match.status === 'playing';
+      i++
+    ) {
+      const { hand } = await peek(casual)
+      if (!hand || hand.street === 'showdown')
+        await elapse(casual, NEXT_HAND_MS)
+      else if (hand.toAct === 1) await move(casual, seats, passive)
+      else await elapse(casual, GRACE_MS + 20_000)
+    }
+    expect(await storedSeat(casual, 0)).toMatchObject({ timeouts: 3 })
+    expect(await seats[1].next((f) => f.t === 'match_end')).toMatchObject({
+      result: { reason: 'forfeit', forfeit: 0 },
+    })
 
     // Rated: the grace is the seat's, stored as it always was; after it
     // the absent seat's turn is played at once, and both gone is void.
