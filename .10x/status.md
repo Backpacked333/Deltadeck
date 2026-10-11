@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-10-10 by SDE (landing page phases 1 and 2 built in PR #30) and SDE/DBA (rating: P1-12 to P1-16 live; hands of a live match closed to clients; 6-max arenas blocked at the pre-check, casual 6-max next; S7-11 waits on U-4)
+Last updated: 2026-10-11 by SDE (casual 6-max: PR-01 to PR-13, PR-18 and PR-19 live in #34 to #49, still unreachable from outside behind the exposure gate; PR-14 and PR-15 in progress). Earlier: landing page phases 1 and 2 (#30); rating P1-12 to P1-16 live; hands of a live match closed to clients; S7-11 waits on U-4
 
 **Standing instructions from the user (2026-10-09):**
 
@@ -89,6 +89,25 @@ Merged and deployed, each one verified in production after its merge:
 - **#26:** rated quick-match pairs the closest rating within 100 + 50 per minute of waiting, re-pairing every 15 s, under the 2-a-day pair cap. Devin found a real race (a search cancelled during the rating read could come back as a ghost), fixed in the same PR. The deployed Worker carries both, and `verify-deploy` passed. Simulated median wait: 29 s at 10 players online.
 
 **PR #27 (`f27a364`): the ladder, the metrics query and a simulated season (P1-14).** `#ladder` and `#ladder/month` are public. Production holds `20261010090000`, checked read-only: the functions, `played_at` with two indexes, and the append-only trigger back on. `verify-deploy` passed. `supabase/metrics/rating-metrics.sql` reports "insufficient data" on production today. Devin's month-boundary finding (a match rated after midnight counted in the next month) was fixed before the merge.
+
+**Casual 6-max (P2-01 to P2-05): in progress, 2026-10-11.** Plan: `.10x/decisions/engineering-manager/six-max-casual.md`; design: the ADR amendment in `.10x/decisions/architect/multiplayer-platform.md`.
+
+- **Live (each merged green and its deploy verified):**
+  - engine blinds, dead button, orbits and rebuy maths (#34, #35, #39, #40);
+  - the `six_casual` migration and `record_hand` v2, applied to production and checked read-only (#41);
+  - review pages named from `record.seats` (#42) and the `CashController` (#43);
+  - sit and play (#44);
+  - the six-seat ring (#45);
+  - stand up and one table per account through lobby claims (#46);
+  - sessions in the archive with rotation and cleanup (#48);
+  - the six table in the live UI (#49).
+  - #47 fixed two Supabase tests that timed out under load: their database boot moved into a hook.
+- **Exposure gate:** no route creates a six table yet. The invite route sends no `kind`, the lobby queue refuses `six-casual`, and init refuses a six table with an opponent. The gate stays shut until PR-14 (rebuy) and PR-16 (sit-out and removal) land; PR-12 (claims) is in.
+- **Next:**
+  - PR-14 (rebuy, with the Rebuy and Stand up controls the plan lacked) and PR-15 (orbit bank) are being built;
+  - then PR-16 (sit-out and removal, with the Sit out and Sit in controls) and PR-17 (60 s reconnect);
+  - then PR-21 and PR-22 (side-pot display, chip motion), PR-23 to PR-25 (table registry, quick-sit, table list: these open the gate) and PR-26 (smoke evidence).
+- **Open for the user:** Devin's security threads, fixed and replied to but left open for the owner: two on #46, and one on #44 that #46 closed.
 
 **6-max arenas (P2-13/P2-14): stopped at the pre-check, 2026-10-10.** 100,000 simulated 6-max hands with 0 failures; 0 of the 1,000 human casual 6-max hands the gate needs, because casual 6-max is unbuilt and production archives nothing until U-4. Path: `.10x/decisions/architect/six-max-arena.md`.
 

@@ -39,6 +39,9 @@ describe('parseClientMsg', () => {
         t: 'sit',
         seat,
       })
+    expect(parseClientMsg(frame({ t: 'stand' }))).toEqual({ t: 'stand' })
+    // A rebuy names nothing: the server computes the amount from the stack.
+    expect(parseClientMsg(frame({ t: 'rebuy' }))).toEqual({ t: 'rebuy' })
   })
 
   it('rejects malformed messages', () => {
@@ -72,6 +75,21 @@ describe('parseClientMsg', () => {
       frame({ t: 'sit', userId: 'u1' }),
       frame({ t: 'sit', seat: 2, username: 'u1' }),
       frame({ t: 'sit', seat: 2, stack: 4000 }),
+      // A stand names nothing: the seat is the socket account's own.
+      frame({ t: 'stand', seat: 2 }),
+      frame({ t: 'stand', userId: 'u1' }),
+      frame({ t: 'stand', x: 1 }),
+      frame({ t: 'stand', stack: 0 }),
+      // A rebuy carries no amount, stack, seat or account: the top-up is
+      // always to 100 bb, for the socket's own seat.
+      frame({ t: 'rebuy', amount: 500 }),
+      frame({ t: 'rebuy', amount: 0 }),
+      frame({ t: 'rebuy', to: 2000 }),
+      frame({ t: 'rebuy', stack: 4000 }),
+      frame({ t: 'rebuy', seat: 2 }),
+      frame({ t: 'rebuy', userId: 'u1' }),
+      frame({ t: 'rebuy', x: 1 }),
+      frame({ t: 'rebuy', amount: null }),
       frame({ t: 'hello' }),
       frame({ ...act, reqId: 'a'.repeat(MAX_FRAME) }),
     ])
@@ -103,6 +121,8 @@ describe('parseClientMsg', () => {
           'raise',
           'hu-casual',
           'sit',
+          'stand',
+          'rebuy',
           'r1',
           5,
           6,
@@ -120,6 +140,7 @@ describe('parseClientMsg', () => {
         'to',
         'kind',
         'seat',
+        'amount',
         'x',
       ]
       return Object.fromEntries(
@@ -140,6 +161,8 @@ describe('parseClientMsg', () => {
           'dequeue',
           'rematch',
           'sit',
+          'stand',
+          'rebuy',
         ]).toContain(msg.t)
     }
   })
@@ -174,5 +197,57 @@ describe('parseClientMsg', () => {
     // Both shapes come through: no seat, and a seat 0..5.
     expect(accepted.none).toBeGreaterThan(100)
     expect(accepted.seat).toBeGreaterThan(20)
+  })
+
+  it('accepts a stand only bare, whatever else it carries', () => {
+    const random = lcg(10)
+    const pick = <T>(xs: T[]) => xs[Math.floor(random() * xs.length)]
+    const values = [0, 1, 5, -1, '', 'k0', null, true, [], {}]
+    let bare = 0
+    for (let i = 0; i < 5000; i++) {
+      const extra = ['seat', 'userId', 'username', 'stack', 'x'].filter(
+        () => random() < 0.3,
+      )
+      const sent = {
+        t: 'stand',
+        ...Object.fromEntries(extra.map((k) => [k, pick(values)])),
+      }
+      const msg = parseClientMsg(frame(sent))
+      // Anything beyond the type is refused, never ignored.
+      expect(msg, JSON.stringify(sent)).toEqual(
+        extra.length ? null : { t: 'stand' },
+      )
+      if (msg) bare++
+    }
+    expect(bare).toBeGreaterThan(500)
+  })
+
+  it('accepts a rebuy only bare, so no amount ever reaches the server', () => {
+    const random = lcg(11)
+    const pick = <T>(xs: T[]) => xs[Math.floor(random() * xs.length)]
+    const values = [0, 1, 500, 2000, -1, 1e21, '', '2000', null, true, [], {}]
+    let bare = 0
+    for (let i = 0; i < 5000; i++) {
+      const extra = [
+        'amount',
+        'to',
+        'stack',
+        'chips',
+        'seat',
+        'userId',
+        'x',
+      ].filter(() => random() < 0.25)
+      const sent = {
+        t: 'rebuy',
+        ...Object.fromEntries(extra.map((k) => [k, pick(values)])),
+      }
+      const msg = parseClientMsg(frame(sent))
+      // Anything beyond the type is refused, never ignored.
+      expect(msg, JSON.stringify(sent)).toEqual(
+        extra.length ? null : { t: 'rebuy' },
+      )
+      if (msg) bare++
+    }
+    expect(bare).toBeGreaterThan(500)
   })
 })

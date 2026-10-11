@@ -1,34 +1,52 @@
-// Casual 6-max tables (ADR amendment 2026-10-10, Phase 2): sitting down and
-// playing, with stacks carried from hand to hand. The server owns the
-// cards, so every check here is made on the bytes clients receive: no seat
-// sees another's hole cards before that hand's showdown, a folded hand
-// never shows, a socket without a seat hears nothing about hands, and what
-// a seat receives does not change with what any other seat holds. Each
+// Casual 6-max tables (ADR amendment 2026-10-10, Phase 2): sitting down,
+// playing and standing up, with stacks carried from hand to hand. The
+// server owns the cards, so every check here is made on the bytes clients
+// receive: no seat sees another's hole cards before that hand's showdown, a
+// folded hand never shows, a socket without a seat hears nothing about
+// hands, what a seat receives does not change with what any other seat
+// holds, and a seat's next occupant gets nothing of the last one. Each
 // hand's frames are built for the seat its user was dealt into, read from
 // that hand's own seat-to-user map.
-import { env, runInDurableObject } from 'cloudflare:test'
+import {
+  abortAllDurableObjects,
+  env,
+  runDurableObjectAlarm,
+  runInDurableObject,
+} from 'cloudflare:test'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { dealSlots } from '../../src/engine/deck'
 import { legalActions } from '../../src/engine/hand'
+import { nextBlinds } from '../../src/engine/positions'
+import type { Blinds } from '../../src/engine/positions'
 import { seededDeck } from '../../src/engine/testing'
 import type { HandState, PlayerAction, SeatId } from '../../src/engine/types'
+import { CLOSE_GONE } from '../../src/shared/protocol'
 import type { HandRecordV1, ServerMsg } from '../../src/shared/protocol'
 import { forgetUsernames } from '../src/auth'
 import { CashController } from '../src/controller'
 import type { TableController } from '../src/controller'
-import { NEXT_HAND_MS } from '../src/table'
+import { IDLE_MS } from '../src/deadlines'
+import { lobbyStub } from '../src/lobby'
+import type { LobbyDO } from '../src/lobby'
+import { NEXT_HAND_MS, SIT_COOLDOWN_MS, SIX_CONFIG } from '../src/table'
 import type { InitBody, TableDO } from '../src/table'
 import { analysisKeys, checkFrames, FLOW_TYPES } from './frames'
 import {
   bySeat,
   connect,
+  createMatch,
+  createTable,
   elapse,
   freezeClock,
   isState,
+  lobby,
   move,
   peek,
   seatPairs,
+  setClock,
+  storageOf,
   stub,
+  tryConnect,
 } from './helpers'
 import type { Client } from './helpers'
 
@@ -69,6 +87,68 @@ async function seatAll(matchId: string, seats: SeatId[], prefix: string) {
   for (const seat of seats)
     clients[seat] = await sitDown(matchId, `${prefix}-${seat}`, seat)
   return clients
+}
+
+/**
+ * `client` stands up; resolves with the welcome that answers it (seat null
+ * once the seat is free, or still its seat until the hand it was dealt into
+ * ends) or with the error.
+ */
+async function standUp(client: Client) {
+  const from = client.frames.length
+  client.send({ t: 'stand' })
+  return client.next((f) => f.t === 'welcome' || f.t === 'error', from)
+}
+
+/**
+ * The welcome that tells `client` it has no seat any more, from frame
+ * `from` on (its first welcome, before it sat, says the same).
+ */
+const unseated = (client: Client, from: number) =>
+  client.next((f) => f.t === 'welcome' && f.seat === null, from)
+
+/** `client` asks for a seat; resolves with its seated welcome or the error. */
+async function trySit(client: Client, seat?: SeatId) {
+  const from = client.frames.length
+  client.send(seat === undefined ? { t: 'sit' } : { t: 'sit', seat })
+  return client.next(
+    (f) => f.t === 'error' || (f.t === 'welcome' && f.seat !== null),
+    from,
+  )
+}
+
+/** Who sits where at the table now, as it stores them. */
+async function seated(matchId: string) {
+  const { match } = await peek(matchId)
+  return (
+    match as unknown as {
+      players: { seat: SeatId; userId: string; stack: number }[]
+    }
+  ).players
+}
+
+/** The lobby's one-table claims, account to table. */
+const claims = () =>
+  runInDurableObject(lobbyStub(env), async (_: LobbyDO, state) => {
+    const rows = await state.storage.list<string>({ prefix: 'active:' })
+    return Object.fromEntries(
+      [...rows].map(([key, matchId]) => [key.slice('active:'.length), matchId]),
+    )
+  })
+
+/** Waits for `test`; the lobby is told of a stand after its frames go out. */
+async function eventually(test: () => Promise<boolean>) {
+  for (let i = 0; i < 400; i++) {
+    if (await test()) return
+    await new Promise((r) => setTimeout(r, 5))
+  }
+  throw new Error('never happened')
+}
+
+/** Waits for the server to close `client`'s socket, and says how. */
+async function closedWith(client: Client) {
+  await eventually(async () => client.closed !== null)
+  return client.closed
 }
 
 const passive = (hand: HandState): PlayerAction =>
@@ -545,6 +625,10 @@ describe('six seats before showdown', () => {
       await nextHand(matchId, clients, () => ({ type: 'fold' }))
       expect((await peek(matchId)).hand!.config).toMatchObject(handTwo)
       await playOut(matchId, clients)
+      // The same accounts sit at the next run's table: one table each, so
+      // they leave this one first.
+      for (const seat of seats)
+        expect(await standUp(clients[seat])).toMatchObject({ seat: null })
       return clients
     }
     const original = await run(base, 'same')
@@ -675,6 +759,999 @@ describe('a six table between players', () => {
   })
 })
 
+describe('standing up at a six table', () => {
+  it("a stand mid-hand folds at the player's turn and frees the seat after the hand", async () => {
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2, 4], 'up')
+    await clients[0].next(isState(1))
+    await nextHand(matchId, clients, () => ({ type: 'fold' }))
+    // Hand 2: button 0, small blind 2, big blind 4; seat 0 acts first.
+    const two = (await peek(matchId)).hand!
+    expect(two.config).toMatchObject({ button: 0, sb: 2, bb: 4 })
+    expect(two.toAct).toBe(0)
+
+    // Seat 2 stands before its turn: still seated, nothing folded yet.
+    const stoodAt = clients[2].frames.length
+    expect(await standUp(clients[2])).toMatchObject({ t: 'welcome', seat: 2 })
+    expect((await peek(matchId)).hand!.actions).toEqual([])
+    expect((await seated(matchId)).map((p) => p.seat)).toEqual([0, 2, 4])
+    // Nobody takes the seat while the hand it was dealt into is played.
+    const next = await connect(matchId, 'up-next')
+    await next.next((f) => f.t === 'welcome')
+    expect(await trySit(next, 2)).toMatchObject({ code: 'seat_taken' })
+
+    // Seat 0 calls: the action reaches seat 2, which folds at once.
+    await move(matchId, clients, () => ({ type: 'call' }))
+    const folded = (await peek(matchId)).hand!
+    expect(folded.actions.map((a) => [a.seat, a.action.type])).toEqual([
+      [0, 'call'],
+      [2, 'fold'],
+    ])
+    expect(folded.toAct).toBe(4)
+    expect((await seated(matchId)).map((p) => p.seat)).toEqual([0, 2, 4])
+    expect(await trySit(next, 2)).toMatchObject({ code: 'seat_taken' })
+
+    // The other two check it down; the seat frees as the hand ends.
+    const ended = await playOut(matchId, { 0: clients[0], 4: clients[4] })
+    expect((await seated(matchId)).map((p) => p.seat)).toEqual([0, 4])
+    expect(await unseated(clients[2], stoodAt)).toMatchObject({ view: null })
+    // The fold was the player's own move, and their own opening is theirs.
+    const record = last(clients[2].frames, 'hand_end').record
+    expect(record.actions.find((a) => a.seat === 2)).toMatchObject({
+      action: { type: 'fold' },
+      source: 'client',
+    })
+    expect(last(clients[2].frames, 'reveal').own?.map((s) => s.slot)).toEqual(
+      holesOf(ended).slots[2],
+    )
+    // Everyone sees the seat empty, and the lobby lets the account go.
+    for (const client of [clients[0], next])
+      await client.next(
+        (f) =>
+          f.t === 'state' &&
+          f.table.players.map((p) => p.seat).join() === '0,4',
+      )
+    await eventually(async () => !('up-2' in (await claims())))
+    expect(await claims()).toMatchObject({ 'up-0': matchId, 'up-4': matchId })
+
+    // Free now: a new player takes it and is dealt in at hand 3.
+    expect(await trySit(next, 2)).toMatchObject({ t: 'welcome', seat: 2 })
+    await elapse(matchId, NEXT_HAND_MS)
+    const three = (await peek(matchId)).hand!
+    expect(three.config.seats.map((s) => s.seat)).toEqual([0, 2, 4])
+    expect(clients[2].frames.some((f) => f.t === 'hand_start')).toBe(true)
+    expect(
+      clients[2].frames.some((f) => f.t === 'hand_start' && f.handNo === 3),
+    ).toBe(false)
+
+    // A stand on your turn folds at once.
+    const actor = three.toAct!
+    const players: Record<SeatId, Client> = { ...clients, 2: next }
+    const from = players[actor].frames.length
+    expect(await standUp(players[actor])).toMatchObject({ seat: actor })
+    await players[actor].next(isState(3, 1), from)
+    expect((await peek(matchId)).hand!.actions[0]).toMatchObject({
+      seat: actor,
+      action: { type: 'fold' },
+    })
+
+    // A player who sat during the hand was not dealt in: the seat frees now.
+    const late = await sitDown(matchId, 'up-late', 5)
+    expect(await standUp(late)).toMatchObject({ seat: null, view: null })
+    expect((await seated(matchId)).map((p) => p.seat)).not.toContain(5)
+    expect((await peek(matchId)).hand!.street).not.toBe('showdown')
+    checkFrames(
+      [...Object.values(clients), next, late].flatMap((c) => c.frames),
+      'six-casual',
+    )
+
+    // A stand stored on the player's turn whose fold never ran (the object
+    // evicted between the two) still folds once the table is back: the
+    // turn was made due at once, and the alarm folds it.
+    const third = (await peek(matchId)).hand!
+    const stander = third.toAct!
+    await runInDurableObject(stub(matchId), (instance: TableDO) => {
+      const inside = instance as unknown as { applyAction: () => unknown }
+      inside.applyAction = () => Promise.resolve()
+    })
+    expect(await standUp(players[stander])).toMatchObject({ seat: stander })
+    expect((await peek(matchId)).hand!.actions).toHaveLength(
+      third.actions.length,
+    )
+    await abortAllDurableObjects()
+    await freezeClock(matchId, 1_800_000_000_000 + 3 * NEXT_HAND_MS)
+    await runDurableObjectAlarm(stub(matchId))
+    expect((await peek(matchId)).hand!.actions.at(-1)).toMatchObject({
+      seat: stander,
+      action: { type: 'fold' },
+    })
+  })
+
+  it("a new occupant of seat k never receives the previous occupant's cards, own openings or acks", async () => {
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, 'old-k', 1)
+    const b = await sitDown(matchId, 'old-b', 3)
+    await a.next(isState(1))
+    const c = await sitDown(matchId, 'old-c', 5)
+    await nextHand(matchId, { 1: a, 3: b, 5: c }, () => ({ type: 'fold' }))
+    // Hand 2: button 1, small blind 3, big blind 5; seat 1 opens.
+    expect((await peek(matchId)).hand!.config).toMatchObject({
+      button: 1,
+      sb: 3,
+      bb: 5,
+    })
+    // Seat 1 calls (acknowledged as m2-0), sends five frames the table
+    // refuses (the most one hand allows), then stands.
+    await move(matchId, { 1: a, 3: b, 5: c }, () => ({ type: 'call' }))
+    expect(last(a.frames, 'state').view?.lastReqId).toBe('m2-0')
+    for (let i = 0; i < 5; i++) {
+      const from = a.frames.length
+      a.ws.send('junk')
+      await a.next((f) => f.t === 'error', from)
+    }
+    const stoodAt = a.frames.length
+    expect(await standUp(a)).toMatchObject({ t: 'welcome', seat: 1 })
+    // The other two check it down; seat 1 folds when the action reaches it.
+    const hand = await playOut(matchId, { 3: b, 5: c }, passive)
+    const { slots, cards } = holesOf(hand)
+    const shown = hand.players.filter((p) => p.shown).map((p) => p.seat)
+    expect(shown).toEqual([3, 5])
+    await unseated(a, stoodAt)
+    // Seat 1's own opening went to the account dealt into it.
+    expect(last(a.frames, 'reveal').own?.map((s) => s.card)).toEqual(cards[1])
+
+    // Hand 2 is still on the table (hand 3 is not dealt): a new account
+    // takes seat 1.
+    const d = await sitDown(matchId, 'new-k', 1)
+    expect(last(d.frames, 'welcome')).toMatchObject({ seat: 1 })
+    /** What `frames` say about hand 2: nothing of seat 1's old player. */
+    const nothingOfOld = (frames: ServerMsg[], ended: boolean) => {
+      const views = viewsOf(frames, 2)
+      expect(views.length).toBeGreaterThan(0)
+      for (const view of views) {
+        expect(view).toMatchObject({ you: null, legal: null, lastReqId: null })
+        expect(bySeat(view.players, 1).cards).toBeNull()
+        for (const seat of shown)
+          expect(bySeat(view.players, seat).cards).toEqual(cards[seat])
+      }
+      const ends = frames.filter((f) => f.t === 'hand_end' && f.handNo === 2)
+      const reveals = frames.flatMap((f) =>
+        f.t === 'reveal' && f.handNo === 2 ? [f] : [],
+      )
+      expect(ends.length > 0 && reveals.length > 0).toBe(ended)
+      for (const reveal of reveals) {
+        expect(reveal.own).toBeUndefined()
+        const opened = reveal.slots.map((s) => s.slot)
+        for (const slot of slots[1]) expect(opened).not.toContain(slot)
+      }
+      const wire = JSON.stringify(frames)
+      expect(wire).not.toContain('"m2-0"')
+      expect(wire).not.toContain(JSON.stringify(cards[1]))
+    }
+    nothingOfOld(d.frames, false)
+    // Asking again: the same.
+    let from = d.frames.length
+    d.send({ t: 'resync' })
+    await d.next((f) => f.t === 'reveal', from)
+    nothingOfOld(d.frames.slice(from), true)
+    // Reconnecting: the same.
+    const again = await connect(matchId, 'new-k')
+    await again.next((f) => f.t === 'reveal')
+    expect(again.frames[0]).toMatchObject({ t: 'welcome', seat: 1 })
+    nothingOfOld(again.frames, true)
+    // Nor the old player's illegal-move count: one refused frame of its own
+    // in the same hand does not close the new player's socket.
+    from = again.frames.length
+    again.ws.send('junk')
+    expect(await again.next((f) => f.t === 'error', from)).toMatchObject({
+      code: 'illegal',
+    })
+    again.send({ t: 'resync' })
+    await again.next((f) => f.t === 'welcome', from)
+    expect(again.closed).toBeNull()
+
+    // Hand 3 deals the new player its own cards in seat 1.
+    await elapse(matchId, NEXT_HAND_MS)
+    const three = (await peek(matchId)).hand!
+    await again.next(isState(3))
+    const mine = viewsOf(again.frames, 3).at(-1)!
+    expect(mine.you).toBe(1)
+    expect(bySeat(mine.players, 1).cards).toEqual(holesOf(three).cards[1])
+    expect(a.frames.some((f) => f.t === 'hand_start' && f.handNo === 3)).toBe(
+      false,
+    )
+    checkFrames(
+      [a, b, c, d, again].flatMap((x) => x.frames),
+      'six-casual',
+    )
+  })
+
+  it('sit_cooldown refuses a re-sit for 6 hands or 2 minutes', async () => {
+    // Counted in hands: three play, one stands.
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2, 4], 'cool')
+    await clients[0].next(isState(1))
+    await nextHand(matchId, clients, () => ({ type: 'fold' }))
+    // Hand 2 (two dealt so far): the big blind stands; the others fold to it.
+    const stoodAt = clients[4].frames.length
+    expect(await standUp(clients[4])).toMatchObject({ seat: 4 })
+    const rest = { 0: clients[0], 2: clients[2] }
+    await playOut(matchId, rest, () => ({ type: 'fold' }))
+    const freed = await unseated(clients[4], stoodAt)
+    const until = (freed as { serverNow: number }).serverNow + 120_000
+    for (let dealt = 0; dealt < 6; dealt++) {
+      expect(await trySit(clients[4], 4), `${dealt} dealt since`).toEqual({
+        t: 'error',
+        seq: expect.any(Number),
+        matchId,
+        code: 'sit_cooldown',
+        message: expect.any(String),
+        handsLeft: 6 - dealt,
+        until,
+      })
+      await nextHand(matchId, rest, () => ({ type: 'fold' }))
+    }
+    // The sixth hand since is dealt: the seat is theirs again.
+    expect((await peek(matchId)).hand!.config.handNo).toBe(8)
+    expect(await trySit(clients[4], 4)).toMatchObject({
+      t: 'welcome',
+      seat: 4,
+    })
+
+    // Counted in time, at a table of two, where no hand can be dealt
+    // without them: a cooldown in hands alone would never end.
+    const other = await sixTable()
+    const a = await sitDown(other, 'cool-a', 1)
+    const b = await sitDown(other, 'cool-b', 3)
+    await a.next(isState(1))
+    // Seat 1 is the button and acts first: its stand folds at once.
+    expect((await peek(other)).hand!.toAct).toBe(1)
+    const leftAt = a.frames.length
+    expect(await standUp(a)).toMatchObject({ seat: 1 })
+    const gone = await unseated(a, leftAt)
+    const later = (gone as { serverNow: number }).serverNow + 120_000
+    await b.next((f) => f.t === 'reveal' && f.handNo === 1)
+    await elapse(other, NEXT_HAND_MS)
+    expect((await peek(other)).match.status).toBe('waiting')
+    for (const at of [later - 120_000 + NEXT_HAND_MS, later - 1]) {
+      await setClock(other, at)
+      expect(await trySit(a)).toMatchObject({
+        code: 'sit_cooldown',
+        handsLeft: 6,
+        until: later,
+      })
+    }
+    await setClock(other, later)
+    expect(await trySit(a, 1)).toMatchObject({ t: 'welcome', seat: 1 })
+    await a.next(isState(2))
+    checkFrames(
+      [...Object.values(clients), a, b].flatMap((c) => c.frames),
+      'six-casual',
+    )
+  }, 60_000)
+
+  it('one table per account across six tables', async () => {
+    const tables: string[] = []
+    for (let i = 0; i < 6; i++) tables.push(await sixTable())
+    /** `user` opens `matchId` and asks for a seat; the server closes it. */
+    const refusedAt = async (matchId: string, user: string) => {
+      const client = await connect(matchId, user)
+      await client.next((f) => f.t === 'welcome')
+      client.send({ t: 'sit' })
+      return closedWith(client)
+    }
+    // Seated alone at the first table, which deals nothing: the lobby still
+    // holds the account there.
+    const roam = await sitDown(tables[0], 'roam', 2)
+    expect((await peek(tables[0])).match.status).toBe('waiting')
+    expect(await claims()).toEqual({ roam: tables[0] })
+    for (const id of tables.slice(1)) {
+      expect(await refusedAt(id, 'roam')).toEqual({
+        code: 4409,
+        reason: tables[0],
+      })
+      expect(await seated(id)).toEqual([])
+    }
+    // Queueing sends them back there; no invite table opens; no heads-up
+    // seat either.
+    const lobbySocket = await lobby('roam')
+    lobbySocket.send({ t: 'queue', kind: 'hu-casual' })
+    expect(await lobbySocket.next((f) => f.t === 'matched')).toMatchObject({
+      matchId: tables[0],
+      resumed: true,
+    })
+    const busy = await createMatch('roam')
+    expect(busy.status).toBe(409)
+    expect(await busy.json()).toEqual({ error: 'active', matchId: tables[0] })
+    const invite = await createTable('roam-host')
+    expect(await (await tryConnect(invite, 'roam')).closed).toEqual({
+      code: 4409,
+      reason: tables[0],
+    })
+
+    // Standing up lets the account go: the second table seats them, and
+    // now every other table refuses them for that one (the first for its
+    // cooldown as well).
+    expect(await standUp(roam)).toMatchObject({ seat: null })
+    await eventually(async () => !('roam' in (await claims())))
+    await sitDown(tables[1], 'roam')
+    expect(await claims()).toEqual({ roam: tables[1] })
+    expect(await trySit(roam)).toMatchObject({ code: 'sit_cooldown' })
+    for (const id of tables.slice(2))
+      expect(await refusedAt(id, 'roam')).toEqual({
+        code: 4409,
+        reason: tables[1],
+      })
+
+    // A release the lobby never got locks nobody in: it asks the table,
+    // which no longer seats them.
+    const drift = await sitDown(tables[2], 'drift')
+    expect(await standUp(drift)).toMatchObject({ seat: null })
+    await eventually(async () => !('drift' in (await claims())))
+    await runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
+      state.storage.put('active:drift', tables[2]),
+    )
+    await sitDown(tables[3], 'drift')
+    expect(await claims()).toMatchObject({ drift: tables[3] })
+
+    // A player at a heads-up table cannot sit at a six table either.
+    const guest = await connect(invite, 'roam-guest')
+    await guest.next((f) => f.t === 'welcome')
+    expect(await refusedAt(tables[4], 'roam-guest')).toEqual({
+      code: 4409,
+      reason: invite,
+    })
+
+    // Across the six tables, every account holds one seat at most.
+    const all = (await Promise.all(tables.map((id) => seated(id)))).flatMap(
+      (players) => players.map((p) => p.userId),
+    )
+    expect(all.sort()).toEqual(['drift', 'roam'])
+  })
+
+  it('two sits sent at once to two six tables seat the account at one', async () => {
+    // A stale claim: an invite the account made and nobody joined. Each
+    // sit's claim asks that invite (it holds nobody) before writing its
+    // own, so two claims at once both find the account free unless the
+    // lobby takes them one at a time.
+    expect((await createMatch('racer')).status).toBe(201)
+    const tables = [await sixTable(), await sixTable()]
+    const sockets = await Promise.all(tables.map((id) => connect(id, 'racer')))
+    for (const client of sockets) await client.next((f) => f.t === 'welcome')
+    const from = sockets.map((client) => client.frames.length)
+    for (const client of sockets) client.send({ t: 'sit' })
+    // Each sit ends seated, or closed with the table that seated them.
+    const settled = (i: number) =>
+      sockets[i].closed !== null ||
+      sockets[i].frames
+        .slice(from[i])
+        .some((f) => f.t === 'welcome' && f.seat !== null)
+    await eventually(async () => settled(0) && settled(1))
+    const holding: string[] = []
+    for (const id of tables)
+      if ((await seated(id)).some((p) => p.userId === 'racer')) holding.push(id)
+    expect(holding).toHaveLength(1)
+    const held = tables.indexOf(holding[0])
+    expect(sockets[held].closed).toBeNull()
+    expect(sockets[1 - held].closed).toEqual({
+      code: 4409,
+      reason: tables[held],
+    })
+    expect(await claims()).toEqual({ racer: tables[held] })
+  })
+
+  it('a six table holds the account while the lobby grants its sit', async () => {
+    // The lobby can grant a sit's claim and weigh another table's claim for
+    // the same account before the grant gets back to this table: asked in
+    // that gap, the table must say it holds the account.
+    const matchId = await sixTable()
+    const asked: string[] = []
+    await runInDurableObject(stub(matchId), (instance: TableDO) => {
+      const real = env.LOBBY
+      const lobbyOf = (id: DurableObjectId) => {
+        const lobby = real.get(id, { locationHint: 'enam' })
+        return {
+          claim: async (userId: string, table: string) => {
+            const granted = await lobby.claim(userId, table)
+            asked.push(await instance.liveness(userId))
+            return granted
+          },
+          release: (userIds: string[], table: string) =>
+            lobby.release(userIds, table),
+        }
+      }
+      ;(instance as unknown as { env: typeof env }).env = {
+        ...env,
+        LOBBY: {
+          idFromName: (name: string) => real.idFromName(name),
+          get: lobbyOf,
+        } as unknown as typeof env.LOBBY,
+      }
+    })
+    const before = await stub(matchId).liveness('gap')
+    await sitDown(matchId, 'gap')
+    expect({
+      before,
+      asked,
+      after: await stub(matchId).liveness('gap'),
+    }).toEqual({ before: 'open', asked: ['playing'], after: 'playing' })
+  })
+
+  it('a player queued for heads-up who sits at a six table is not paired as well', async () => {
+    const matchId = await sixTable()
+    const queued = await lobby('qs')
+    queued.send({ t: 'queue', kind: 'hu-casual' })
+    await queued.next((f) => f.t === 'queued')
+    await sitDown(matchId, 'qs')
+    expect(await claims()).toEqual({ qs: matchId })
+    // The next player to queue would be paired with qs, who is seated here
+    // now: qs is sent back to this table, and the other keeps waiting.
+    const other = await lobby('qs-other')
+    other.send({ t: 'queue', kind: 'hu-casual' })
+    expect(await queued.next((f) => f.t === 'matched')).toMatchObject({
+      matchId,
+      resumed: true,
+    })
+    expect(await other.next((f) => f.t === 'queued')).toMatchObject({
+      position: 1,
+    })
+    expect(other.frames.map((f) => f.t)).not.toContain('matched')
+    expect(await claims()).toEqual({ qs: matchId })
+  })
+
+  it("a sit waits for the account's release from this table to reach the lobby", async () => {
+    // Two calls from one table to the lobby are not ordered on the way. A
+    // release that landed after the same account's next claim from here
+    // would delete that claim, and another table could then seat them too.
+    const matchId = await sixTable()
+    let held: Promise<void> = Promise.resolve()
+    let letGo = () => {}
+    const calls: string[] = []
+    await runInDurableObject(stub(matchId), (instance: TableDO) => {
+      const real = env.LOBBY
+      const lobbyOf = (id: DurableObjectId) => {
+        const lobby = real.get(id, { locationHint: 'enam' })
+        return {
+          claim: (userId: string, table: string) => {
+            calls.push('claim')
+            return lobby.claim(userId, table)
+          },
+          release: async (userIds: string[], table: string) => {
+            calls.push('release')
+            await held
+            await lobby.release(userIds, table)
+            calls.push('released')
+          },
+        }
+      }
+      ;(instance as unknown as { env: typeof env }).env = {
+        ...env,
+        LOBBY: {
+          idFromName: (name: string) => real.idFromName(name),
+          get: lobbyOf,
+        } as unknown as typeof env.LOBBY,
+      }
+    })
+    const client = await sitDown(matchId, 'late')
+    expect(await claims()).toEqual({ late: matchId })
+    held = new Promise((resolve) => (letGo = resolve))
+    expect(await standUp(client)).toMatchObject({ seat: null })
+    // Past the cooldown, as for a sit refused after its claim (no cooldown).
+    await runInDurableObject(stub(matchId), (instance: TableDO) => {
+      const base = instance.clock
+      instance.clock = () => base() + SIT_COOLDOWN_MS
+    })
+    const from = client.frames.length
+    client.send({ t: 'sit' })
+    // Every chance for the sit's claim to overtake the held release.
+    for (let i = 0; i < 40 && calls.at(-1) !== 'claim'; i++)
+      await new Promise((r) => setTimeout(r, 5))
+    letGo()
+    await client.next((f) => f.t === 'welcome' && f.seat !== null, from)
+    await eventually(async () => calls.includes('released'))
+    expect(calls).toEqual(['claim', 'release', 'released', 'claim'])
+    expect(await claims()).toEqual({ late: matchId })
+  })
+
+  it('a player who stood makes no more decisions in the hand', async () => {
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2, 4], 'sg')
+    await clients[0].next(isState(1))
+    const { hand } = await peek(matchId)
+    const seat = hand!.toAct! as SeatId
+    // A stand on their turn folds them in the same handler, and the turn
+    // reaching a player who stood folds them in the same write: nothing
+    // can come between. Mark them standing without that fold, as a decision
+    // racing it would find them, and send the decision anyway.
+    await runInDurableObject(stub(matchId), (instance: TableDO) => {
+      const { match } = instance as unknown as {
+        match: { players: { userId: string; standing?: boolean }[] }
+      }
+      match.players.find((p) => p.userId === `sg-${seat}`)!.standing = true
+    })
+    const from = clients[seat].frames.length
+    clients[seat].send({
+      t: 'act',
+      reqId: 'sg-1',
+      handNo: 1,
+      actionIndex: hand!.actions.length,
+      action: { type: 'call' },
+    })
+    expect(
+      await clients[seat].next((f) => f.t === 'error', from),
+    ).toMatchObject({ code: 'not_your_turn', reqId: 'sg-1' })
+    expect((await peek(matchId)).hand!.actions).toHaveLength(
+      hand!.actions.length,
+    )
+  })
+
+  it('stand frames carry only allowed keys', async () => {
+    const matchId = await sixTable()
+    const watcher = await connect(matchId, 'sf-w')
+    await watcher.next((f) => f.t === 'welcome')
+    const clients = await seatAll(matchId, [0, 2], 'sf')
+    await clients[0].next(isState(1))
+    // A stand from a socket without a seat is refused, typed.
+    const from = watcher.frames.length
+    watcher.send({ t: 'stand' })
+    expect(await watcher.next((f) => f.t === 'error', from)).toMatchObject({
+      code: 'not_seated',
+    })
+    // Seat 4 sits during hand 1, so is not dealt in: its stand frees the
+    // seat at once, and its re-sit is refused for the cooldown.
+    const late = await sitDown(matchId, 'sf-4', 4)
+    expect(await standUp(late)).toMatchObject({ seat: null, view: null })
+    expect(await trySit(late, 4)).toMatchObject({
+      code: 'sit_cooldown',
+      handsLeft: 6,
+    })
+    // Hand 2 is heads-up with seat 2 on the button, first to act: its stand
+    // folds it at once and frees the seat as the hand ends.
+    await nextHand(matchId, clients, () => ({ type: 'fold' }))
+    expect((await peek(matchId)).hand!.toAct).toBe(2)
+    const seen = watcher.frames.length
+    const stoodAt = clients[2].frames.length
+    expect(await standUp(clients[2])).toMatchObject({ seat: 2 })
+    await unseated(clients[2], stoodAt)
+    await watcher.next(
+      (f) => f.t === 'state' && f.table.players.length === 1,
+      seen,
+    )
+
+    const all = [watcher, late, ...Object.values(clients)].flatMap(
+      (c) => c.frames,
+    )
+    expect(checkFrames(all, 'six-casual')).toEqual(new Set(FLOW_TYPES.stand))
+    expect(analysisKeys(all)).toEqual([])
+    // Sockets without a seat heard of every sit and stand, never of a hand.
+    for (const f of watcher.frames) {
+      expect(['welcome', 'state', 'error']).toContain(f.t)
+      if (f.t === 'welcome' || f.t === 'state') expect(f.view).toBeNull()
+    }
+    const roster = watcher.frames.flatMap((f) =>
+      f.t === 'state' ? [f.table.players.map((p) => p.seat).join()] : [],
+    )
+    expect(roster).toEqual(['0', '0,2', '0,2,4', '0,2', '0'])
+  })
+})
+
+/** `client` asks to rebuy; resolves with the welcome that answers it, or the error. */
+async function rebuy(client: Client) {
+  const from = client.frames.length
+  client.send({ t: 'rebuy' })
+  return client.next((f) => f.t === 'welcome' || f.t === 'error', from)
+}
+
+/** Seat `seat`'s stack in the roster a frame carries. */
+function rosterStack(f: ServerMsg, seat: SeatId) {
+  if (f.t !== 'welcome' && f.t !== 'state') throw new Error(`no roster: ${f.t}`)
+  return bySeat(f.table.players, seat).stack
+}
+
+/**
+ * The hand on the table, just ended, leaves `loser` with no chips: `winner`
+ * takes them, as a real all-in would. Changed in memory before the next
+ * deal settles the hand's stacks into the table's.
+ */
+async function bust(matchId: string, loser: SeatId, winner: SeatId) {
+  await runInDurableObject(stub(matchId), (instance: TableDO) => {
+    const { hand } = instance as unknown as { hand: HandState }
+    const won = hand.players.find((p) => p.seat === winner)!
+    const lost = hand.players.find((p) => p.seat === loser)!
+    won.stack += lost.stack
+    lost.stack = 0
+  })
+}
+
+describe('rebuying at a six table', () => {
+  it('rebuy refused during a hand and above 100 bb', async () => {
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2], 'rr')
+    await clients[0].next(isState(1))
+    // Both are dealt into hand 1, which is being played.
+    for (const seat of [0, 2])
+      expect(await rebuy(clients[seat])).toMatchObject({
+        t: 'error',
+        code: 'in_hand',
+      })
+    // Seat 4 sits during hand 1, so is not in it, but holds the buy-in:
+    // exactly 100 bb is not below it.
+    clients[4] = await sitDown(matchId, 'rr-4', 4)
+    expect(await rebuy(clients[4])).toMatchObject({ code: 'not_below' })
+    // An amount is never read: a rebuy that names one is not a rebuy.
+    for (const junk of [
+      { t: 'rebuy', amount: 500 },
+      { t: 'rebuy', stack: 100_000 },
+    ]) {
+      const from = clients[4].frames.length
+      clients[4].ws.send(JSON.stringify(junk))
+      expect(await clients[4].next((f) => f.t === 'error', from)).toMatchObject(
+        { code: 'illegal' },
+      )
+    }
+
+    // Hand 1: seat 0 folds its small blind (1,990 to 2,010). Hand 2:
+    // button 0, small blind 2, big blind 4, and seat 0 opens.
+    await nextHand(matchId, clients, () => ({ type: 'fold' }))
+    expect((await peek(matchId)).hand!.config).toMatchObject({
+      button: 0,
+      sb: 2,
+      bb: 4,
+    })
+    await move(matchId, clients, () => ({ type: 'raise', to: 100 }))
+    await move(matchId, clients, () => ({ type: 'call' }))
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    // Seat 4 folded its big blind (1,980 behind) and seat 0 is below
+    // 100 bb, but both are dealt into the hand being played.
+    expect(await rebuy(clients[4])).toMatchObject({ code: 'in_hand' })
+    expect(await rebuy(clients[0])).toMatchObject({ code: 'in_hand' })
+    expect((await seated(matchId)).map((p) => [p.seat, p.stack])).toEqual([
+      [0, 1990],
+      [2, 2010],
+      [4, 2000],
+    ])
+
+    // Flop: seat 2 checks, seat 0 bets 100 and seat 2 folds. Seat 0 began
+    // the hand below 100 bb and ends it on 2,110; seat 2 began above and
+    // ends on 1,910. The hand's final stacks decide, not the first ones.
+    await move(matchId, clients, () => ({ type: 'check' }))
+    await move(matchId, clients, () => ({ type: 'raise', to: 100 }))
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    expect(
+      (await peek(matchId)).hand!.players.map((p) => [p.seat, p.stack]),
+    ).toEqual([
+      [0, 2110],
+      [2, 1910],
+      [4, 1980],
+    ])
+    expect(await rebuy(clients[0])).toMatchObject({ code: 'not_below' })
+    const granted = await rebuy(clients[2])
+    expect(granted).toMatchObject({ t: 'welcome', seat: 2 })
+    expect(rosterStack(granted, 2)).toBe(2000)
+    expect(rosterStack(granted, 0)).toBe(2110)
+    expect(rosterStack(await rebuy(clients[4]), 4)).toBe(2000)
+    // Topped up by 90 and 20; nobody else's chips moved.
+    expect((await seated(matchId)).map((p) => [p.seat, p.stack])).toEqual([
+      [0, 2110],
+      [2, 2000],
+      [4, 2000],
+    ])
+    checkFrames(
+      Object.values(clients).flatMap((c) => c.frames),
+      'six-casual',
+    )
+  })
+
+  it("a rebuy between hands tops up from the hand's final stack, once", async () => {
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2], 'rb')
+    await clients[0].next(isState(1))
+    // Hand 1: seat 0 folds its small blind (1,990 to 2,010). Hand 2: seat
+    // 0 posts the big blind and folds to a raise, so it ends on 1,970 and
+    // tops up 30. The table settles hand 2's stacks at the next deal: a
+    // top-up that deal overwrote would leave it on 1,970.
+    await nextHand(matchId, clients, () => ({ type: 'fold' }))
+    expect((await peek(matchId)).hand!.config).toMatchObject({
+      seats: [
+        { seat: 0, stack: 1990 },
+        { seat: 2, stack: 2010 },
+      ],
+      button: 2,
+      bb: 0,
+    })
+    await move(matchId, clients, () => ({ type: 'raise', to: 100 }))
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    const ended = (await peek(matchId)).hand!
+    expect(ended.players.map((p) => [p.seat, p.stack])).toEqual([
+      [0, 1970],
+      [2, 2030],
+    ])
+    await clients[2].next((f) => f.t === 'reveal' && f.handNo === 2)
+
+    // Two rebuys sent together: the first tops up, the second finds the
+    // stack at 100 bb already.
+    const from = clients[0].frames.length
+    const seen = clients[2].frames.length
+    clients[0].send({ t: 'rebuy' })
+    clients[0].send({ t: 'rebuy' })
+    await clients[0].next((f) => f.t === 'error', from)
+    const answers = clients[0].frames
+      .slice(from)
+      .filter((f) => f.t === 'welcome' || f.t === 'error')
+    expect(answers.map((f) => (f.t === 'error' ? f.code : f.t))).toEqual([
+      'welcome',
+      'not_below',
+    ])
+    expect(rosterStack(answers[0], 0)).toBe(2000)
+    // Everyone sees the new stack.
+    const told = await clients[2].next(
+      (f) => f.t === 'state' && rosterStack(f, 0) === 2000,
+      seen,
+    )
+    expect(rosterStack(told, 2)).toBe(2030)
+    expect((await seated(matchId)).map((p) => [p.seat, p.stack])).toEqual([
+      [0, 2000],
+      [2, 2030],
+    ])
+
+    // The next deal settles hand 2's stacks and keeps the top-up: hand 3
+    // plays 2,000 against 2,030, 30 chips more than were at the table.
+    await elapse(matchId, NEXT_HAND_MS)
+    await clients[0].next(isState(3))
+    const three = (await peek(matchId)).hand!
+    expect(three.config.seats).toEqual([
+      { seat: 0, stack: 2000 },
+      { seat: 2, stack: 2030 },
+    ])
+    expect(three.players.reduce((sum, p) => sum + p.stack + p.bet, 0)).toBe(
+      4000 + 30,
+    )
+    // Still at 100 bb once dealt in: no second top-up while it plays.
+    expect(await rebuy(clients[0])).toMatchObject({ code: 'in_hand' })
+    checkFrames([...clients[0].frames, ...clients[2].frames], 'six-casual')
+  })
+
+  it('a rebuy between hands survives a restart before the next deal', async () => {
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2], 'rp')
+    await clients[0].next(isState(1))
+    // Hand 1: seat 0 folds its small blind (1,990 to 2,010), then tops up
+    // the 10 chips. The player is told at once; the next deal is 3 s away
+    // and would store the stacks anyway, so only the rebuy's own write
+    // keeps the top-up through a restart in between.
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 1)
+    expect(rosterStack(await rebuy(clients[0]), 0)).toBe(2000)
+
+    await abortAllDurableObjects()
+    await freezeClock(matchId)
+    expect((await seated(matchId)).map((p) => [p.seat, p.stack])).toEqual([
+      [0, 2000],
+      [2, 2010],
+    ])
+    const back = {
+      0: await connect(matchId, 'rp-0'),
+      2: await connect(matchId, 'rp-2'),
+    }
+    await back[0].next((f) => f.t === 'welcome' && f.seat === 0)
+    await back[2].next((f) => f.t === 'welcome' && f.seat === 2)
+    await elapse(matchId, NEXT_HAND_MS)
+    await back[0].next(isState(2))
+    expect((await peek(matchId)).hand!.config.seats).toEqual([
+      { seat: 0, stack: 2000 },
+      { seat: 2, stack: 2010 },
+    ])
+    checkFrames(
+      [...Object.values(clients), ...Object.values(back)].flatMap(
+        (c) => c.frames,
+      ),
+      'six-casual',
+    )
+  })
+
+  it('a rebuy at 0 chips deals the player in at the next hand', async () => {
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2, 4], 'rz')
+    await clients[0].next(isState(1))
+    // Hand 1 (seats 0 and 2; seat 4 sat during it): seat 2 loses every
+    // chip. Hand 2 deals only the two with chips.
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    await clients[2].next((f) => f.t === 'reveal' && f.handNo === 1)
+    await bust(matchId, 2, 0)
+    await elapse(matchId, NEXT_HAND_MS)
+    await clients[2].next(isState(2))
+    const two = (await peek(matchId)).hand!
+    expect(two.config.seats).toEqual([
+      { seat: 0, stack: 4000 },
+      { seat: 4, stack: 2000 },
+    ])
+    expect(rosterStack(last(clients[2].frames, 'state'), 2)).toBe(0)
+
+    // Seat 2 is not in hand 2, so it may rebuy while it is played.
+    const granted = await rebuy(clients[2])
+    expect(granted).toMatchObject({ t: 'welcome', seat: 2 })
+    expect(rosterStack(granted, 2)).toBe(2000)
+    // Still nobody's seat in hand 2: no cards, no moves.
+    for (const view of viewsOf(clients[2].frames, 2)) {
+      expect(view.you).toBeNull()
+      expect(view.legal).toBeNull()
+      for (const p of view.players) expect(p.cards).toBeNull()
+    }
+    expect((await peek(matchId)).hand!.config.handNo).toBe(2)
+
+    // Hand 3 deals it in with its 100 bb.
+    await nextHand(matchId, { 0: clients[0], 4: clients[4] }, () => ({
+      type: 'fold',
+    }))
+    const three = (await peek(matchId)).hand!
+    expect(three.config.seats.map((s) => [s.seat, s.stack])).toContainEqual([
+      2, 2000,
+    ])
+    expect(three.config.seats.map((s) => s.seat)).toEqual([0, 2, 4])
+    await clients[2].next((f) => f.t === 'hand_start' && f.handNo === 3)
+    const mine = viewsOf(clients[2].frames, 3).at(-1)!
+    expect(mine.you).toBe(2)
+    expect(bySeat(mine.players, 2).cards).toEqual(holesOf(three).cards[2])
+    checkFrames(
+      Object.values(clients).flatMap((c) => c.frames),
+      'six-casual',
+    )
+  })
+
+  it('a rebuy that funds a second player at a waiting table deals at once', async () => {
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2], 'rw')
+    await clients[0].next(isState(1))
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    await clients[2].next((f) => f.t === 'reveal' && f.handNo === 1)
+    await bust(matchId, 2, 0)
+    // One funded player: the table waits.
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).match.status).toBe('waiting')
+
+    const granted = await rebuy(clients[2])
+    expect(rosterStack(granted, 2)).toBe(2000)
+    await clients[2].next(isState(2))
+    const { hand, match } = await peek(matchId)
+    expect(match.status).toBe('playing')
+    expect(hand!.config.seats).toEqual([
+      { seat: 0, stack: 4000 },
+      { seat: 2, stack: 2000 },
+    ])
+    checkFrames([...clients[0].frames, ...clients[2].frames], 'six-casual')
+  })
+
+  it('between hands the roster carries the stacks the hand left', async () => {
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2], 'rs')
+    await clients[0].next(isState(1))
+    // During a hand the roster keeps the stacks it was dealt with; the
+    // hand's own view has the chips as they move.
+    await move(matchId, clients, () => ({ type: 'call' }))
+    const during = last(clients[2].frames, 'state')
+    expect([rosterStack(during, 0), rosterStack(during, 2)]).toEqual([
+      2000, 2000,
+    ])
+    expect(bySeat(during.view!.players, 0).stack).toBe(1980)
+    // Seat 2 raises and seat 0 folds: 1,980 to 2,020. Every seat, and a
+    // socket without one, sees the stacks the next hand will be dealt:
+    // which players are below 100 bb, and may rebuy, shows on the roster.
+    const from = clients[0].frames.length
+    await move(matchId, clients, () => ({ type: 'raise', to: 60 }))
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    const after = await clients[0].next(isState(1, 3), from)
+    expect([rosterStack(after, 0), rosterStack(after, 2)]).toEqual([1980, 2020])
+    const watcher = await connect(matchId, 'rs-w')
+    const welcome = await watcher.next((f) => f.t === 'welcome')
+    expect(welcome).toMatchObject({ seat: null, view: null })
+    expect([rosterStack(welcome, 0), rosterStack(welcome, 2)]).toEqual([
+      1980, 2020,
+    ])
+    // Dealt: hand 2 plays those stacks, and the roster keeps them.
+    await elapse(matchId, NEXT_HAND_MS)
+    const two = await clients[0].next(isState(2))
+    expect((await peek(matchId)).hand!.config.seats).toEqual([
+      { seat: 0, stack: 1980 },
+      { seat: 2, stack: 2020 },
+    ])
+    expect([rosterStack(two, 0), rosterStack(two, 2)]).toEqual([1980, 2020])
+    checkFrames(
+      [watcher, ...Object.values(clients)].flatMap((c) => c.frames),
+      'six-casual',
+    )
+  })
+
+  it("an account that stands and sits again before the next deal brings a fresh buy-in, not the hand's final stack", async () => {
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2, 4], 'ra')
+    await clients[0].next(isState(1))
+    // Hand 1 (seats 0 and 2; seat 4 sat during it): seat 0 folds its
+    // small blind, 1,990 to 2,010, and stands up between hands.
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 1)
+    expect(await standUp(clients[0])).toMatchObject({ seat: null })
+    // The cooldown is over before the next deal, as it never is in play
+    // (2 minutes against 3 s), but nothing enforces that. The account
+    // sits again, in seat 1, with the buy-in a new seat brings.
+    await setClock(matchId, 1_800_000_000_000 + SIT_COOLDOWN_MS)
+    const back = await trySit(clients[0], 1)
+    expect(back).toMatchObject({ t: 'welcome', seat: 1 })
+    expect(rosterStack(back, 1)).toBe(2000)
+    expect(rosterStack(back, 2)).toBe(2010)
+    // Hand 2 settles hand 1's stacks into those dealt into it, and deals
+    // the account its new seat's 2,000: 6,010 at the table, as brought.
+    await elapse(matchId, NEXT_HAND_MS)
+    await clients[2].next(isState(2))
+    expect((await peek(matchId)).hand!.config.seats).toEqual([
+      { seat: 1, stack: 2000 },
+      { seat: 2, stack: 2010 },
+      { seat: 4, stack: 2000 },
+    ])
+    checkFrames(
+      Object.values(clients).flatMap((c) => c.frames),
+      'six-casual',
+    )
+  })
+
+  it('a heads-up table refuses a rebuy', async () => {
+    const matchId = await createTable('hu-a')
+    const a = await connect(matchId, 'hu-a')
+    const b = await connect(matchId, 'hu-b')
+    await a.next(isState(1))
+    const from = a.frames.length
+    a.send({ t: 'rebuy' })
+    expect(await a.next((f) => f.t === 'error', from)).toMatchObject({
+      code: 'illegal',
+    })
+    expect((await peek(matchId)).hand!.config.seats).toEqual([
+      { seat: 0, stack: 2000 },
+      { seat: 1, stack: 2000 },
+    ])
+    // Heads-up frames keep their keys and codes (checkFrame's default).
+    checkFrames([...a.frames, ...b.frames])
+  })
+
+  it('rebuy frames carry only allowed keys', async () => {
+    const matchId = await sixTable()
+    const watcher = await connect(matchId, 'rf-w')
+    await watcher.next((f) => f.t === 'welcome')
+    const clients = await seatAll(matchId, [0, 2], 'rf')
+    await clients[0].next(isState(1))
+    const one = (await peek(matchId)).hand!
+    // Refused, typed: no seat; dealt into the hand; at 100 bb.
+    expect(await rebuy(watcher)).toMatchObject({ code: 'not_seated' })
+    expect(await rebuy(clients[0])).toMatchObject({ code: 'in_hand' })
+    clients[4] = await sitDown(matchId, 'rf-4', 4)
+    expect(await rebuy(clients[4])).toMatchObject({ code: 'not_below' })
+    // Hand 1 ends with seat 0's fold; between hands it tops up to 2,000,
+    // and the watcher sees the new stack.
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 1)
+    const seen = watcher.frames.length
+    expect(rosterStack(await rebuy(clients[0]), 0)).toBe(2000)
+    await watcher.next(
+      (f) => f.t === 'state' && rosterStack(f, 0) === 2000,
+      seen,
+    )
+    await elapse(matchId, NEXT_HAND_MS)
+    await clients[4].next(isState(2))
+    const two = (await peek(matchId)).hand!
+
+    const all = [watcher, ...Object.values(clients)].flatMap((c) => c.frames)
+    expect(checkFrames(all, 'six-casual')).toEqual(new Set(FLOW_TYPES.rebuy))
+    expect(analysisKeys(all)).toEqual([])
+    // The socket without a seat heard of the rebuy, never of a hand.
+    for (const f of watcher.frames) {
+      expect(['welcome', 'state', 'error']).toContain(f.t)
+      if (f.t === 'welcome' || f.t === 'state') expect(f.view).toBeNull()
+    }
+    const heard = JSON.stringify(watcher.frames)
+    for (const hand of [one, two])
+      for (const cards of Object.values(holesOf(hand).cards))
+        expect(heard).not.toContain(JSON.stringify(cards))
+  })
+})
+
 describe('six clients over many hands', () => {
   it('six clients sit and play, chips conserved across 200 hands', async () => {
     const matchId = await sixTable()
@@ -740,6 +1817,258 @@ describe('six clients over many hands', () => {
       if (n < 200) await clients[0].next(isState(n + 1))
     }
     expect(played).toBe(200)
+  }, 300_000)
+
+  it('six clients sit, play and stand with chips conserved across 200 hands', async () => {
+    const matchId = await sixTable()
+    const BUY_IN = 2000
+    const clients = await seatAll(matchId, [0, 1, 2, 3, 4, 5], 'churn')
+    await clients[0].next(isState(1))
+    /** Every account that sat, by name, and its socket. */
+    const users = new Map<string, Client>(
+      Object.entries(clients).map(([seat, c]) => [`churn-${seat}`, c]),
+    )
+    // Chips brought to the table (a buy-in per sit) and taken away (each
+    // stander's stack as its seat frees), and each account's result over
+    // the seats it gave up.
+    let bought = 6 * BUY_IN
+    let left = 0
+    const banked: Record<string, number> = {}
+    /** A stander who left their seat empty, to sit again once allowed. */
+    let away: { user: string; freedAt: number } | null = null
+    const counts = { stands: 0, newcomers: 0, refused: 0, back: 0 }
+    // The soak's betting: nobody busts, so every hand deals all seated.
+    const choose = (hand: HandState): PlayerAction => {
+      const legal = legalActions(hand)
+      const n = hand.config.handNo
+      if (n % 5 === 0) return passive(hand)
+      if (hand.street === 'preflop' && hand.actions.length === 0)
+        return legal.canRaise
+          ? { type: 'raise', to: Math.min(60, legal.maxRaiseTo) }
+          : passive(hand)
+      if (legal.toCall === 0) return { type: 'check' }
+      return legal.toCall <= 40 && n % 3 === 0
+        ? { type: 'call' }
+        : { type: 'fold' }
+    }
+    for (let n = 1; n <= 200; n++) {
+      const dealt = (await peek(matchId)).hand!
+      expect(dealt.config.handNo).toBe(n)
+      const userIn = (seat: SeatId) =>
+        [...users].find(([, c]) => c === clients[seat])![0]
+      // Every ninth hand a dealt player stands before anyone moves: they
+      // fold when the action reaches them (at once on their turn).
+      let stander: { seat: SeatId; user: string } | null = null
+      if (n % 9 === 4) {
+        const seats = dealt.config.seats.map((s) => s.seat)
+        const seat = seats.includes(n % 6) ? n % 6 : seats[0]
+        stander = { seat, user: userIn(seat) }
+        expect(await standUp(clients[seat])).toMatchObject({ seat })
+        // Seated until the hand ends; the others play on around them.
+        expect((await seated(matchId)).map((p) => p.userId)).toContain(
+          stander.user,
+        )
+        counts.stands++
+      }
+      const ended = await playOut(matchId, clients, choose)
+      const { match } = await peek(matchId)
+      const { players, netByUser: net } = match as unknown as {
+        players: { seat: SeatId; userId: string; stack: number }[]
+        netByUser: Record<string, number>
+      }
+      if (stander) {
+        // The seat freed as the hand ended, and its chips left with it.
+        expect(players.map((p) => p.userId)).not.toContain(stander.user)
+        const final = bySeat(ended.players, stander.seat).stack
+        left += final
+        banked[stander.user] = (banked[stander.user] ?? 0) + final - BUY_IN
+        delete clients[stander.seat]
+      }
+      // Chips at the table: a dealt seat's stack after the hand, anyone
+      // else's as the table holds it; with what left, all that was bought.
+      const after = new Map(ended.players.map((p) => [p.seat, p.stack]))
+      const stackOf = (p: { seat: SeatId; stack: number }) =>
+        after.get(p.seat) ?? p.stack
+      const chips = players.reduce((sum, p) => sum + stackOf(p), 0)
+      expect(chips + left, `hand ${n}`).toBe(bought)
+      expect(
+        Object.values(ended.result!.netBySeat).reduce((x, y) => x + y, 0),
+      ).toBe(0)
+      // Each account's net: what it banked, plus its seat now.
+      for (const user of users.keys()) {
+        const p = players.find((q) => q.userId === user)
+        const now = p ? stackOf(p) - BUY_IN : 0
+        expect(net[user] ?? 0, `${user} after hand ${n}`).toBe(
+          (banked[user] ?? 0) + now,
+        )
+      }
+      if (n === 200) break
+      await Object.values(clients)[0].next(
+        (f) => f.t === 'reveal' && f.handNo === n,
+      )
+      // Between hands: every other stander's seat goes to a newcomer at
+      // once; the rest leave it empty, are refused the next hand, and sit
+      // again once 6 hands have been dealt since.
+      if (stander && n % 18 === 4) {
+        const user = `churn-new${n}`
+        const newcomer = await sitDown(matchId, user, stander.seat)
+        clients[stander.seat] = newcomer
+        users.set(user, newcomer)
+        bought += BUY_IN
+        counts.newcomers++
+      } else if (stander) away = { user: stander.user, freedAt: n }
+      if (away && n - away.freedAt === 1) {
+        expect(await trySit(users.get(away.user)!)).toMatchObject({
+          code: 'sit_cooldown',
+          handsLeft: 5,
+        })
+        counts.refused++
+      }
+      if (away && n - away.freedAt === 6) {
+        const back = users.get(away.user)!
+        const welcome = await trySit(back)
+        expect(welcome).toMatchObject({ t: 'welcome' })
+        clients[(welcome as { seat: SeatId }).seat] = back
+        bought += BUY_IN
+        away = null
+        counts.back++
+      }
+      await elapse(matchId, NEXT_HAND_MS)
+    }
+    expect(counts).toEqual({ stands: 22, newcomers: 11, refused: 11, back: 11 })
+    expect((await seated(matchId)).length).toBe(6)
+  }, 300_000)
+  it('six clients bust and rebuy, chips equal buy-ins plus rebuys across 200 hands', async () => {
+    // Seeded decks, so a failure replays: hand n deals seededDeck(9000 + n).
+    const cash = new CashController()
+    const matchId = await sixTable({
+      nextHandPlan: (handNo, config, roster) => {
+        const plan = cash.nextHandPlan(handNo, config, roster)
+        return plan && { ...plan, deck: seededDeck(9000 + handNo) }
+      },
+    })
+    const BUY_IN = 2000
+    const seats = [0, 1, 2, 3, 4, 5]
+    const clients = await seatAll(matchId, seats, 'rebuy')
+    await clients[0].next(isState(1))
+    const userOf = (seat: SeatId) => `rebuy-${seat}`
+    // Chips brought: six buy-ins, then every top-up as the table grants it.
+    let bought = seats.length * BUY_IN
+    const toppedUp: Record<string, number> = {}
+    const counts = { busts: 0, between: 0, during: 0, partial: 0, refused: 0 }
+    /** Busted players who rebuy only once the next hand is under way. */
+    let later: SeatId[] = []
+    /** Rebuys `seat` from `stack`; checks the answer and books the chips. */
+    const topUp = async (seat: SeatId, stack: number) => {
+      const answer = await rebuy(clients[seat])
+      expect(answer, `seat ${seat} from ${stack}`).toMatchObject({
+        t: 'welcome',
+        seat,
+      })
+      expect(rosterStack(answer, seat)).toBe(BUY_IN)
+      bought += BUY_IN - stack
+      toppedUp[userOf(seat)] = (toppedUp[userOf(seat)] ?? 0) + BUY_IN - stack
+    }
+    // Every third hand the first to act moves all in and the next calls,
+    // so stacks bust; otherwise the soak's betting.
+    const choose = (hand: HandState): PlayerAction => {
+      const legal = legalActions(hand)
+      const n = hand.config.handNo
+      if (n % 3 === 0 && hand.street === 'preflop') {
+        if (hand.actions.length === 0 && legal.canRaise)
+          return { type: 'raise', to: legal.maxRaiseTo }
+        if (hand.actions.length === 1) return passive(hand)
+        return legal.toCall ? { type: 'fold' } : passive(hand)
+      }
+      if (n % 5 === 0) return passive(hand)
+      if (hand.street === 'preflop' && hand.actions.length === 0)
+        return legal.canRaise
+          ? { type: 'raise', to: Math.min(60, legal.maxRaiseTo) }
+          : passive(hand)
+      if (legal.toCall === 0) return { type: 'check' }
+      return legal.toCall <= 40 && n % 3 === 1
+        ? { type: 'call' }
+        : { type: 'fold' }
+    }
+    for (let n = 1; n <= 200; n++) {
+      const dealt = (await peek(matchId)).hand!
+      expect(dealt.config.handNo).toBe(n)
+      // Busted players who waited rebuy during this hand: not in it, so
+      // dealt in at the next one.
+      for (const seat of later) {
+        expect(dealt.config.seats.map((s) => s.seat)).not.toContain(seat)
+        await topUp(seat, 0)
+        counts.during++
+      }
+      later = []
+      // Every tenth hand someone dealt in asks, and is told to wait.
+      if (n % 10 === 0) {
+        const asker = dealt.config.seats[0].seat
+        expect(await rebuy(clients[asker])).toMatchObject({ code: 'in_hand' })
+        counts.refused++
+      }
+      const ended = await playOut(matchId, clients, choose)
+      const { match } = await peek(matchId)
+      const { players, netByUser: net } = match as unknown as {
+        players: { seat: SeatId; userId: string; stack: number }[]
+        netByUser: Record<string, number>
+      }
+      // Chips at the table: a dealt seat's stack after the hand, anyone
+      // else's as the table holds it (a top-up during the hand included).
+      const after = new Map(ended.players.map((p) => [p.seat, p.stack]))
+      const stackOf = (seat: SeatId) =>
+        after.get(seat) ?? bySeat(players, seat).stack
+      const chips = seats.reduce((sum, seat) => sum + stackOf(seat), 0)
+      expect(chips, `hand ${n}`).toBe(bought)
+      expect(
+        Object.values(ended.result!.netBySeat).reduce((x, y) => x + y, 0),
+      ).toBe(0)
+      // Each account's net is its stack against what it brought: a rebuy
+      // is chips brought, never a win.
+      for (const seat of seats)
+        expect(net[userOf(seat)] ?? 0, `seat ${seat} after hand ${n}`).toBe(
+          stackOf(seat) - BUY_IN - (toppedUp[userOf(seat)] ?? 0),
+        )
+      if (n === 200) break
+      await clients[0].next((f) => f.t === 'reveal' && f.handNo === n)
+      // Between hands: the busted rebuy (one in four waits for the next
+      // hand to start), and every fourth hand anyone short tops up.
+      for (const seat of seats) {
+        const stack = stackOf(seat)
+        if (stack === 0) {
+          counts.busts++
+          if (counts.busts % 4 === 0) later.push(seat)
+          else {
+            await topUp(seat, 0)
+            counts.between++
+          }
+        } else if (stack < BUY_IN && n % 4 === 1) {
+          await topUp(seat, stack)
+          counts.partial++
+        } else if (stack >= BUY_IN && n % 25 === 0) {
+          expect(await rebuy(clients[seat])).toMatchObject({
+            code: 'not_below',
+          })
+          counts.refused++
+        }
+      }
+      await elapse(matchId, NEXT_HAND_MS)
+      await clients[0].next(isState(n + 1))
+    }
+    // The seeded decks make every count exact: busts, top-ups from 0
+    // between hands and during the next, partial top-ups, and refusals.
+    expect(counts).toEqual({
+      busts: 30,
+      between: 23,
+      during: 7,
+      partial: 59,
+      refused: 53,
+    })
+    expect(bought).toBe(76_280)
+    expect(bought).toBe(
+      seats.length * BUY_IN +
+        Object.values(toppedUp).reduce((x, y) => x + y, 0),
+    )
   }, 300_000)
 })
 
@@ -827,5 +2156,676 @@ describe('the archive of a six table', () => {
         (h.p.holesByUser as { userId: string }[]).map((x) => x.userId),
       ).toEqual(record.seats.map((s) => s.userId))
     }
+  })
+})
+
+describe('six sessions', () => {
+  const ACCOUNTS = [
+    'a1000000-0000-4000-8000-00000000000a',
+    'b1000000-0000-4000-8000-00000000000b',
+    'c1000000-0000-4000-8000-00000000000c',
+    'd1000000-0000-4000-8000-00000000000d',
+  ]
+  const [A, B, C, D] = ACCOUNTS
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+  afterEach(() => vi.unstubAllGlobals())
+
+  /**
+   * Supabase, stubbed: every archive call is recorded, and while `down` is
+   * set every one fails as an outage (usernames still resolve).
+   */
+  function stubArchive() {
+    const calls: { rpc: string; p: Record<string, unknown> }[] = []
+    const state = { down: false }
+    const realFetch = globalThis.fetch
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(
+          input instanceof Request ? input.url : String(input),
+        )
+        if (url.origin !== new URL(env.SUPABASE_URL).origin)
+          return realFetch(input, init)
+        if (url.pathname === '/rest/v1/players') {
+          const id = url.searchParams.get('user_id')!.slice(3)
+          return Response.json([{ username: `p${ACCOUNTS.indexOf(id)}` }])
+        }
+        if (url.pathname.endsWith('/audit_hand'))
+          return Response.json({ verified: true })
+        if (state.down) return new Response(null, { status: 503 })
+        if (url.pathname.startsWith('/rest/v1/rpc/'))
+          calls.push({
+            rpc: url.pathname.slice('/rest/v1/rpc/'.length),
+            p: JSON.parse(String(init!.body)).p,
+          })
+        return new Response(null, { status: 204 })
+      },
+    )
+    forgetUsernames()
+    return { calls, state }
+  }
+  type Call = ReturnType<typeof stubArchive>['calls'][number]
+  /** record_match calls that close a session (they carry its result). */
+  const ends = (calls: Call[]) =>
+    calls.filter((c) => c.rpc === 'record_match' && c.p.result)
+  /** The table's queued archive calls. */
+  const outbox = async (matchId: string) =>
+    (await storageOf(matchId)).keys.filter((k) => k.startsWith('outbox:'))
+  const decks = async (matchId: string) =>
+    (await storageOf(matchId)).keys.filter((k) => k.startsWith('deck:'))
+  /** Waits for every queued call to be sent. */
+  const drained = (matchId: string) =>
+    eventually(async () => (await outbox(matchId)).length === 0)
+
+  /**
+   * Between hands: the session's count jumps to `handNo`, as if that many
+   * hands had been dealt (the table's own count of hands is untouched).
+   */
+  const jumpTo = (matchId: string, handNo: number) =>
+    runInDurableObject(stub(matchId), async (instance: TableDO, state) => {
+      const { match } = instance as unknown as { match: { handNo: number } }
+      match.handNo = handNo
+      await state.storage.put('match', match)
+    })
+
+  /** The player to act runs out of time: the clock goes to their deadline. */
+  async function timeOut(matchId: string) {
+    const at = await runInDurableObject(stub(matchId), (instance: TableDO) => {
+      const { deadlines } = instance as unknown as {
+        deadlines: { kind: string; at: number }[]
+      }
+      return deadlines.find((d) => d.kind === 'turn')!.at
+    })
+    await setClock(matchId, at)
+    await runDurableObjectAlarm(stub(matchId))
+  }
+
+  it('idle table closes its session and archives the result', async () => {
+    const { calls } = stubArchive()
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, A, 0)
+    const b = await sitDown(matchId, B, 2)
+    await a.next(isState(1))
+    const c = await sitDown(matchId, C, 4)
+    const clients = { 0: a, 2: b, 4: c }
+    await nextHand(matchId, clients, () => ({ type: 'fold' }))
+    await playOut(matchId, clients, () => ({ type: 'fold' }))
+    // Two stand: the one left cannot be dealt a hand, and the table waits.
+    await standUp(b)
+    await standUp(c)
+    await drained(matchId)
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).match.status).toBe('waiting')
+    // No hand has started for just under IDLE_MS: the session is open.
+    await elapse(matchId, IDLE_MS - NEXT_HAND_MS - 1)
+    expect(ends(calls)).toEqual([])
+    await elapse(matchId, 1)
+    await eventually(async () => ends(calls).length === 1)
+    expect(ends(calls)[0].p).toEqual({
+      id: matchId,
+      kind: 'six-casual',
+      config: expect.objectContaining({ kind: 'six-casual', maxSeats: 6 }),
+      players: [{ seat: 0, userId: A }],
+      handNo: 2,
+      timeouts: { [A]: 0 },
+      result: { netBySeat: {}, reason: 'complete' },
+    })
+    // Only the archive: nobody hears of it, the seated account is still
+    // held, and the table stays.
+    for (const client of [a, b, c])
+      expect(client.frames.some((f) => f.t === 'match_end')).toBe(false)
+    expect(await claims()).toEqual({ [A]: matchId })
+    expect((await peek(matchId)).match.status).toBe('waiting')
+    await drained(matchId)
+
+    // A second player sits: the next session starts with its own matches
+    // row, at hand 1, and its matchId on every frame from its hand_start.
+    const from = a.frames.length
+    expect(await trySit(b, 2)).toMatchObject({ seat: 2 })
+    const start = (await a.next((f) => f.t === 'hand_start', from)) as Extract<
+      ServerMsg,
+      { t: 'hand_start' }
+    >
+    const next = start.matchId
+    expect(next).toMatch(UUID)
+    expect(next).not.toBe(matchId)
+    expect(start.handNo).toBe(1)
+    expect(
+      a.frames.slice(a.frames.indexOf(start)).every((f) => f.matchId === next),
+    ).toBe(true)
+    expect(
+      a.frames.slice(from, a.frames.indexOf(start)).map((f) => f.matchId),
+    ).not.toContain(next)
+    const hand = await playOut(matchId, { 0: a, 2: b }, () => ({
+      type: 'fold',
+    }))
+    expect(hand.config.handNo).toBe(1)
+    await drained(matchId)
+    const opened = calls.filter(
+      (c) => c.rpc === 'record_match' && c.p.id === next,
+    )
+    expect(opened).toEqual([
+      {
+        rpc: 'record_match',
+        p: expect.objectContaining({
+          id: next,
+          players: [
+            { seat: 0, userId: A },
+            { seat: 2, userId: B },
+          ],
+        }),
+      },
+    ])
+    expect(opened[0].p).not.toHaveProperty('result')
+    const archived = calls.filter((c) => c.rpc === 'record_hand').at(-1)!.p
+    expect(archived).toMatchObject({ id: `${next}:1`, matchId: next })
+    expect((archived.record as HandRecordV1).matchId).toBe(next)
+    checkFrames(
+      [a, b, c].flatMap((x) => x.frames),
+      'six-casual',
+    )
+  })
+
+  it('rotation keeps seats, stacks and blinds and starts a new matches row', async () => {
+    const { calls } = stubArchive()
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, A, 1)
+    const b = await sitDown(matchId, B, 3)
+    await a.next(isState(1))
+    const c = await sitDown(matchId, C, 5)
+    const clients: Record<SeatId, Client> = { 1: a, 3: b, 5: c }
+    await nextHand(matchId, clients, () => ({ type: 'fold' }))
+    await playOut(matchId, clients, () => ({ type: 'fold' }))
+    await drained(matchId)
+    // The session jumps to its last hands; D sits for hand 999 and stands
+    // after it, so its cooldown spans the rotation.
+    await jumpTo(matchId, 998)
+    const d = await sitDown(matchId, D, 0)
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).hand!.config.handNo).toBe(999)
+    await playOut(matchId, { ...clients, 0: d }, () => ({ type: 'fold' }))
+    expect(await standUp(d)).toMatchObject({ seat: null })
+    await drained(matchId)
+    await elapse(matchId, NEXT_HAND_MS)
+    // Hand 1000, the last of the session: the first to act spends 25 s, so
+    // 5 s of their bank, then everyone checks or calls it down.
+    const last1000 = (await peek(matchId)).hand!
+    expect(last1000.config.handNo).toBe(1000)
+    // The whole blinds value, the dead small blind's seat included.
+    const { blinds: kept } = (await peek(matchId)).match as unknown as {
+      blinds: Blinds
+    }
+    const spender = last1000.toAct!
+    await elapse(matchId, 25_000)
+    const ended = await playOut(matchId, clients, passive)
+    const banks = async () =>
+      (
+        (await peek(matchId)).match as unknown as {
+          players: { seat: SeatId; bankMs: number }[]
+        }
+      ).players.map((p) => [p.seat, p.bankMs])
+    const before = await banks()
+    expect(before).toContainEqual([spender, 25_000])
+    await drained(matchId)
+    const from = a.frames.length
+    await elapse(matchId, NEXT_HAND_MS)
+
+    // Hand 1000 dealt and archived: the session ended, and the next deal is
+    // hand 1 of a new one, under a new matchId.
+    await eventually(async () => ends(calls).length === 1)
+    expect(ends(calls)[0].p).toMatchObject({
+      id: matchId,
+      handNo: 1000,
+      result: { reason: 'complete' },
+    })
+    const first = (await peek(matchId)).hand!
+    expect(first.config.handNo).toBe(1)
+    const start = (await a.next((f) => f.t === 'hand_start', from)) as Extract<
+      ServerMsg,
+      { t: 'hand_start' }
+    >
+    expect(start).toMatchObject({ handNo: 1 })
+    expect(start.matchId).toMatch(UUID)
+    expect(start.matchId).not.toBe(matchId)
+    // Same seats, stacks carried from hand 1000, blinds moved on from it
+    // (not a first hand's).
+    expect(first.config.seats).toEqual(
+      ended.players.map((p) => ({ seat: p.seat, stack: p.stack })),
+    )
+    const blinds = nextBlinds(kept, [1, 3, 5])
+    expect(first.config).toMatchObject({
+      button: blinds.button,
+      sb: blinds.sb,
+      bb: blinds.bb,
+    })
+    // A rotation leaves the banks alone (six-clock.test.ts rotates in mid-
+    // orbit), but this hand also starts an orbit (PR-15): since the table's
+    // first hand the big blind has gone 3, 5, 0, 1 and now 3 again, round
+    // all six seats. So the spender's 5 s is back, with everyone's bank.
+    expect(blinds.bb).toBe(3)
+    expect(await banks()).toEqual(
+      before.map(([seat]) => [seat, SIX_CONFIG.bankMs]),
+    )
+    // D stood after hand 999 (3 hands dealt at the table): 1000 and the new
+    // hand 1 since, so 4 to go.
+    expect(await trySit(d)).toMatchObject({
+      code: 'sit_cooldown',
+      handsLeft: 4,
+    })
+    // A new matches row with the same players; its hands under its id.
+    await playOut(matchId, clients, () => ({ type: 'fold' }))
+    await drained(matchId)
+    expect(
+      calls.find((c) => c.rpc === 'record_match' && c.p.id === start.matchId)
+        ?.p,
+    ).toMatchObject({
+      players: [
+        { seat: 1, userId: A },
+        { seat: 3, userId: B },
+        { seat: 5, userId: C },
+      ],
+    })
+    expect(
+      calls.filter((c) => c.rpc === 'record_hand').at(-1)!.p,
+    ).toMatchObject({
+      id: `${start.matchId}:1`,
+      matchId: start.matchId,
+      handNo: 1,
+    })
+    checkFrames(
+      [a, b, c, d].flatMap((x) => x.frames),
+      'six-casual',
+    )
+  }, 60_000)
+
+  it('deck keys do not accumulate', async () => {
+    // Archived: a hand's deck goes once its record_hand is stored.
+    stubArchive()
+    const matchId = await sixTable()
+    const clients = {
+      0: await sitDown(matchId, A, 0),
+      2: await sitDown(matchId, B, 2),
+      4: await sitDown(matchId, C, 4),
+    }
+    await clients[0].next(isState(1))
+    for (let n = 1; n <= 8; n++) {
+      expect(await decks(matchId), `hand ${n} dealt`).toHaveLength(1)
+      await playOut(matchId, clients, passive)
+      await drained(matchId)
+      expect(await decks(matchId), `hand ${n} archived`).toEqual([])
+      await elapse(matchId, NEXT_HAND_MS)
+    }
+    // Not archived (dev accounts): a hand's deck goes as the hand ends.
+    const dev = await sixTable()
+    const devs = await seatAll(dev, [1, 3], 'decks')
+    await devs[1].next(isState(1))
+    for (let n = 1; n <= 8; n++) {
+      expect(await decks(dev), `dev hand ${n} dealt`).toHaveLength(1)
+      await playOut(dev, devs, passive)
+      expect(await decks(dev), `dev hand ${n} over`).toEqual([])
+      expect(await outbox(dev)).toEqual([])
+      await elapse(dev, NEXT_HAND_MS)
+    }
+  }, 60_000)
+
+  it('a session ends only when its outbox is empty', async () => {
+    const { calls, state } = stubArchive()
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, A, 0)
+    const b = await sitDown(matchId, B, 2)
+    await a.next(isState(1))
+    await drained(matchId)
+    // Supabase goes down: hand 1's calls stay queued.
+    state.down = true
+    await playOut(matchId, { 0: a, 2: b }, () => ({ type: 'fold' }))
+    await standUp(b)
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).match.status).toBe('waiting')
+    // Idle past IDLE_MS, but its calls are still queued: it stays open.
+    await elapse(matchId, IDLE_MS)
+    expect(ends(calls)).toEqual([])
+    expect(await outbox(matchId)).toContain('outbox:0001.0001:hand')
+    // Back up: the retry sends hand 1, and then the session ends.
+    state.down = false
+    await elapse(matchId, 300_000)
+    await eventually(async () => ends(calls).length === 1)
+    expect(calls.map((c) => [c.rpc, c.p.handNo ?? null])).toEqual([
+      ['record_match', null],
+      ['record_hand', 1],
+      ['record_match', 1],
+    ])
+    await drained(matchId)
+
+    // Past the cap of 1,000 hands with calls queued, play goes on in the
+    // same session; at 9,000 no hand is dealt until they drain.
+    const seen = a.frames.length
+    const c = await sitDown(matchId, C, 4)
+    await a.next((f) => f.t === 'hand_start', seen)
+    expect((await peek(matchId)).hand!.config.handNo).toBe(1)
+    const id = () =>
+      a.frames.filter((f) => f.t === 'hand_start').at(-1)!.matchId
+    const second = id()
+    expect(second).not.toBe(matchId)
+    // Its start is archived; then Supabase goes down for good.
+    await drained(matchId)
+    state.down = true
+    const players = { 0: a, 4: c }
+    await playOut(matchId, players, () => ({ type: 'fold' }))
+    await jumpTo(matchId, 1500)
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).hand!.config.handNo).toBe(1501)
+    await playOut(matchId, players, () => ({ type: 'fold' }))
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).hand!.config.handNo).toBe(1502)
+    expect(id()).toBe(second)
+    await playOut(matchId, players, () => ({ type: 'fold' }))
+    await jumpTo(matchId, 9000)
+    await elapse(matchId, NEXT_HAND_MS)
+    // Hand "9000" is over and nothing more is dealt while calls wait.
+    expect((await peek(matchId)).hand!.config.handNo).toBe(1502)
+    // The waiting calls are the second session's, keyed by its number, so
+    // they can never collide with another session's.
+    const waiting = await outbox(matchId)
+    expect(waiting).toContain('outbox:0002.1502:hand')
+    expect(waiting.every((k) => k.startsWith('outbox:0002.'))).toBe(true)
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).hand!.config.handNo).toBe(1502)
+    expect(ends(calls)).toHaveLength(1)
+    // They drain: the session ends, and a new one deals its hand 1.
+    state.down = false
+    const from = a.frames.length
+    await elapse(matchId, 300_000)
+    await a.next((f) => f.t === 'hand_start', from)
+    await eventually(async () => ends(calls).length === 2)
+    expect(ends(calls).map((e) => [e.p.id, e.p.handNo])).toEqual([
+      [matchId, 1],
+      [second, 9000],
+    ])
+    expect((await peek(matchId)).hand!.config.handNo).toBe(1)
+    expect(id()).not.toBe(second)
+  }, 60_000)
+
+  it('six-casual timeouts are archived by account', async () => {
+    const { calls } = stubArchive()
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, A, 0)
+    const b = await sitDown(matchId, B, 2)
+    await a.next(isState(1))
+    const c = await sitDown(matchId, C, 4)
+    const clients = { 0: a, 2: b, 4: c }
+    await nextHand(matchId, clients, () => ({ type: 'fold' }))
+    // Hand 2 (button 0, small blind 2, big blind 4): A times out, then B,
+    // then C plays and A's next turn runs out too. A's misses are not in a
+    // row (A acts in hand 3 between), but both count for the session.
+    let hand = (await peek(matchId)).hand!
+    expect(hand.toAct).toBe(0)
+    await timeOut(matchId)
+    expect((await peek(matchId)).hand!.toAct).toBe(2)
+    await timeOut(matchId)
+    await playOut(matchId, clients, () => ({ type: 'fold' }))
+    await elapse(matchId, NEXT_HAND_MS)
+    hand = (await peek(matchId)).hand!
+    expect(hand.config.handNo).toBe(3)
+    // Hand 3: A acts (its run of misses resets), and later times out.
+    await nextHand(matchId, clients, passive)
+    while ((await peek(matchId)).hand!.toAct !== 0)
+      await move(matchId, clients, passive)
+    await timeOut(matchId)
+    await playOut(matchId, clients, () => ({ type: 'fold' }))
+    // B leaves before the session ends; C too, so the table waits.
+    await standUp(b)
+    await standUp(c)
+    await drained(matchId)
+    await elapse(matchId, NEXT_HAND_MS)
+    await elapse(matchId, IDLE_MS)
+    await eventually(async () => ends(calls).length === 1)
+    // Session totals by account (record_match v6 reads them by user id),
+    // B's too although it left; nothing by seat.
+    expect(ends(calls)[0].p.timeouts).toEqual({ [A]: 2, [B]: 1 })
+  }, 60_000)
+
+  it('nobody seated and nothing queued: the table deletes itself', async () => {
+    const { calls, state } = stubArchive()
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, A, 1)
+    const b = await sitDown(matchId, B, 4)
+    await a.next(isState(1))
+    await playOut(matchId, { 1: a, 4: b }, () => ({ type: 'fold' }))
+    await drained(matchId)
+    // Supabase goes down; both stand; the table waits with nobody seated.
+    state.down = true
+    await standUp(a)
+    await standUp(b)
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).match.status).toBe('waiting')
+    // IDLE_MS on: the session is closed, but its end is still queued, so
+    // the table stays.
+    await elapse(matchId, IDLE_MS)
+    expect(await outbox(matchId)).toEqual(['outbox:0001.9999:end'])
+    expect((await storageOf(matchId)).keys).toContain('match')
+    await elapse(matchId, IDLE_MS)
+    expect((await storageOf(matchId)).keys).toContain('match')
+    // Back up: the end is archived, and the next idle check deletes all.
+    state.down = false
+    await elapse(matchId, 300_000)
+    await eventually(async () => ends(calls).length === 1)
+    await drained(matchId)
+    await elapse(matchId, IDLE_MS)
+    expect(await storageOf(matchId)).toEqual({ keys: [], alarm: null })
+    await eventually(async () => a.closed !== null && b.closed !== null)
+    expect([a.closed?.code, b.closed?.code]).toEqual([CLOSE_GONE, CLOSE_GONE])
+  }, 60_000)
+  /** Whether the table's session has ended (the next deal starts one). */
+  const sessionOver = async (matchId: string) =>
+    !!(
+      (await peek(matchId)).match as unknown as { sessionOver?: boolean } | null
+    )?.sessionOver
+
+  /**
+   * `client` asks to resync; resolves with every frame of the answer. A
+   * second resync's welcome follows all the first one sent.
+   */
+  async function resynced(client: Client) {
+    const from = client.frames.length
+    client.send({ t: 'resync' })
+    const first = await client.next((f) => f.t === 'welcome', from)
+    const after = client.frames.indexOf(first) + 1
+    client.send({ t: 'resync' })
+    const second = await client.next((f) => f.t === 'welcome', after)
+    return client.frames.slice(from, client.frames.indexOf(second))
+  }
+
+  it("a new session's hand 1 never re-sends the last session's hand_end", async () => {
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, 'rs-a', 0)
+    const b = await sitDown(matchId, 'rs-b', 2)
+    await a.next(isState(1))
+    await playOut(matchId, { 0: a, 2: b }, () => ({ type: 'fold' }))
+    await a.next((f) => f.t === 'reveal' && f.handNo === 1)
+    // B stands; the table waits, and its one-hand session ends idle.
+    expect(await standUp(b)).toMatchObject({ seat: null })
+    await elapse(matchId, NEXT_HAND_MS)
+    await elapse(matchId, IDLE_MS)
+    expect(await sessionOver(matchId)).toBe(true)
+    // C sits: the next session deals its own hand 1, which is under way.
+    const from = a.frames.length
+    await sitDown(matchId, 'rs-c', 4)
+    const start = await a.next((f) => f.t === 'hand_start', from)
+    expect(start).toMatchObject({ handNo: 1 })
+    expect(start.matchId).not.toBe(matchId)
+    expect((await peek(matchId)).hand!.result).toBeUndefined()
+    // A resyncs, and C opens the table again: neither hears of the last
+    // session's hand 1 (nor sees its own opening of it again).
+    const stale = (frames: ServerMsg[]) =>
+      frames.filter((f) => f.t === 'hand_end' || f.t === 'reveal')
+    expect(stale(await resynced(a))).toEqual([])
+    const back = await connect(matchId, 'rs-c')
+    await back.next((f) => f.t === 'welcome')
+    await resynced(back)
+    expect(stale(back.frames)).toEqual([])
+    // Once the new hand 1 is over, its own end comes back on a resync.
+    await playOut(matchId, { 0: a, 4: back }, () => ({ type: 'fold' }))
+    const ended = stale(await resynced(a))
+    expect(ended.map((f) => [f.t, f.matchId])).toEqual([
+      ['hand_end', start.matchId],
+      ['reveal', start.matchId],
+    ])
+  })
+
+  it('the last stand at a waiting table neither delays its session end nor deletes it early', async () => {
+    // Dev accounts: nothing is archived, so no queued call holds the table.
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, 'ls-a', 0)
+    const b = await sitDown(matchId, 'ls-b', 2)
+    await a.next(isState(1))
+    await playOut(matchId, { 0: a, 2: b }, () => ({ type: 'fold' }))
+    await standUp(b)
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).match.status).toBe('waiting')
+    // Five minutes on, the last player stands too.
+    const stoodAfter = NEXT_HAND_MS + 300_000
+    await elapse(matchId, 300_000)
+    expect(await standUp(a)).toMatchObject({ seat: null })
+    // The session still ends IDLE_MS after its last hand started.
+    await elapse(matchId, IDLE_MS - stoodAfter - 1)
+    expect(await sessionOver(matchId)).toBe(false)
+    await elapse(matchId, 1)
+    expect(await sessionOver(matchId)).toBe(true)
+    // Its hands were never archived (dev accounts), nor is its end, though
+    // nobody sits there to say so.
+    expect(await outbox(matchId)).toEqual([])
+    // The table, empty since the stand, stays for IDLE_MS after it.
+    await elapse(matchId, stoodAfter - 1)
+    expect((await storageOf(matchId)).keys).toContain('match')
+    await elapse(matchId, IDLE_MS)
+    expect(await storageOf(matchId)).toEqual({ keys: [], alarm: null })
+  })
+
+  it('a table never deletes itself with its session open', async () => {
+    const { calls } = stubArchive()
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, A, 1)
+    const b = await sitDown(matchId, B, 4)
+    await a.next(isState(1))
+    await playOut(matchId, { 1: a, 4: b }, () => ({ type: 'fold' }))
+    await standUp(a)
+    await standUp(b)
+    await drained(matchId)
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).match.status).toBe('waiting')
+    // An idle check that finds the session not due (as when a flush was
+    // still draining the outbox as it looked), then nobody seated and
+    // nothing queued: the table stays, its session still to be archived.
+    const deleted = await runInDurableObject(stub(matchId), (t: TableDO) =>
+      (t as unknown as { idle(): Promise<boolean> }).idle(),
+    )
+    expect(deleted).toBe(false)
+    expect((await storageOf(matchId)).keys).toContain('match')
+    // The session ends on time and is archived; then the table goes.
+    await elapse(matchId, IDLE_MS)
+    await eventually(async () => ends(calls).length === 1)
+    await drained(matchId)
+    await elapse(matchId, IDLE_MS)
+    expect(await storageOf(matchId)).toEqual({ keys: [], alarm: null })
+  })
+
+  it('a session ends once, whoever finds it due', async () => {
+    const { calls } = stubArchive()
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, A, 0)
+    const b = await sitDown(matchId, B, 2)
+    await a.next(isState(1))
+    await playOut(matchId, { 0: a, 2: b }, () => ({ type: 'fold' }))
+    await standUp(b)
+    await drained(matchId)
+    await elapse(matchId, NEXT_HAND_MS)
+    await elapse(matchId, IDLE_MS)
+    await eventually(async () => ends(calls).length === 1)
+    await drained(matchId)
+    // The idle check and a flush that drains the outbox each await their
+    // outbox check, so both can find it due: the second ends nothing.
+    await runInDurableObject(stub(matchId), (t: TableDO) =>
+      (t as unknown as { endSession(): Promise<void> }).endSession(),
+    )
+    await drained(matchId)
+    expect(ends(calls)).toHaveLength(1)
+  })
+
+  it("a session's archive and nets name only the accounts dealt into it", async () => {
+    const { calls } = stubArchive()
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, A, 0)
+    const b = await sitDown(matchId, B, 2)
+    await a.next(isState(1))
+    // C sits during hand 1, so is dealt into none of the session's hands.
+    const c = await sitDown(matchId, C, 4)
+    await playOut(matchId, { 0: a, 2: b }, () => ({ type: 'fold' }))
+    await standUp(a)
+    await standUp(b)
+    await drained(matchId)
+    await elapse(matchId, NEXT_HAND_MS)
+    await elapse(matchId, IDLE_MS)
+    await eventually(async () => ends(calls).length === 1)
+    // Seated at the end, but never dealt in: not named, so no row for a
+    // session C never played (A and B have theirs from record_hand).
+    const { id, players, timeouts } = ends(calls)[0].p
+    expect({ id, players, timeouts }).toEqual({
+      id: matchId,
+      players: [],
+      timeouts: {},
+    })
+    await drained(matchId)
+    // The next session: its own players, and nets for its accounts only.
+    const from = c.frames.length
+    const d = await sitDown(matchId, D, 1)
+    const start = await c.next((f) => f.t === 'hand_start', from)
+    await playOut(matchId, { 1: d, 4: c }, () => ({ type: 'fold' }))
+    await drained(matchId)
+    const opened = calls.find(
+      (x) => x.rpc === 'record_match' && x.p.id === start.matchId,
+    )!
+    expect(opened.p.players).toEqual([
+      { seat: 1, userId: D },
+      { seat: 4, userId: C },
+    ])
+    const { netByUser } = (await peek(matchId)).match as unknown as {
+      netByUser: Record<string, number>
+    }
+    expect(Object.keys(netByUser).sort()).toEqual([C, D].sort())
+  })
+})
+
+describe('a six table that halts', () => {
+  it('sends match_end to its seats only', async () => {
+    // Hand 2's plan names no players: the table halts as an engine fault.
+    const cash = new CashController()
+    const matchId = await sixTable({
+      nextHandPlan: (handNo, config, roster) => {
+        const plan = cash.nextHandPlan(handNo, config, roster)
+        return plan && handNo === 2 ? { ...plan, users: undefined } : plan
+      },
+    })
+    const watcher = await connect(matchId, 'halt-w')
+    await watcher.next((f) => f.t === 'welcome')
+    const clients = await seatAll(matchId, [0, 3], 'halt')
+    await clients[0].next(isState(1))
+    await playOut(matchId, clients, () => ({ type: 'fold' }))
+    await elapse(matchId, NEXT_HAND_MS)
+    for (const seat of [0, 3])
+      expect(
+        await clients[seat].next((f) => f.t === 'match_end'),
+      ).toMatchObject({ result: { reason: 'engine_fault' } })
+    // Nor when the watcher asks again, or another seatless socket opens.
+    watcher.send({ t: 'resync' })
+    await watcher.next((f) => f.t === 'welcome', 1)
+    const late = await connect(matchId, 'halt-late')
+    await late.next((f) => f.t === 'welcome')
+    late.send({ t: 'resync' })
+    await late.next((f) => f.t === 'welcome', 1)
+    for (const client of [watcher, late])
+      expect(client.frames.map((f) => f.t)).not.toContain('match_end')
+    // A seat that reconnects still gets the result.
+    const back = await connect(matchId, 'halt-0')
+    await back.next((f) => f.t === 'match_end')
   })
 })

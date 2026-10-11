@@ -52,10 +52,18 @@ export type MatchConfig = {
   decisionMs: number
   bankMs: number
   /**
-   * The bank refills to `bankMs` every this many hands (rated: 20, so each
-   * half of the match has its own). Absent: one bank for the whole match.
+   * Heads-up: the bank refills to `bankMs` every this many hands (rated:
+   * 20, so each half of the match has its own). Absent, and no
+   * `bankRefill`: one bank for the whole match.
    */
   bankRefillEvery?: number
+  /**
+   * Six tables: every seated player's bank is set to `bankMs` when a hand
+   * starts a new orbit, before its first decision (ADR amendment
+   * 2026-10-10, "Orbit and clock"). An orbit is the big blind's travel
+   * round all six seats, so departures shorten it in hands, never in seats.
+   */
+  bankRefill?: 'orbit'
 }
 
 /** A rated player's result: from the luck-adjusted total and the draw band. */
@@ -80,6 +88,18 @@ export type ClientMsg =
    * socket's account and the stack is the buy-in: the frame names neither.
    */
   | { t: 'sit'; seat?: SeatId }
+  /**
+   * At a six table: leave the seat. During a hand the player was dealt into,
+   * they fold when the action next reaches them and the seat frees when the
+   * hand ends; otherwise it frees at once.
+   */
+  | { t: 'stand' }
+  /**
+   * At a six table: top up to 100 bb from the next hand. Bare on purpose:
+   * the server computes the amount from the stack, so a frame can never
+   * choose it (ADR amendment 2026-10-10, "Stacks and rebuy").
+   */
+  | { t: 'rebuy' }
 
 /** A seated six-casual player: dealt in, or sitting out (P2-04). */
 export type SeatStatus = 'playing' | 'sitting_out'
@@ -99,6 +119,20 @@ export type ErrorCode =
   | 'seat_taken'
   /** Six tables: every seat has a player. */
   | 'table_full'
+  /**
+   * Six tables: this account stood up here too recently to sit again; the
+   * error says how many more hands, or until when (whichever comes first).
+   */
+  | 'sit_cooldown'
+  /** Six tables: a seat-only message from a socket without a seat. */
+  | 'not_seated'
+  /**
+   * Six tables: a rebuy from a player dealt into the hand being played;
+   * it may be sent again once that hand is over.
+   */
+  | 'in_hand'
+  /** Six tables: a rebuy from a player not below 100 bb (the buy-in). */
+  | 'not_below'
 
 /**
  * Everything one seat may know about the table. There is deliberately no
@@ -134,7 +168,12 @@ export type SeatView = {
       username: string
       connected: boolean
       consecutiveTimeouts: number
-      /** Six tables: chips as of the last deal (or the buy-in, if since). */
+      /**
+       * Six tables: the chips outside the hand being played. While the
+       * player is dealt into it, as of its deal; otherwise what the next
+       * hand deals them: as the last hand left it, the buy-in, or 100 bb
+       * after a rebuy.
+       */
       stack?: number
       /** Six tables. */
       status?: SeatStatus
@@ -292,7 +331,18 @@ export type ServerMsg = { seq: number; matchId: string } & (
         outcomeBySeat?: Record<SeatId, Outcome>
       }
     }
-  | { t: 'error'; code: ErrorCode; reqId?: string; message: string }
+  | {
+      t: 'error'
+      code: ErrorCode
+      reqId?: string
+      message: string
+      /**
+       * sit_cooldown only: hands still to be dealt here before this account
+       * may sit again, and the server epoch milliseconds when it may anyway.
+       */
+      handsLeft?: number
+      until?: number
+    }
   | {
       t: 'rating'
       /** Rated, after the match: each seat's change, once it is applied. */
@@ -384,6 +434,8 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case 'resync':
     case 'dequeue':
     case 'rematch':
+    case 'stand':
+    case 'rebuy':
       return onlyKeys(v, ['t']) ? { t: v.t } : null
     case 'sit':
       if (!onlyKeys(v, ['t', 'seat'])) return null

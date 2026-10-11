@@ -6,6 +6,7 @@
 // reaches a client unreviewed.
 import { expect } from 'vitest'
 import type {
+  ErrorCode,
   HandRecordV1,
   LobbyMsg,
   MatchKind,
@@ -34,6 +35,59 @@ const keysOf =
     void exact
     return [...keys]
   }
+
+/**
+ * `list` must name every member of the union U and nothing else, the way
+ * keysOf names keys: a missing member is a type error.
+ */
+const allOf =
+  <U extends string>() =>
+  <const L extends readonly U[]>(
+    list: L,
+    ...exact: [Exclude<U, L[number]>] extends [never]
+      ? []
+      : [missing: Exclude<U, L[number]>]
+  ): string[] => {
+    void exact
+    return [...list]
+  }
+
+/**
+ * Every error code a frame may carry. An error is a fixed word and a
+ * message; a code added to the protocol without a line here fails
+ * `npm run typecheck:worker`, and checkFrame refuses a code not listed.
+ */
+export const ERROR_CODES = allOf<ErrorCode>()([
+  'not_your_turn',
+  'illegal',
+  'stale',
+  'rate_limited',
+  'too_large',
+  'replaced',
+  'halted',
+  'unauthorized',
+  'unverified',
+  'seat_taken',
+  'table_full',
+  'sit_cooldown',
+  'not_seated',
+  // A rebuy refused: dealt into the hand being played, or not below 100 bb.
+  'in_hand',
+  'not_below',
+])
+/**
+ * Codes only a six table sends, answering sit, stand and rebuy, which a
+ * heads-up table refuses as `illegal`. checkFrame refuses them in a
+ * heads-up flow, so heads-up error frames keep the codes they had.
+ */
+const SIX_ERROR_CODES: ErrorCode[] = [
+  'seat_taken',
+  'table_full',
+  'sit_cooldown',
+  'not_seated',
+  'in_hand',
+  'not_below',
+]
 
 // Exactly the keys each frame type may carry (optional ones marked '?').
 export const FRAME_KEYS: Record<ServerMsg['t'], string[]> = {
@@ -87,6 +141,8 @@ export const FRAME_KEYS: Record<ServerMsg['t'], string[]> = {
     'own',
   ]),
   match_end: keysOf<Msg<'match_end'>>()(['t', 'seq', 'matchId', 'result']),
+  // A six table's sit_cooldown says how long the account still waits
+  // (hands left and an epoch time); no other error carries either key.
   error: keysOf<Msg<'error'>>()([
     't',
     'seq',
@@ -94,6 +150,8 @@ export const FRAME_KEYS: Record<ServerMsg['t'], string[]> = {
     'code',
     'message',
     'reqId?',
+    'handsLeft?',
+    'until?',
   ]),
   // After a rated match: public ratings only (RATING_CHANGE_KEYS per seat).
   rating: keysOf<Msg<'rating'>>()(['t', 'seq', 'matchId', 'change']),
@@ -172,8 +230,10 @@ export const TABLE_KEYS = keysOf<View['match']>()([
   'handsTotal?',
   'players',
 ])
-// Six-casual adds each seat's stack as of the last deal and whether it is
-// playing or sitting out (six-only, RULES).
+// Six-casual adds each seat's stack outside the hand being played (as of
+// its deal while dealt in, as the last hand left it otherwise: public at
+// the hand's end) and whether it is playing or sitting out (six-only,
+// RULES).
 export const TABLE_PLAYER_KEYS = keysOf<View['match']['players'][number]>()([
   'seat',
   'username',
@@ -314,6 +374,19 @@ export function checkFrame(f: ServerMsg, kind: MatchKind = 'hu-casual') {
   if (f.t === 'hand_start')
     for (const s of f.seats ?? [])
       expectKeys(s, HAND_START_SEAT_KEYS, 'hand_start.seats')
+  if (f.t === 'error') {
+    expect(ERROR_CODES, 'error.code').toContain(f.code)
+    if (!six)
+      expect(SIX_ERROR_CODES, `error.code ${f.code} heads-up`).not.toContain(
+        f.code,
+      )
+    // Both wait fields on a sit_cooldown, as counts; neither on any other.
+    const cooldown = f.code === 'sit_cooldown'
+    for (const key of ['handsLeft', 'until'] as const) {
+      expect(key in f, `error ${f.code}: ${key}`).toBe(cooldown)
+      if (cooldown) expect(Number.isSafeInteger(f[key]), key).toBe(true)
+    }
+  }
   if (f.t === 'hand_end') expectKeys(f.record, RECORD_KEYS, 'hand_end.record')
   if (f.t === 'match_end') expectKeys(f.result, RESULT_KEYS, 'match_end.result')
   if (f.t === 'reveal') {
@@ -332,6 +405,7 @@ export function checkFrame(f: ServerMsg, kind: MatchKind = 'hu-casual') {
 
 export function checkLobbyFrame(f: LobbyMsg) {
   expectKeys(f, LOBBY_FRAME_KEYS[f.t], `lobby ${f.t}`)
+  if (f.t === 'error') expect(ERROR_CODES, 'lobby error.code').toContain(f.code)
   expect(forbiddenKeys(f), `lobby ${f.t}: forbidden keys`).toEqual([])
 }
 
@@ -391,4 +465,14 @@ export const FLOW_TYPES = {
   six: ['welcome', 'state', 'hand_start', 'hand_end', 'reveal'],
   /** six.test.ts: seven accounts sit at one six table, seatless ones too. */
   sit: ['welcome', 'state', 'hand_start', 'error'],
+  /**
+   * six.test.ts: stands mid-hand and between hands, a re-sit refused for
+   * its cooldown, and a stand from a socket without a seat.
+   */
+  stand: ['welcome', 'state', 'hand_start', 'hand_end', 'reveal', 'error'],
+  /**
+   * six.test.ts: rebuys refused (no seat, in the hand, not below 100 bb)
+   * and granted between hands, seen by a socket without a seat too.
+   */
+  rebuy: ['welcome', 'state', 'hand_start', 'hand_end', 'reveal', 'error'],
 } satisfies Record<string, ServerMsg['t'][]>

@@ -2,6 +2,9 @@
 // earliest entry. Each entry says exactly which decision or hand it belongs
 // to, so a late, early or repeated alarm can never act on the wrong one.
 import { legalActions } from '../../src/engine/hand'
+import { orbitTravel } from '../../src/engine/positions'
+import type { Blinds } from '../../src/engine/positions'
+import { EngineError } from '../../src/engine/types'
 import type { HandState, PlayerAction, SeatId } from '../../src/engine/types'
 
 export type Deadline =
@@ -62,6 +65,24 @@ export const isCurrentTurn = (d: Deadline, hand: HandState | null) =>
   hand.config.handNo === d.handNo &&
   hand.actions.length === d.actionIndex &&
   hand.toAct === d.seat
+
+/**
+ * Six-casual (ADR amendment 2026-10-10, "Orbit and clock"): the table's
+ * orbit count once it deals a hand with blinds `next`, its last deal having
+ * had `prev` (null before its first hand). `travel` is the count stored with
+ * the match. Only the big blind's seat moves it (orbitTravel: the seats it
+ * moved clockwise, empty ones included), so a dead button or small blind,
+ * a player sitting down and one leaving change nothing but where the big
+ * blind goes next. `refill`: this hand starts a new orbit, and every seated
+ * player's bank is full again before its first decision.
+ */
+export function orbitDone(travel: number, prev: Blinds | null, next: Blinds) {
+  // A corrupt count would refill every hand, or never again.
+  if (!Number.isInteger(travel) || travel < 0 || travel > 5)
+    throw new EngineError(`An orbit count of ${travel}`)
+  const orbit = orbitTravel(travel, prev?.bb ?? null, next.bb)
+  return { travel: orbit.travel, refill: orbit.newOrbit }
+}
 
 /** The bank left after a decision that took `tookMs`. */
 export const bankAfter = (bankMs: number, tookMs: number, decisionMs: number) =>

@@ -1,6 +1,7 @@
-// A live heads-up table. Everything shown comes from the server's snapshot
-// for this seat, projected into the trainer's Game so the same Table and
-// ActionBar render it. No analysis runs here: the lab stays off in play.
+// A live table. Everything shown comes from the server's snapshot for this
+// seat. Heads-up, it is projected into the trainer's Game so the same Table
+// and ActionBar render it; a six-casual table renders the six-seat ring
+// instead (SixTable). No analysis runs here: the lab stays off in play.
 import { useEffect, useMemo, useState } from 'react'
 import { Check, Copy } from 'lucide-react'
 import { ActionBar } from '../components/table/ActionBar'
@@ -18,6 +19,7 @@ import type { TableState } from './client'
 import { MatchEnd } from './MatchEnd'
 import { matchOverText } from './matchResult'
 import { ReviewLive } from './ReviewLive'
+import { SixTable } from './SixTable'
 import { TurnClock } from './TurnClock'
 import { useTable } from './useTable'
 
@@ -30,7 +32,10 @@ export function LiveTable({
   matchId: string
   identity: Identity
 }) {
-  const { state, act, rematch } = useTable(matchId, identity.getToken)
+  const { state, act, rematch, sit, rebuy, stand } = useTable(
+    matchId,
+    identity.getToken,
+  )
   const { status, table, view, seat } = state
 
   if (status === 'elsewhere')
@@ -76,6 +81,18 @@ export function LiveTable({
           Back to the lobby
         </a>
       </div>
+    )
+  // A six table has viewers without a seat; it renders from its own frames.
+  if (table?.kind === 'six-casual')
+    return (
+      <SixTable
+        table={table}
+        state={state}
+        act={act}
+        sit={sit}
+        rebuy={rebuy}
+        stand={stand}
+      />
     )
   if (!table || seat === null)
     return (

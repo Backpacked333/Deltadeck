@@ -702,3 +702,90 @@
     opacity: 0.55;
   }
 }
+
+/* ---------- Casual 6-max at the live table (P2-05b) ----------
+   The middle of the felt holds the pot, the board and the viewer's own
+   cards; .six-mid sizes them to fit its width (P2-05a). */
+.six-pot {
+  margin: 0;
+  color: var(--on-felt-2);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.six-pot b {
+  color: var(--on-felt);
+}
+.six-board,
+.six-hole {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+}
+@media (max-width: 900px) {
+  .six-board,
+  .six-hole {
+    gap: 4px;
+  }
+}
+/* Where the action bar stands on the viewer's turn: the same card, saying
+   who is to act or how the hand went. */
+.six-wait {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+.six-wait .action-caption {
+  margin: 0;
+}
+/* On a phone the action bar is 300 px or more and the status a line or
+   two, and the page usually scrolls to reach the bar. Under the ring the
+   status keeps the height the bar last had (--dock, set by SixTable), so
+   the page does not shrink and jump each time the turn passes. */
+@media (max-width: 680px) {
+  .six-dock {
+    display: grid;
+    min-height: var(--dock, 0);
+  }
+  /* The bar keeps its own height, which is what --dock measures. */
+  .six-actions {
+    align-self: start;
+  }
+  /* The status fills the space, its line where the bar's status was. */
+  .six-dock .six-wait {
+    align-content: start;
+  }
+}
+.six-shown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 14px;
+}
+.six-shown li {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+/* The viewer's own seat under the table (PR-14): Rebuy and Stand up, and
+   the line saying a stand waits for the hand to end, or that a player
+   with no chips must rebuy. The line stays in the page, empty, so screen
+   readers announce it when it fills. */
+.six-seat-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.six-seat-status {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 14px;
+}

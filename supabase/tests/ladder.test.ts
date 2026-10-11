@@ -243,9 +243,17 @@ describe('the ladder', () => {
 })
 
 describe('the migration', () => {
-  it('backfills when each earlier rated match was played, and history stays append-only', async () => {
-    const early = new PGlite()
+  // Booting PGlite (initdb in WebAssembly) costs about 2 s of CPU, and
+  // more while other suites boot theirs: fixture work, so it runs in a hook
+  // like every suite's boot, not inside the test's 5 s.
+  let early: PGlite
+  beforeAll(async () => {
+    early = new PGlite()
     await early.exec(SUPABASE_STUB)
+  })
+  afterAll(() => early.close())
+
+  it('backfills when each earlier rated match was played, and history stays append-only', async () => {
     const files = migrationFiles()
     const ladder = files.findIndex((f) => f.endsWith('_ladder.sql'))
     for (const f of files.slice(0, ladder))
@@ -273,6 +281,5 @@ describe('the migration', () => {
     await expect(
       early.query(`update public.rating_history set played_at = now()`),
     ).rejects.toThrow(/append-only/)
-    await early.close()
   })
 })
