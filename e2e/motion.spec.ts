@@ -100,7 +100,7 @@ test('the all-in runout animates without long frames', async ({ page }) => {
       JSON.stringify({ onboarded: true }),
     ),
   )
-  await page.goto('/?seed=3')
+  await page.goto('/?seed=3#table')
   await page.getByRole('button', { name: 'All-in' }).click()
   await sampleFrames(page)
   await page.getByRole('button', { name: /Raise to 1,940/ }).click()

@@ -62,6 +62,8 @@ beforeAll(() =>
 beforeEach(() => {
   vi.stubGlobal('Worker', AnalysisWorker)
   onboarded()
+  // The bare URL is the landing page; these tests start at the trainer.
+  window.history.replaceState(null, '', '/#table')
 })
 afterEach(() => vi.useRealTimers())
 

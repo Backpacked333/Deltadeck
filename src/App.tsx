@@ -81,7 +81,7 @@ import {
 import { Tour } from './components/Tour'
 import { CardDefs } from './components/cards/CardArt'
 import type { TourStep } from './components/Tour'
-import { isFirstVisit } from './lib/landing'
+import { backFromSignIn, signedIn } from './lib/landing'
 import { track } from './lib/track'
 
 type View =
@@ -98,25 +98,24 @@ const Curriculum = lazy(() => import('./curriculum/Curriculum'))
 const LiveApp = lazy(() => import('./net/LiveApp'))
 const InfoPage = lazy(() => import('./info/InfoPages'))
 const Gallery = lazy(() => import('./dev/Gallery'))
-const loadLanding = () => import('./landing/Landing')
-const Landing = lazy(loadLanding)
+const Landing = lazy(() => import('./landing/Landing'))
 // The lab is the heaviest view; it loads in parallel with the first paint.
 const labModule = import('./components/lab/Lab')
 const Lab = lazy(() => labModule.then((module) => ({ default: module.Lab })))
 
 /**
- * Hash routes: the landing page (the bare URL on a first visit, #start, or
- * #c/<receipt> for a friend's challenge),
+ * Hash routes: the landing page (the bare URL, #start, or #c/<receipt> for a
+ * friend's challenge; the bare URL back from a sign-in opens the table),
  * #table (default), #progress, #lobby[/find], #play/<id>,
  * #ladder[/month], #u/<username> and #match/<id> (online play), #fair-play,
  * #terms and #method, #learn/...
  * and #learn/quick[/id].
  */
-function parseRoute(hash: string, firstVisit = false): Route {
+function parseRoute(hash: string, search = ''): Route {
   if (
     hash === '#start' ||
     /^#c\/[0-9a-f]{32}$/.test(hash) ||
-    (firstVisit && (hash === '' || hash === '#'))
+    ((hash === '' || hash === '#') && !backFromSignIn(search))
   )
     return { view: 'landing', lesson: null }
   const quick = hash.match(/^#learn\/quick(?:\/([\w-]+))?$/)
@@ -147,8 +146,16 @@ function parseRoute(hash: string, firstVisit = false): Route {
  * app resolves the transition.
  */
 function go(hash: string) {
-  const target = `#${hash}`
+  const target = hash ? `#${hash}` : ''
   if (window.location.hash === target) return
+  // Home is the bare URL: no trailing '#', and no sign-in ?code left over.
+  const navigate = () => {
+    if (hash) window.location.hash = hash
+    else {
+      window.history.pushState(null, '', window.location.pathname)
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    }
+  }
   const doc = document as Document & {
     startViewTransition?: (update: () => Promise<void>) => unknown
   }
@@ -156,7 +163,7 @@ function go(hash: string) {
     typeof window.matchMedia === 'function' &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches
   if (!doc.startViewTransition || reduced || motionOff) {
-    window.location.hash = hash
+    navigate()
     return
   }
   doc.startViewTransition(
@@ -167,7 +174,7 @@ function go(hash: string) {
           () => requestAnimationFrame(() => resolve()),
           { once: true },
         )
-        window.location.hash = hash
+        navigate()
       }),
   )
 }
@@ -262,14 +269,9 @@ export default function App() {
   )
   const { spots, request } = useSpots()
   const hash = useHash()
-  // Decided once, so the landing page never disappears mid-hand. A first
-  // visit starts loading it in parallel with the first paint.
-  const [firstVisit] = useState(() => {
-    const first = isFirstVisit(progress)
-    if (first) void loadLanding()
-    return first
-  })
-  const { view, lesson } = parseRoute(hash, firstVisit)
+  const { view, lesson } = parseRoute(hash, window.location.search)
+  // The landing page's account buttons, or the app's, for a signed-in visitor.
+  const member = view === 'landing' && signedIn()
   const learningSession = useRef<LearningSession | null>(null)
   const [dialog, setDialog] = useState<Dialog>(null)
   const [paused, setPaused] = useState(false)
@@ -833,10 +835,15 @@ export default function App() {
         Skip to content
       </a>
       <header className="header">
-        <button
+        <a
           className="brand"
-          onClick={() => go('table')}
-          aria-label="QuantPoker, back to the table"
+          href="/"
+          onClick={(e) => {
+            if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+            e.preventDefault()
+            go('')
+          }}
+          aria-label="QuantPoker home"
         >
           <span className="brand-mark">
             <Spade size={18} fill="currentColor" />
@@ -844,7 +851,7 @@ export default function App() {
           <span>
             quant<span className="brand-light">poker</span>
           </span>
-        </button>
+        </a>
         <nav className="nav" aria-label="Main">
           {(
             [
@@ -872,7 +879,7 @@ export default function App() {
           })}
         </nav>
         <div className="header-tools">
-          {view === 'landing' ? (
+          {view === 'landing' && !member ? (
             <span className="header-account">
               <a href="#welcome/onboard" className="header-signin">
                 Sign in
@@ -1160,7 +1167,7 @@ export default function App() {
               </div>
             }
           >
-            <Landing />
+            <Landing signedIn={member} />
           </Suspense>
         )}
         {view === 'gallery' && (
