@@ -1213,6 +1213,52 @@ describe('a bad stored sit-out count', () => {
     expect((await seated(matchId)).map((p) => p.seat)).toEqual([0, 2])
     await elapse(matchId, 1)
     expect((await seated(matchId)).map((p) => p.seat)).toEqual([0])
+
+    // A number can still not be a time this table's clock gave. Later
+    // than now, read as it is, it would put the removal off until then,
+    // at a table that deals nothing: never. Before 1970 (past the range
+    // of a date), the alarm could not be set at all. Seat 0 sits out, and
+    // seat 4 sits down and sits out too (nobody to deal in with): one
+    // stored time goes a day ahead, the other far back. Both are repaired
+    // the same way.
+    await sitOut(clients[0])
+    clients[4] = await sitDown(matchId, USERS[2], 4)
+    await sitOut(clients[4])
+    expect((await peek(matchId)).hand!.config.handNo).toBe(1)
+    const now = await clockOf(matchId)
+    const later = now + 24 * 60 * 60_000
+    await corrupt(matchId, 0, { outSince: later })
+    await corrupt(matchId, 4, { outSince: -1e300 })
+    await elapse(matchId, 0)
+    await elapse(matchId, 0)
+    expect(
+      (await seated(matchId)).map((p) => [p.seat, p.status, p.outSince]),
+    ).toEqual([
+      [0, 'sitting_out', now],
+      [4, 'sitting_out', now],
+    ])
+    const recorded = (await incidents(calls, 3)).slice(1)
+    expect(recorded).toHaveLength(2)
+    expect(recorded).toEqual(
+      expect.arrayContaining([
+        {
+          matchId,
+          handNo: 1,
+          kind: `sitout_count:${USERS[0]}`,
+          detail: { userId: USERS[0], outOrbits: 0, outSince: later },
+        },
+        {
+          matchId,
+          handNo: 1,
+          kind: `sitout_count:${USERS[2]}`,
+          detail: { userId: USERS[2], outOrbits: 0, outSince: -1e300 },
+        },
+      ]),
+    )
+    await elapse(matchId, FIVE_MINUTES - 1)
+    expect((await seated(matchId)).map((p) => p.seat)).toEqual([0, 4])
+    await elapse(matchId, 1)
+    expect((await seated(matchId)).map((p) => p.seat)).toEqual([])
   })
 })
 

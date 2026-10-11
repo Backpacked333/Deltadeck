@@ -977,19 +977,20 @@ export class TableDO extends DurableObject<WorkerEnv> {
 
   /**
    * Six-casual: a stored sit-out count or time that cannot be right (not
-   * 0 to SIT_OUT_ORBITS - 1 orbit starts, or not a time) is set back to 0,
-   * or to now, logged, and recorded as an incident with what was stored
-   * (only the service role reads incidents). One player's bad count must
-   * not halt the table for everyone else, as a corrupt `orbitTravel` does
-   * (ADR, clarifications from PR-15): the most it costs is that player's
-   * later removal, which SIT_OUT_MS still bounds. True when it repaired.
+   * 0 to SIT_OUT_ORBITS - 1 orbit starts, or not a time up to now:
+   * outSinceOk) is set back to 0, or to now, logged, and recorded as an
+   * incident with what was stored (only the service role reads
+   * incidents). One player's bad count must not halt the table for
+   * everyone else, as a corrupt `orbitTravel` does (ADR, clarifications
+   * from PR-15): the most it costs is that player's later removal, which
+   * SIT_OUT_MS still bounds. True when it repaired.
    */
   private repairOut(p: Player, writes: Record<string, unknown>) {
     const orbitsOk =
       Number.isInteger(p.outOrbits) &&
       p.outOrbits! >= 0 &&
       p.outOrbits! < SIT_OUT_ORBITS
-    const sinceOk = Number.isFinite(p.outSince)
+    const sinceOk = this.outSinceOk(p)
     if (orbitsOk && sinceOk) return false
     const match = this.match!
     const stored = {
@@ -1004,7 +1005,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
       userId: p.userId,
       reason: 'sitout_count',
     })
-    // One per account and hand: incidents_once keys on the kind.
+    // One per account and hand: incidents_once is unique on (match_id,
+    // hand_no, kind), and the kind names the account.
     if (this.recordable())
       writes[this.outboxKey(match.handNo, `sitout:${p.userId}`)] = {
         rpc: 'record_incident',
@@ -1017,6 +1019,18 @@ export class TableDO extends DurableObject<WorkerEnv> {
         },
       } satisfies Outbox
     return true
+  }
+
+  /**
+   * Six-casual: whether `p`'s stored sit-out time can be one the table's
+   * clock (Date.now()) gave: a number from 1970 to now. One later than
+   * now would put their removal off until then, which at a table that
+   * deals nothing is never; one far enough back makes setAlarm throw
+   * ("dates before 1687"), as NaN did, on every write that arms it.
+   */
+  private outSinceOk(p: Player) {
+    const since = p.outSince
+    return Number.isFinite(since) && since! >= 0 && since! <= this.clock()
   }
 
   /**
@@ -1043,11 +1057,10 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const due = this.seatable()
       ? match.players
           .filter((p) => this.leavable(p))
-          // A time that is not one is due now, so the alarm repairs it.
+          // A time that cannot be right is due now, so the alarm
+          // repairs it (repairOut).
           .map((p) =>
-            Number.isFinite(p.outSince)
-              ? p.outSince! + SIT_OUT_MS
-              : this.clock(),
+            this.outSinceOk(p) ? p.outSince! + SIT_OUT_MS : this.clock(),
           )
       : []
     this.deadlines = [
