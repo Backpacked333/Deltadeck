@@ -64,6 +64,8 @@ import { lobbyStub } from './lobby'
 import type { RematchAnswer } from './lobby'
 import { describeError, logEvent } from './log'
 import { GRACE_MS, outcomes, RATED_CONFIG, REMATCH_MS } from './rated'
+import { finalPot, newListing, noteHand, REPORT_MS, reportOf } from './registry'
+import type { Listing } from './registry'
 import { archive, refusedForData } from './supabase'
 import type { ArchiveCall, ArchiveOutcome } from './supabase'
 import { applyRating } from './rating'
@@ -374,6 +376,17 @@ export class TableDO extends DurableObject<WorkerEnv> {
    * be seated here with the lobby thinking it free. A sit waits for these.
    */
   private releasing = new Map<string, Promise<void>>()
+  /**
+   * Six-casual: what the table keeps for its entry in the lobby's list
+   * (registry.ts), stored as `listing` with each change it describes.
+   */
+  private listing: Listing | null = null
+  /**
+   * Six-casual: the table's calls to the lobby's list, one after another.
+   * Two calls from here are not ordered on the way otherwise, and a report
+   * landing after the removal would list a table that is gone.
+   */
+  private listingCalls: Promise<unknown> = Promise.resolve()
 
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env)
@@ -390,6 +403,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
         'deadlines',
         'seq',
         'lastAck',
+        'listing',
       ])
       this.match = (stored.get('match') as Match | undefined) ?? null
       this.hand = (stored.get('hand') as HandState | undefined) ?? null
@@ -398,6 +412,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
       this.deadlines = (stored.get('deadlines') as Deadline[]) ?? []
       this.seq = (stored.get('seq') as number | undefined) ?? 0
       this.lastAck = (stored.get('lastAck') as Record<string, Ack>) ?? {}
+      this.listing = (stored.get('listing') as Listing | undefined) ?? null
     })
   }
 
@@ -732,9 +747,12 @@ export class TableDO extends DurableObject<WorkerEnv> {
     }
     match.players = [...match.players, player].sort((a, b) => a.seat - b.seat)
     this.seq++
-    await this.ctx.storage.put({ match, seq: this.seq })
+    const writes: Record<string, unknown> = { match, seq: this.seq }
+    const report = this.reportDue(writes)
+    await this.ctx.storage.put(writes)
     this.send(ws, this.frame('welcome', userId))
     this.broadcast('state', { skip: ws, roster: true })
+    if (report) this.sendReport()
     if (match.status === 'waiting' && match.players.length >= 2) {
       match.status = 'playing'
       await this.startNextHand()
@@ -807,14 +825,17 @@ export class TableDO extends DurableObject<WorkerEnv> {
       if (!match.players.length && match.status === 'waiting')
         this.setGameDeadline(this.idleDeadline())
       this.seq++
-      await this.ctx.storage.put({
+      const writes: Record<string, unknown> = {
         match,
         seq: this.seq,
         deadlines: this.deadlines,
-      })
+      }
+      const report = this.reportDue(writes)
+      await this.ctx.storage.put(writes)
       await this.armAlarm()
       this.send(ws, this.frame('welcome', userId))
       this.broadcast('state', { skip: ws, roster: true })
+      if (report) this.sendReport()
       return this.releaseSeats([userId])
     }
     if (!player.standing) {
@@ -1096,6 +1117,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const writes: Record<string, unknown> = { match }
     const { due: gone, repaired } = this.satOutTooLong(false, writes)
     if (!gone.length && !repaired) return
+    let report = false
     if (gone.length) {
       this.unseat(gone, false)
       // As at the last stand: an open session still ends IDLE_MS after
@@ -1105,6 +1127,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
         this.setGameDeadline(this.idleDeadline())
       this.seq++
       writes.seq = this.seq
+      report = this.reportDue(writes)
     }
     writes.deadlines = this.deadlines
     this.expectArchive(writes)
@@ -1114,6 +1137,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
       this.broadcast('state', { roster: true })
       this.leave(gone)
     }
+    if (report) this.sendReport()
     if (repaired) void this.flushOutbox()
   }
 
@@ -1482,6 +1506,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
         )
           await this.startNextHand()
       }
+      // Six-casual: a change the throttle held back goes out now if its
+      // window has passed; it has no alarm of its own.
+      await this.sendHeldReport()
       await this.armAlarm()
     } catch (error) {
       logEvent('error', {
@@ -1562,6 +1589,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     // Six-casual: players who stood during this hand leave as it ends.
     const stood = isOver(next) ? match.players.filter((p) => p.standing) : []
     let busted = false
+    let report = false
     if (isOver(next)) {
       this.addNet(next)
       this.logHandEnd(next, t - current.startedAt)
@@ -1569,6 +1597,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
       writes.ended = this.ended
       if (stood.length) this.unseat(stood)
       busted = six && this.bustOut(next)
+      report = this.handReport(next, writes)
       this.setGameDeadline(
         forfeit
           ? null
@@ -1593,6 +1622,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     else if (isOver(next)) {
       void this.flushOutbox()
       if (stood.length) void this.releaseSeats(stood.map((p) => p.userId))
+      if (report) this.sendReport()
     } else {
       // A player who stood folds as soon as the action reaches them.
       const hand = this.hand!
@@ -1746,6 +1776,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
     }
     if (match.handNo === 1 && this.recordable())
       writes[this.outboxKey(0, 'match')] = this.matchCall()
+    // Seats this deal freed change the table's entry in the lobby's list.
+    const report = leaving.length > 0 && this.reportDue(writes)
     this.expectArchive(writes)
     await this.ctx.storage.put(writes)
     await this.armAlarm()
@@ -1776,6 +1808,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     // A seat that freed changes the table for sockets without a seat too.
     this.broadcast('state', { roster: leaving.length > 0 })
     this.leave(leaving)
+    if (report) this.sendReport()
     if (match.handNo === 1)
       logEvent('match_start', {
         matchId: this.matchId(),
@@ -1796,6 +1829,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     this.ended = await this.endOfHand(hand, this.current!, writes)
     writes.ended = this.ended
     const busted = match.config.kind === 'six-casual' && this.bustOut(hand)
+    const report = this.handReport(hand, writes)
     this.setGameDeadline({
       kind: 'nextHand',
       at: this.clock() + NEXT_HAND_MS,
@@ -1810,6 +1844,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     if (busted) this.broadcast('state', { roster: true })
     for (const ws of this.openSockets()) this.sendEnded(ws)
     void this.flushOutbox()
+    if (report) this.sendReport()
   }
 
   private logHandEnd(hand: HandState, ms: number) {
@@ -2113,6 +2148,108 @@ export class TableDO extends DurableObject<WorkerEnv> {
     }
   }
 
+  // ---- Six-casual: the lobby's list (P2-08) -----------------------------------
+
+  /**
+   * Six-casual: hand `hand` just ended. It joins the window the table's
+   * figures cover (noteHand), and the table's entry changed (reportDue).
+   */
+  private handReport(hand: HandState, writes: Record<string, unknown>) {
+    if (!this.seatable()) return false
+    noteHand(
+      (this.listing ??= newListing()),
+      this.clock(),
+      finalPot(hand),
+      this.dealtUsers().map((d) => d.userId),
+    )
+    return this.reportDue(writes)
+  }
+
+  /**
+   * Six-casual: the table's entry in the lobby's list changed (a hand
+   * ended, a seat was taken or freed), or an idle check refreshes it
+   * (`refresh`). It is due once the last report is REPORT_MS old, and is
+   * then marked sent now. Otherwise a change is held (`pending`) for the
+   * first alarm or change after the window (sendHeldReport); a refresh is
+   * not, since a report has just gone. The listing goes into `writes`, to
+   * commit with what it describes. True when the caller should send it
+   * (sendReport) once its write is done.
+   */
+  private reportDue(writes: Record<string, unknown>, refresh = false) {
+    if (!this.seatable()) return false
+    const listing = (this.listing ??= newListing())
+    const t = this.clock()
+    const due = t >= listing.reportedAt + REPORT_MS
+    if (due) {
+      listing.reportedAt = t
+      listing.pending = false
+    } else if (refresh) return false
+    else listing.pending = true
+    writes.listing = listing
+    return due
+  }
+
+  /**
+   * Sends the table as it is now to the lobby's list, counts only, and does
+   * not wait: no hand, deal or frame waits on the lobby. A report that
+   * fails is logged and held again, so the first alarm or change after the
+   * window sends the table as it is then (the outbox would retry a stale
+   * report, and stop behind an archive outage).
+   */
+  private sendReport() {
+    const match = this.match!
+    const report = reportOf(
+      this.listing!,
+      this.clock(),
+      match.players.length,
+      match.config.maxSeats ?? 6,
+    )
+    const tableId = match.id
+    void this.toLobbyList('lobby_report', (lobby) =>
+      lobby.reportTable(tableId, report),
+    ).then((sent) => {
+      if (!sent && this.listing) this.listing.pending = true
+    })
+  }
+
+  /** A held change goes out once its window has passed (run by alarms). */
+  private async sendHeldReport() {
+    if (!this.listing?.pending) return
+    const writes: Record<string, unknown> = {}
+    if (!this.reportDue(writes)) return
+    await this.ctx.storage.put(writes)
+    this.sendReport()
+  }
+
+  /** Six-casual: the table leaves the lobby's list (deleted, or halted). */
+  private unlist(tableId: string) {
+    return this.toLobbyList('lobby_unlist', (lobby) =>
+      lobby.removeTable(tableId),
+    )
+  }
+
+  /**
+   * A call to the lobby's list, once every earlier one has landed. Never
+   * throws: it logs a failure and resolves false.
+   */
+  private toLobbyList(
+    reason: string,
+    call: (lobby: ReturnType<typeof lobbyStub>) => Promise<unknown>,
+  ): Promise<boolean> {
+    const matchId = this.match?.id
+    const sent = this.listingCalls.then(async () => {
+      try {
+        await call(lobbyStub(this.env))
+        return true
+      } catch (error) {
+        logEvent('error', { matchId, reason, detail: describeError(error) })
+        return false
+      }
+    })
+    this.listingCalls = sent
+    return sent
+  }
+
   // ---- Six-casual sessions ---------------------------------------------------
 
   /** Whether a six table's session is open: it has dealt, and not ended. */
@@ -2350,6 +2487,13 @@ export class TableDO extends DurableObject<WorkerEnv> {
       // session must be archived as ended before the table goes.
       if (due || match.players.length || this.sessionOpen()) {
         this.deadlines.push({ kind: 'idle', at: this.clock() + IDLE_MS })
+        // Its entry in the lobby's list is refreshed, changed or not, so a
+        // table that only waits is never taken for one that died.
+        const writes: Record<string, unknown> = {}
+        if (this.reportDue(writes, true)) {
+          await this.ctx.storage.put(writes)
+          this.sendReport()
+        }
         return false
       }
     }
@@ -2359,6 +2503,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
       this.deadlines.push({ kind: 'idle', at: this.clock() + IDLE_MS })
       return false
     }
+    // A six table leaves the lobby's list before it goes. Awaited, since no
+    // hand is in play; if it is lost, the lobby drops the entry once stale.
+    if (match?.config.kind === 'six-casual') await this.unlist(match.id)
     for (const ws of this.ctx.getWebSockets())
       try {
         ws.close(CLOSE_GONE, 'closed')
@@ -2374,6 +2521,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     this.deadlines = []
     this.seq = 0
     this.lastAck = {}
+    this.listing = null
     return true
   }
 
@@ -2464,6 +2612,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
         detail: describeError(error),
       })
     }
+    // A six table that halts seats nobody again: it leaves the list.
+    if (six) await this.unlist(match.id)
     await this.offerRematch()
   }
 

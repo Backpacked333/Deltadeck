@@ -8,22 +8,29 @@ import {
   SELF,
 } from 'cloudflare:test'
 import { afterEach, describe, expect, it } from 'vitest'
+import { legalActions } from '../../src/engine/hand'
+import type { HandState, PlayerAction } from '../../src/engine/types'
 import type { LobbyMsg } from '../../src/shared/protocol'
 import { lobbyStub, REPAIR_MS, START_WITHIN_MS } from '../src/lobby'
 import type { LobbyDO } from '../src/lobby'
-import { REGISTRY_STALE_MS } from '../src/registry'
+import { REGISTRY_STALE_MS, REPORT_MS } from '../src/registry'
 import type { TableEntry, TableReport } from '../src/registry'
+import { NEXT_HAND_MS } from '../src/table'
 import { checkLobbyFrame, LOBBY_FRAME_KEYS } from './frames'
 import {
   connect,
   createTable,
   elapse,
+  eventually,
   freezeClock,
   isState,
   lobby,
   ORIGIN,
   peek,
+  playOut,
   setLobbyClock,
+  sitDown,
+  sixTable,
   token,
   tryConnect,
 } from './helpers'
@@ -534,6 +541,45 @@ describe('the six-table registry (P2-08)', () => {
     maxSeats: 6,
     avgPot: 40,
     playersPerHour: 3,
+  })
+  const fold = (): PlayerAction => ({ type: 'fold' })
+  const passive = (hand: HandState): PlayerAction =>
+    legalActions(hand).canCheck ? { type: 'check' } : { type: 'call' }
+  /** What a finished hand's winners were awarded. */
+  const potOf = (hand: HandState) =>
+    hand.result!.awards.reduce((sum, a) => sum + a.amount, 0)
+
+  it('the table list shows seats, average pot and players/hour', async () => {
+    await setLobbyClock(LOBBY_AT)
+    const matchId = await sixTable()
+    const a = await sitDown(matchId, 'list-a', 0)
+    const b = await sitDown(matchId, 'list-b', 2)
+    await a.next(isState(1))
+    // C sits during hand 1: seated at once, dealt in from hand 2.
+    const c = await sitDown(matchId, 'list-c', 4)
+    const clients = { 0: a, 2: b, 4: c }
+    // Hand 1, heads-up: the small blind folds. Its pot is what the big
+    // blind was awarded, 20; the uncalled half of the big blind went back.
+    expect(potOf(await playOut(matchId, clients, fold))).toBe(20)
+    // Hand 2 deals all three in, and they check it down: 60.
+    await elapse(matchId, NEXT_HAND_MS)
+    await a.next(isState(2))
+    expect(potOf(await playOut(matchId, clients, passive))).toBe(60)
+    // A table reports at most every 30 s; the first alarm after that sends
+    // the table as it is then (hand 3 is dealt meanwhile).
+    await elapse(matchId, REPORT_MS)
+    await eventually(async () => (await entryOf(matchId))?.avgPot === 40)
+    // Three seats of six, the mean of 20 and 60, and three accounts dealt
+    // in this hour: counts only.
+    const entry = {
+      seated: 3,
+      maxSeats: 6,
+      avgPot: 40,
+      playersPerHour: 3,
+      updatedAt: LOBBY_AT,
+    }
+    expect(await entryOf(matchId)).toEqual(entry)
+    expect(await listed()).toContainEqual({ tableId: matchId, ...entry })
   })
 
   it('lists the fullest table with a free seat first, and full tables last', async () => {
