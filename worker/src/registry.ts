@@ -3,6 +3,7 @@
 // keeps to describe itself, the counts it reports, and the order the lobby
 // lists them in. Pure, so the table and the lobby share one definition.
 import type { HandState } from '../../src/engine/types'
+import type { TableRow } from '../../src/shared/protocol'
 import { IDLE_MS } from './deadlines'
 
 /**
@@ -139,3 +140,22 @@ export function listTables(
         (a.tableId < b.tableId ? -1 : a.tableId > b.tableId ? 1 : 0),
     )
 }
+
+/**
+ * A listed table as a client sees it (the `tables` frame): its id and the
+ * four counts, copied by name, so nothing else the lobby keeps (updatedAt,
+ * or a field added to an entry later) reaches a client.
+ */
+export const tableRow = ({
+  tableId,
+  seated,
+  maxSeats,
+  avgPot,
+  playersPerHour,
+}: ListedTable): TableRow => ({
+  tableId,
+  seated,
+  maxSeats,
+  avgPot,
+  playersPerHour,
+})
