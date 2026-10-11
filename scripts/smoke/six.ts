@@ -17,7 +17,7 @@ import type {
   SeatView,
   ServerMsg,
 } from '../../src/shared/protocol'
-import { PROTOCOL } from '../../src/shared/protocol'
+import { PROTOCOL, QUICK_SIT_TABLES } from '../../src/shared/protocol'
 import type { SmokeResult } from '../smoke-stats'
 
 /** What the run does to the table, by the hand count seat 0 has seen. */
@@ -131,10 +131,18 @@ export class SixRun {
   private quickSit(token: string) {
     return new Promise<string>((resolve, reject) => {
       const ws = this.socket('/ws/lobby', token)
-      ws.onopen = () => ws.send(JSON.stringify({ t: 'quick_sit' }))
+      // The run needs six free seats: tables already in play (an earlier
+      // run's, or real players') are named as tried, so the lobby opens one.
+      ws.onopen = () => ws.send(JSON.stringify({ t: 'tables' }))
       ws.onmessage = (event) => {
         const msg = JSON.parse(String(event.data)) as LobbyMsg
-        if (msg.t === 'sit_at') {
+        if (msg.t === 'tables') {
+          const tried = msg.tables
+            .filter((t) => t.seated > 0)
+            .slice(0, QUICK_SIT_TABLES)
+            .map((t) => t.tableId)
+          ws.send(JSON.stringify({ t: 'quick_sit', tried }))
+        } else if (msg.t === 'sit_at') {
           ws.close(1000)
           resolve(msg.tableId)
         } else if (msg.t === 'matched') {
