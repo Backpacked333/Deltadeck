@@ -25,7 +25,8 @@ export type PlateSeat = {
   status: SeatStatus
   /**
    * Their socket is open (MatchInfo.players[].connected). False while they
-   * are away: in their 60 s grace, or sitting out after it.
+   * are away: in their 60 s grace, or sitting out after it. Left out for a
+   * viewer without a seat, whose roster may be stale on it (SixTable).
    */
   connected?: boolean
   /** Stood up during the hand whose result is showing (SixTable). */

@@ -261,7 +261,7 @@ export function SixTable({
         )}
       </div>
       <SixRing
-        players={plates(table, view, nameOf)}
+        players={plates(table, view, nameOf, seat !== null)}
         you={seat}
         button={view?.button ?? null}
         sb={view?.sb ?? null}
@@ -335,14 +335,20 @@ export function SixTable({
  * and every seat once the hand is over, shows the stack the roster gives:
  * what the next hand deals them (after the last hand, or a rebuy). A seat
  * whose player left as the hand ended may have a new one by then.
+ *
+ * Who has dropped shows only to a viewer with a seat (`seated`): the table
+ * tells a socket without one about a seat only when someone sits, stands,
+ * rebuys or changes status (ADR "Sockets without a seat"), not when a
+ * player drops or comes back, so its `connected` may be stale either way.
  */
 function plates(
   table: MatchInfo,
   view: SeatView | null,
   nameOf: (seat: SeatId) => string,
+  seated: boolean,
 ): PlateSeat[] {
   const live = view && !view.result ? view : null
-  const seated: PlateSeat[] = table.players.map((p) => {
+  const plated: PlateSeat[] = table.players.map((p) => {
     const inHand = live?.players.find((h) => h.seat === p.seat)
     return {
       seat: p.seat,
@@ -352,13 +358,13 @@ function plates(
       // Sitting out takes effect from the next hand: a player who sat out
       // during this one still plays it, and shows as playing until it ends.
       status: inHand ? 'playing' : (p.status ?? 'playing'),
-      connected: p.connected,
+      connected: seated ? p.connected : undefined,
     }
   })
   // A player who stood during the hand leaves the roster as it ends. While
   // its result shows and the next hand is coming, their seat still shows
   // them with what they had there, unless someone has sat in it since.
-  if (!view?.result || table.status !== 'playing') return seated
+  if (!view?.result || table.status !== 'playing') return plated
   const left: PlateSeat[] = view.players
     .filter((h) => !table.players.some((p) => p.seat === h.seat))
     .map((h) => ({
@@ -369,7 +375,7 @@ function plates(
       status: 'sitting_out',
       left: true,
     }))
-  return [...seated, ...left]
+  return [...plated, ...left]
 }
 
 /**

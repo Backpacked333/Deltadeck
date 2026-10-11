@@ -1470,6 +1470,37 @@ describe('LiveTable at a six-casual table', () => {
     expect(seat(3)).not.toHaveAttribute('data-away')
     expect(within(seat(3)).getByText('Sitting out')).toBeInTheDocument()
   })
+
+  it('a viewer without a seat is never told who has dropped', async () => {
+    // A socket without a seat hears of a seat only when someone sits,
+    // stands, rebuys or changes status (ADR "Sockets without a seat"), not
+    // when a player drops or comes back, so the connected flag it holds
+    // may be stale either way. The plates do not repeat it.
+    render(<LiveTable matchId={MATCH} identity={identity('erin')} />)
+    const socket = await opened()
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 1, null, null, sixHand(), {
+          table: awayIn(sixInfo(), [3]),
+        }),
+      ),
+    )
+    expect(seat(3)).toHaveTextContent('carol')
+    expect(screen.queryByText('Disconnected')).toBeNull()
+    expect(seat(3)).not.toHaveAttribute('data-away')
+
+    // Once she sits, every drop and return reaches her: the plate says it.
+    const roster = [...SIX_ROSTER, { seat: 4, username: 'erin', stack: 2000 }]
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 2, 4, null, sixHand(), {
+          table: awayIn(sixInfo(roster), [3]),
+        }),
+      ),
+    )
+    expect(within(seat(3)).getByText('Disconnected')).toBeInTheDocument()
+    expect(seat(3)).toHaveAttribute('data-away')
+  })
 })
 
 /** `table` with the players in `seats` disconnected. */
