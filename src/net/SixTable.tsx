@@ -141,6 +141,9 @@ export function SixTable({
     mine.stack < TOP_UP &&
     asked !== `rebuy:${askKey}`
   const canStand = controls && !!mine && !leaving && asked !== `stand:${askKey}`
+  // Seated without chips and out of any hand being played: no hand deals
+  // us in until we rebuy (the server deals only funded players).
+  const broke = !playing && mine?.stack === 0
   const onRebuy = () => {
     if (rebuy()) setAsked(`rebuy:${askKey}`)
   }
@@ -196,7 +199,13 @@ export function SixTable({
         {dealt && legal ? (
           <SixActions view={dealt} legal={legal} act={act} onHeight={setDock} />
         ) : (
-          <SixStatus table={table} view={view} state={state} nameOf={nameOf} />
+          <SixStatus
+            table={table}
+            view={view}
+            state={state}
+            nameOf={nameOf}
+            broke={broke}
+          />
         )}
       </div>
       {seat !== null && (
@@ -204,6 +213,7 @@ export function SixTable({
           canRebuy={canRebuy}
           canStand={canStand}
           leaving={leaving}
+          broke={broke}
           onRebuy={onRebuy}
           onStand={onStand}
         />
@@ -260,19 +270,23 @@ function plates(
 /**
  * The viewer's own seat. Rebuy is offered below 100 bb out of the hand
  * being played; Stand up to anyone seated, until they have stood from the
- * hand they are dealt into. The line saying so is a live region mounted
- * with the controls, so its change is announced.
+ * hand they are dealt into. The line under them says when a stand waits
+ * for the hand to end, or that a player with no chips must rebuy to be
+ * dealt in. It is a live region mounted with the controls, so its change
+ * is announced, as the hand's result is: a player who busts hears both.
  */
 function SeatControls({
   canRebuy,
   canStand,
   leaving,
+  broke,
   onRebuy,
   onStand,
 }: {
   canRebuy: boolean
   canStand: boolean
   leaving: boolean
+  broke: boolean
   onRebuy: () => void
   onStand: () => void
 }) {
@@ -288,8 +302,12 @@ function SeatControls({
           Stand up
         </button>
       )}
-      <p className="six-leaving" role="status">
-        {leaving ? 'Leaving after this hand' : ''}
+      <p className="six-seat-status" role="status">
+        {leaving
+          ? 'Leaving after this hand'
+          : broke
+            ? 'No chips left: rebuy to be dealt in.'
+            : ''}
       </p>
     </div>
   )
@@ -451,20 +469,17 @@ function SixStatus({
   view,
   state,
   nameOf,
+  broke,
 }: {
   table: MatchInfo
   view: SeatView | null
   state: TableState
   nameOf: (seat: SeatId) => string
+  /** Seated with no chips: the seat controls say to rebuy (SixTable). */
+  broke: boolean
 }) {
   const seated = state.seat !== null
   const result = view?.result ?? null
-  // Seated without chips and out of any hand being played: no hand deals
-  // us in until we rebuy (the server deals only funded players).
-  const broke =
-    seated &&
-    !(view && !view.result && view.you !== null) &&
-    table.players.find((p) => p.seat === state.seat)?.stack === 0
   const net =
     result && view && view.you !== null
       ? (result.netBySeat[view.you] ?? 0)
@@ -500,9 +515,7 @@ function SixStatus({
   const caption =
     table.status === 'finished' ? (
       <a href="#lobby">Back to the lobby</a>
-    ) : broke ? (
-      'No chips left: rebuy to be dealt in.'
-    ) : seated && view?.you === null ? (
+    ) : broke ? null : seated && view?.you === null ? (
       'You are dealt in from the next hand.'
     ) : !seated && table.players.length < SEATS ? (
       'Take a seat to be dealt in from the next hand.'

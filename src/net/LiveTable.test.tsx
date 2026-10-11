@@ -702,6 +702,46 @@ describe('LiveTable at a six-casual table', () => {
     expect(rebuyButton()).toBeNull()
   })
 
+  it('a player who busts hears that she must rebuy: the seat controls announce it', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    // alice posts her last 10 chips as the small blind; dave and bob fold
+    // and carol's queens take them at the showdown.
+    let hand = sixHand({ stacks: { 2: 10 } })
+    const short = withStack(SIX_ROSTER, 2, 10)
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 1, 2, 2, hand, { table: sixInfo(short) }),
+      ),
+    )
+    // The live region is in the page before the news, so it is announced.
+    const status = seatStatus()
+    expect(status).toHaveTextContent(/^$/)
+    for (const s of [5, 0]) hand = engineAct(hand, s, { type: 'fold' })
+    expect(hand.street).toBe('showdown')
+    const busted = withStack(withStack(SIX_ROSTER, 2, 0), 3, 1510)
+    act(() =>
+      socket.emit(sixFrame('state', 2, 2, 2, hand, { table: sixInfo(busted) })),
+    )
+    expect(screen.getByText(/^carol wins/)).toBeInTheDocument()
+    expect(status).toHaveTextContent('No chips left: rebuy to be dealt in.')
+    // Said once, next to the Rebuy button it explains.
+    expect(
+      screen.getAllByText('No chips left: rebuy to be dealt in.'),
+    ).toHaveLength(1)
+    expect(rebuyButton()).toBeInTheDocument()
+
+    // Topped up: the line empties, and she is dealt in from the next hand.
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 3, 2, 2, hand, {
+          table: sixInfo(withStack(busted, 2, 2000)),
+        }),
+      ),
+    )
+    expect(status).toHaveTextContent(/^$/)
+  })
+
   it('a busted player watching a hand may rebuy; a viewer without a seat has no seat controls', async () => {
     render(<LiveTable matchId={MATCH} identity={identity('erin')} />)
     const socket = await opened()
