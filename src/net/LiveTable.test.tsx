@@ -10,6 +10,7 @@ import { seedRandom } from '../lib/random'
 import type { Identity } from './api'
 import { Lobby } from './Lobby'
 import { LiveTable } from './LiveTable'
+import { FLY_MS, NEXT_POT_MS, PAY_MS } from './SixFlights'
 import {
   FakeSocket,
   finishedHand,
@@ -1339,9 +1340,14 @@ describe('LiveTable at a six-casual table', () => {
       ['pot-1', 'seat-0'],
       ['pot-0', 'seat-3'],
     ])
-    const [first, second, third] = paidDelays()
-    expect(first).toBeLessThan(second)
-    expect(second).toBeLessThan(third)
+    // The first pot leaves as the river's bets land, then a pot every
+    // 350 ms: the schedule as the eye sees it, in milliseconds.
+    expect(paidDelays()).toEqual([600, 950, 1300])
+    expect(paidDelays()).toEqual([
+      FLY_MS,
+      PAY_MS + NEXT_POT_MS,
+      PAY_MS + 2 * NEXT_POT_MS,
+    ])
   })
 
   it('a split pot sends a flight to each winner at once, after the last bets are gathered', async () => {
@@ -1381,6 +1387,8 @@ describe('LiveTable at a six-casual table', () => {
     expect(alices).toBe(daves)
     expect(daves).toBeLessThan(carols)
     expect(Math.max(...gatheredDelays())).toBeLessThan(alices)
+    // Not merely later than the gathers leave: after they land.
+    expect(alices).toBeGreaterThanOrEqual(FLY_MS)
   })
 
   it("a flight starts at its seat's bet and lands on its pot or winner, wherever the ring puts them", async () => {

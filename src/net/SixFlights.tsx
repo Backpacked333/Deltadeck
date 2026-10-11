@@ -15,12 +15,16 @@ import { ChipPile } from '../components/table/ChipPile'
 import type { SeatId } from '../engine/types'
 import type { SeatView } from '../shared/protocol'
 
-/** One flight, as long as the trainer's (styles.css `.flight`). */
-const FLY_MS = 600
+/**
+ * One flight, as long as the trainer's (styles.css `.flight`) and as
+ * live.css's `.six-flight` animation. Exported, with the payout's beats,
+ * for the tests that hold the schedule to them.
+ */
+export const FLY_MS = 600
 /** The result's first pot leaves once the last bets have landed. */
-const PAY_MS = FLY_MS
+export const PAY_MS = FLY_MS
 /** Then each next pot this much later, so the award order shows. */
-const NEXT_POT_MS = 350
+export const NEXT_POT_MS = 350
 /** A flight's chips leave the page a little after they land. */
 const LINGER_MS = 100
 
