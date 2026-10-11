@@ -193,7 +193,16 @@ export function SixTable({
   // the ring says why the seat is gone.
   const status = mine?.status ?? null
   const lastStatus = useRef<string | null>(null)
+  // A stand of our own is still to free the seat: pressed here, or the
+  // hand this tab remembers standing from (`leaving`), which a reload
+  // keeps where a press alone would be forgotten. A hand that deals us
+  // in otherwise means none is: a stand that never reached the table
+  // (the socket dropped) must not hide a later removal.
   const stoodUp = useRef(false)
+  useEffect(() => {
+    if (leaving) stoodUp.current = true
+    else if (standKey !== null) stoodUp.current = false
+  }, [leaving, standKey])
   const [backAt, setBackAt] = useState<string | null>(null)
   const [removed, setRemoved] = useState(false)
   useEffect(() => {

@@ -1306,6 +1306,85 @@ describe('LiveTable at a six-casual table', () => {
     expect(screen.getByText('Pick an empty seat to play.')).toBeInTheDocument()
   })
 
+  it('a player sitting out who stood during her hand and reloaded is not told the table stood her up', async () => {
+    const first = render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    // Dealt into hand 1, sitting out from the next, she stands up.
+    const hand = sixHand()
+    const out = outIn(sixInfo(), [2])
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand, { table: out })))
+    await userEvent.click(standButton()!)
+    expect(seatStatus()).toHaveTextContent('Leaving after this hand')
+
+    // She reloads mid-hand: this tab still knows she stood.
+    first.unmount()
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const fresh = await opened()
+    act(() => fresh.emit(sixFrame('welcome', 1, 2, 2, hand, { table: out })))
+    expect(seatStatus()).toHaveTextContent('Leaving after this hand')
+
+    // The hand ends and her own stand frees the seat.
+    const left = sixInfo(AFTER_FOLDS.filter((p) => p.seat !== 2))
+    act(() => {
+      fresh.emit(sixFrame('state', 2, 2, 2, foldedToCarol(), { table: left }))
+      fresh.emit(sixFrame('welcome', 3, null, null, null, { table: left }))
+    })
+    expect(
+      screen.queryByText('You were stood up after sitting out.'),
+    ).toBeNull()
+    expect(screen.getByText('Pick an empty seat to play.')).toBeInTheDocument()
+  })
+
+  it('a stand that never reached the table does not hide a later removal', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    // Between hands she presses Stand up, and the socket drops before
+    // the table hears it.
+    const ended = foldedToCarol()
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 1, 2, 2, ended, { table: sixInfo(AFTER_FOLDS) }),
+      ),
+    )
+    await userEvent.click(standButton()!)
+    expect(JSON.parse(socket.sent.at(-1)!)).toEqual({ t: 'stand' })
+    vi.useFakeTimers()
+    act(() => socket.drop(1006))
+    await act(async () => vi.advanceTimersByTime(10_000))
+    vi.useRealTimers()
+    await act(async () => {})
+    const again = FakeSocket.last()
+    act(() => again.open())
+
+    // Back, still seated, and dealt into hand 2: the stand was lost.
+    const two = { ...sixHand(), config: { ...sixHand().config, handNo: 2 } }
+    act(() =>
+      again.emit(
+        sixFrame('welcome', 2, 2, 2, two, { table: sixInfo(AFTER_FOLDS) }),
+      ),
+    )
+    expect(standButton()).toBeInTheDocument()
+
+    // Later she sits out, and the table stands her up between hands.
+    const done = foldedToCarol()
+    const doneTwo = { ...done, config: { ...done.config, handNo: 2 } }
+    act(() =>
+      again.emit(
+        sixFrame('state', 3, 2, 2, doneTwo, {
+          table: outIn(sixInfo(AFTER_FOLDS), [2]),
+        }),
+      ),
+    )
+    const left = sixInfo(AFTER_FOLDS.filter((p) => p.seat !== 2))
+    act(() => {
+      again.emit(sixFrame('state', 4, 2, 2, doneTwo, { table: left }))
+      again.emit(sixFrame('welcome', 5, null, null, null, { table: left }))
+    })
+    expect(
+      screen.getByText('You were stood up after sitting out.'),
+    ).toBeInTheDocument()
+  })
+
   it('a player who stood keeps their seat on the ring while the hand result shows', async () => {
     render(<LiveTable matchId={MATCH} identity={alice} />)
     const socket = await opened()
