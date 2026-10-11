@@ -1484,6 +1484,57 @@ describe('LiveTable at a six-casual table', () => {
     expect(flights()).toEqual([])
   })
 
+  it('a bet nobody called flies only its called part to the pot', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    let hand = sixHand()
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    // dave raises to 400 and everyone folds, a frame per move.
+    hand = engineAct(hand, 5, { type: 'raise', to: 400 })
+    act(() => socket.emit(sixFrame('state', 2, 2, 2, hand)))
+    let seq = 2
+    for (const s of [0, 2, 3] as const) {
+      hand = engineAct(hand, s, { type: 'fold' })
+      act(() => socket.emit(sixFrame('state', ++seq, 2, 2, hand)))
+    }
+    expect(screen.getByText(/^dave wins/)).toBeInTheDocument()
+    // The 380 nobody called goes back to dave's stack, not into the pot:
+    // his flight carries the 20 that carol's big blind called, beside
+    // alice's 10 and carol's 20, and the pot of 50 goes to him.
+    expect(loads()).toEqual([
+      ['seat-2', 'pot', 10],
+      ['seat-3', 'pot', 20],
+      ['seat-5', 'pot', 20],
+      ['pot', 'seat-5', 50],
+    ])
+  })
+
+  it('a result sent again flies its pots once', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    const hand = sidePotsAtTheTurn()
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    const over = sixFrame('state', 2, 2, 2, playedOut(hand))
+    act(() => socket.emit(over))
+    expect(paid()).toEqual([
+      ['pot-2', 'seat-2'],
+      ['pot-1', 'seat-0'],
+      ['pot-0', 'seat-3'],
+    ])
+    const flying = flightEls()
+
+    // The table sends the same snapshot again when someone's connection
+    // comes or goes, with the same seq, and the page takes it: the pots
+    // already in the air are not sent again.
+    act(() => socket.emit(over))
+    expect(paid()).toHaveLength(3)
+    expect(flightEls().filter((f, i) => f !== flying[i])).toEqual([])
+    // Nor by a welcome carrying the result, as after a reconnect.
+    act(() => socket.emit(sixFrame('welcome', 3, 2, 2, playedOut(hand))))
+    expect(paid()).toHaveLength(3)
+    expect(flightEls().filter((f, i) => f !== flying[i])).toEqual([])
+  })
+
   it('chips in the air go at once when the hand leaves the page or the ring turns to a new seat', async () => {
     render(<LiveTable matchId={MATCH} identity={identity('erin')} />)
     const socket = await opened()
