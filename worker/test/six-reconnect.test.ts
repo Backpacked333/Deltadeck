@@ -704,12 +704,14 @@ describe('a socket that closes while its sit waits on the lobby', () => {
     const matchId = await sixTable()
     let letGo = () => {}
     const held = new Promise<void>((resolve) => (letGo = resolve))
+    let asked = false
     await runInDurableObject(stub(matchId), (instance: TableDO) => {
       const real = env.LOBBY
       const lobbyOf = (id: DurableObjectId) => {
         const lobby = real.get(id, { locationHint: 'enam' })
         return {
           claim: async (userId: string, table: string) => {
+            asked = true
             await held
             return lobby.claim(userId, table)
           },
@@ -728,7 +730,10 @@ describe('a socket that closes while its sit waits on the lobby', () => {
     const client = await connect(matchId, 'rc-0')
     await client.next((f) => f.t === 'welcome')
     client.send({ t: 'sit', seat: 0 })
-    await new Promise((r) => setTimeout(r, 20))
+    // The sit waits on the lobby; its socket closes meanwhile.
+    for (let i = 0; i < 400 && !asked; i++)
+      await new Promise((r) => setTimeout(r, 5))
+    expect(asked).toBe(true)
     await leave(matchId, client, 'rc-0')
     letGo()
     for (let i = 0; i < 400 && !(await seated(matchId)).length; i++)
