@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act as engineAct, legalActions } from '../engine/hand'
 import type { HandState, SeatId } from '../engine/types'
 import type { HandRecordV1, MatchInfo } from '../shared/protocol'
+import { DENOMINATIONS } from '../lib/chips'
 import { seedRandom } from '../lib/random'
 import type { Identity } from './api'
 import { Lobby } from './Lobby'
@@ -1483,6 +1484,45 @@ describe('LiveTable at a six-casual table', () => {
     expect(flights()).toEqual([])
   })
 
+  it("a reconnect that lands on a later street flies only the last street's chips, not a bet made since", async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    // Limped to the flop, where alice bets 100.
+    let hand = sixHand()
+    for (const s of [5, 0, 2] as const)
+      hand = engineAct(hand, s, { type: 'call' })
+    hand = engineAct(hand, 3, { type: 'check' })
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    hand = engineAct(hand, 2, { type: 'raise', to: 100 })
+    act(() => socket.emit(sixFrame('state', 2, 2, 2, hand)))
+    expect(flights()).toEqual([])
+
+    // Her socket drops. While she is away the others call, the turn comes
+    // and she bets 200 (her other tab, or a move sent just before).
+    vi.useFakeTimers()
+    act(() => socket.drop(1006))
+    for (const s of [3, 5, 0] as const)
+      hand = engineAct(hand, s, { type: 'call' })
+    expect(hand.street).toBe('turn')
+    hand = engineAct(hand, 2, { type: 'raise', to: 200 })
+    await act(async () => vi.advanceTimersByTime(10_000))
+    vi.useRealTimers()
+    await act(async () => {})
+    const again = FakeSocket.last()
+    act(() => again.open())
+    act(() => again.emit(sixFrame('welcome', 7, 2, 2, hand)))
+
+    // The welcome skipped the frames between: the flop's chips fly, 100
+    // from each seat, and her 200 on the turn stays on her plate.
+    expect(seat(2)).toHaveTextContent('Bet 200')
+    expect(loads()).toEqual([
+      ['seat-0', 'pot', 100],
+      ['seat-2', 'pot', 100],
+      ['seat-3', 'pot', 100],
+      ['seat-5', 'pot', 100],
+    ])
+  })
+
   it('a table waiting for players promises no next hand', async () => {
     render(<LiveTable matchId={MATCH} identity={alice} />)
     const socket = await opened()
@@ -1916,6 +1956,20 @@ const paidDelays = () =>
   flightEls()
     .filter((f) => f.getAttribute('data-from')?.startsWith('pot'))
     .map((f) => parseFloat(f.style.animationDelay || '0'))
+/**
+ * Each flight with the chips it carries, read off the pile it draws: each
+ * chip's colour names its denomination. A pile draws at most two stacks of
+ * seven, which is every chip of the amounts these tests fly.
+ */
+const loads = () =>
+  flightEls().map((f) => [
+    f.getAttribute('data-from'),
+    f.getAttribute('data-to'),
+    [...f.querySelectorAll<HTMLElement>('.chip')].reduce((sum, chip) => {
+      const colour = chip.style.getPropertyValue('--c')
+      return sum + DENOMINATIONS.find((d) => d.color === colour)!.value
+    }, 0),
+  ])
 /** Where the one flight from `from` to `to` starts and lands. */
 const path = (from: string, to: string) => {
   const found = flightEls().filter(

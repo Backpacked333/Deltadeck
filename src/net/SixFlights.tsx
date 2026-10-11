@@ -116,8 +116,12 @@ export function SixFlights({ view }: { view: SeatView | null }) {
     for (const p of view.players) {
       const was = before.players.find((b) => b.seat === p.seat)
       if (!was) continue
-      // What it had out, less any of it handed back as uncalled.
-      const gathered = was.bet + p.invested - was.invested
+      // What went into the pot since the last frame: chips invested and
+      // no longer in front of the seat. An uncalled part handed back is
+      // out of `invested`, so it does not fly; nor does a bet made on a
+      // later street that a reconnect's welcome skipped to, which is
+      // still drawn on the plate.
+      const gathered = p.invested - p.bet - (was.invested - was.bet)
       add(`seat-${p.seat}`, 'pot', gathered, 0, at.bet(p.seat), at.pot())
     }
     if (view.result && !before.result) {
