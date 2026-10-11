@@ -211,7 +211,7 @@ export default function Landing({ signedIn = false }: { signedIn?: boolean }) {
               rival={against}
               signedIn={signedIn}
               onSave={signedIn ? saveScore : signUpToSave}
-              onAgain={signedIn ? again : createAccount}
+              onAgain={signedIn ? again : signUpToSave}
               againLabel={
                 signedIn
                   ? 'Play another hand'

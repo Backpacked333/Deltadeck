@@ -52,12 +52,29 @@ export function takeAuthReturn(): string | null {
   return target && SAFE.test(target) && !isAccountRoute(target) ? target : null
 }
 
+/** What a sign-in provider adds to the address on its way back. */
+const PROVIDER_PARAMS = [
+  'code',
+  'state',
+  'error',
+  'error_code',
+  'error_description',
+]
+
 /**
  * Moves to a route in place of the current one, dropping any sign-in query
- * (?code=…), and tells the app: replaceState fires no hashchange, and the
- * route may be the one already in the address bar.
+ * (?code=…) but keeping the page's own options (?seed, ?motion), and tells
+ * the app: replaceState fires no hashchange, and the route may be the one
+ * already in the address bar.
  */
 export function replaceRoute(hash: string) {
-  window.history.replaceState(null, '', `${window.location.pathname}${hash}`)
+  const query = new URLSearchParams(window.location.search)
+  for (const name of PROVIDER_PARAMS) query.delete(name)
+  const search = query.size ? `?${query}` : ''
+  window.history.replaceState(
+    null,
+    '',
+    `${window.location.pathname}${search}${hash}`,
+  )
   window.dispatchEvent(new HashChangeEvent('hashchange'))
 }

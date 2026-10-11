@@ -1,3 +1,4 @@
+import { takeAuthReturn } from '../lib/authReturn'
 // The landing page in the real app (L-1 to L-6): who sees it, a full
 // challenge hand against the pre-scored tree, the score card with the
 // server's percentile (or without it), and the hand-off to sign-up.
@@ -246,6 +247,8 @@ describe('the challenge', () => {
       }),
     )
     expect(window.location.hash).toBe('#signup')
+    // Signing in instead still claims the score, in onboarding.
+    expect(takeAuthReturn()).toBe('#welcome/onboard')
   }, 30_000)
 
   it('deals a signed-in visitor another hand', async () => {
