@@ -413,7 +413,7 @@ describe('the account gate', () => {
       expect(
         await screen.findByRole('heading', {
           level: 1,
-          name: 'Join QuantPoker',
+          name: 'Join DeltaDeck',
         }),
       ).toBeVisible()
       expect(window.location.hash).toBe('#signup')
@@ -443,6 +443,7 @@ describe('the account gate', () => {
       '#ladder',
       '#fair-play',
       '#terms',
+      '#privacy',
       '#method',
     ]) {
       window.history.replaceState(null, '', `/${hash}`)
@@ -453,11 +454,20 @@ describe('the account gate', () => {
     }
   })
 
+  it('opens the privacy page at #privacy', async () => {
+    signedOut()
+    window.history.replaceState(null, '', '/#privacy')
+    render(<App />)
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Privacy' }),
+    ).toBeVisible()
+  })
+
   it('does not take a malformed stored session for an account', async () => {
     signedOut()
     localStorage.setItem('sb-abc-auth-token', '{}')
     render(<App />)
-    await screen.findByRole('heading', { level: 1, name: 'Join QuantPoker' })
+    await screen.findByRole('heading', { level: 1, name: 'Join DeltaDeck' })
     expect(window.location.hash).toBe('#signup')
   })
 

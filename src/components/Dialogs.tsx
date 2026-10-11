@@ -302,7 +302,7 @@ export function WelcomeDialog({
     >
       <div className="welcome">
         <p className="modal-intro">
-          QuantPoker is a decision trainer disguised as a poker game. You will
+          DeltaDeck is a decision trainer disguised as a poker game. You will
           guess, act, and then see exactly how good the decision was, separate
           from luck.
         </p>

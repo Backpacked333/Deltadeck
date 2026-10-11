@@ -35,7 +35,7 @@ export const sourceRecords: readonly SourceRecord[] = [
     url: 'https://sites.stat.washington.edu/raftery/Research/PDF/Gneiting2007jasa.pdf',
     references: [scoringReference],
     originalExamples:
-      'The two-group population, loss convention (Y−q)², cash-flow decisions, business names and every numerical scenario are original hypothetical exercises, not industry data or an empirical validation of QuantPoker.',
+      'The two-group population, loss convention (Y−q)², cash-flow decisions, business names and every numerical scenario are original hypothetical exercises, not industry data or an empirical validation of DeltaDeck.',
   },
   {
     id: 'mit-beta-conjugacy',

@@ -395,11 +395,11 @@ describe('shared scores: /api/challenge/shared/<receipt> and /c/<receipt>', () =
   const APP = `<!doctype html><html><head>
 <meta name="description" content="x" />
 <meta property="og:type" content="website" />
-<meta property="og:title" content="QuantPoker" />
+<meta property="og:title" content="DeltaDeck" />
 <meta property="og:description" content="x" />
 <meta property="og:url" content="/" />
 <meta property="og:image" content="/og-default.png" />
-<title>QuantPoker</title></head><body></body></html>`
+<title>DeltaDeck</title></head><body></body></html>`
   const assets = {
     fetch: async () =>
       new Response(APP, { headers: { 'Content-Type': 'text/html' } }),
@@ -449,7 +449,7 @@ describe('shared scores: /api/challenge/shared/<receipt> and /c/<receipt>', () =
     expect(response.status).toBe(200)
     const html = await response.text()
     expect(tag(html, 'og:title')).toBe(
-      `Beat ${result.accuracy}/100 on “Overpair under pressure” · QuantPoker`,
+      `Beat ${result.accuracy}/100 on “Overpair under pressure” · DeltaDeck`,
     )
     expect(tag(html, 'og:description')).toContain(
       `Someone scored ${result.accuracy}/100 on this hand`,
@@ -502,7 +502,7 @@ describe('school codes', () => {
     expect(await start.json()).toEqual({ school: 'MIT' })
     expect(emails).toHaveLength(1)
     expect(emails[0].to).toEqual(['ada@csail.mit.edu'])
-    expect(emails[0].from).toBe('QuantPoker <verify@quantpoker.test>')
+    expect(emails[0].from).toBe('DeltaDeck <verify@quantpoker.test>')
     expect(codeSent()).toMatch(/^\d{6}$/)
     expect(emails[0].text).toContain(codeSent())
     // Only a hash is kept.

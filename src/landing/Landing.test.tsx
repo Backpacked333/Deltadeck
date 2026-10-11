@@ -133,7 +133,7 @@ describe('who sees the landing page', () => {
     expect(
       await screen.findByRole('region', { name: 'Poker table' }),
     ).toBeVisible()
-    const home = screen.getByRole('link', { name: 'QuantPoker home' })
+    const home = screen.getByRole('link', { name: 'DeltaDeck home' })
     expect(home).toHaveAttribute('href', '/')
     await user.click(home)
     expect(
@@ -314,10 +314,10 @@ describe("a friend's challenge link", () => {
 })
 
 describe('what the page explains, and the way to an account', () => {
-  it('says how QuantPoker works and what an account gives you', async () => {
+  it('says how DeltaDeck works and what an account gives you', async () => {
     render(<App />)
     expect(
-      await screen.findByRole('heading', { name: 'How QuantPoker works' }),
+      await screen.findByRole('heading', { name: 'How DeltaDeck works' }),
     ).toBeVisible()
     for (const step of [
       'Play a hand',

@@ -120,7 +120,7 @@ const Lab = lazy(() => labModule.then((module) => ({ default: module.Lab })))
  * Hash routes: the landing page (the bare URL, #start, or #c/<receipt> for a
  * friend's challenge), #table (default), #progress, #lobby[/find],
  * #play/<id>, #ladder[/month], #u/<username> and #match/<id> (online play),
- * #signup and #signin, #fair-play, #terms and #method, #learn/...
+ * #signup and #signin, #fair-play, #terms, #privacy and #method, #learn/...
  * and #learn/quick[/id]. A return from a sign-in provider (?code=…) opens the
  * online area, which finishes the sign-in, whatever the hash.
  */
@@ -152,7 +152,12 @@ function parseRoute(hash: string, search = ''): Route {
     hash === '#signout'
   )
     return { view: 'live', lesson: null }
-  if (hash === '#fair-play' || hash === '#terms' || hash === '#method')
+  if (
+    hash === '#fair-play' ||
+    hash === '#terms' ||
+    hash === '#privacy' ||
+    hash === '#method'
+  )
     return { view: 'info', lesson: null }
   if (import.meta.env.DEV && hash === '#dev/gallery')
     return { view: 'gallery', lesson: null }
@@ -906,13 +911,13 @@ export default function App() {
             e.preventDefault()
             go('')
           }}
-          aria-label="QuantPoker home"
+          aria-label="DeltaDeck home"
         >
           <span className="brand-mark">
             <Spade size={18} fill="currentColor" />
           </span>
           <span>
-            quant<span className="brand-light">poker</span>
+            delta<span className="brand-light">deck</span>
           </span>
         </a>
         <nav className="nav" aria-label="Main">
@@ -1218,9 +1223,11 @@ export default function App() {
               page={
                 hash === '#terms'
                   ? 'terms'
-                  : hash === '#method'
-                    ? 'method'
-                    : 'fair-play'
+                  : hash === '#privacy'
+                    ? 'privacy'
+                    : hash === '#method'
+                      ? 'method'
+                      : 'fair-play'
               }
             />
           </Suspense>

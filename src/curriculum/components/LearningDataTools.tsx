@@ -22,7 +22,7 @@ export function LearningDataTools({ session }: { session: LearningSession }) {
     try {
       downloadText(
         session.export(format),
-        `quantpoker-learning.${format === 'json' ? 'json' : 'md'}`,
+        `deltadeck-learning.${format === 'json' ? 'json' : 'md'}`,
         format === 'json' ? 'application/json' : 'text/markdown',
       )
       setError('')
@@ -57,7 +57,7 @@ export function LearningDataTools({ session }: { session: LearningSession }) {
             try {
               downloadText(
                 session.raw!,
-                'quantpoker-learning-raw.txt',
+                'deltadeck-learning-raw.txt',
                 'text/plain',
               )
             } catch {

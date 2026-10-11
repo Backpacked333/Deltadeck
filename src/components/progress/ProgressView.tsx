@@ -366,7 +366,7 @@ function DataActions({
             const url = URL.createObjectURL(blob)
             const a = document.createElement('a')
             a.href = url
-            a.download = 'quantpoker-progress.json'
+            a.download = 'deltadeck-progress.json'
             a.click()
             URL.revokeObjectURL(url)
           }}
@@ -389,7 +389,7 @@ function DataActions({
           if (!chosen) return
           const imported = importProgress(await chosen.text())
           if (!imported)
-            window.alert('That file is not a QuantPoker progress export.')
+            window.alert('That file is not a DeltaDeck progress export.')
           else if (
             window.confirm(
               `Replace this device's progress with ${imported.hands.length} imported hands?`,

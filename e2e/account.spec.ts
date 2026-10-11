@@ -72,7 +72,7 @@ test('the practice table sends a visitor to sign in, and back to the table after
   await page.goto('/#table')
   await expect(page).toHaveURL(/#signup$/)
   await expect(
-    page.getByRole('heading', { level: 1, name: 'Join QuantPoker' }),
+    page.getByRole('heading', { level: 1, name: 'Join DeltaDeck' }),
   ).toBeVisible()
   await expect(page.locator('.table')).toHaveCount(0)
 

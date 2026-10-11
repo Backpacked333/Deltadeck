@@ -18,11 +18,11 @@ const SITE = 'https://quantpoker.test'
 const APP = `<!doctype html><html lang="en"><head>
 <meta name="description" content="Learn the mathematics of risk." />
 <meta property="og:type" content="website" />
-<meta property="og:title" content="QuantPoker" />
+<meta property="og:title" content="DeltaDeck" />
 <meta property="og:description" content="Learn the mathematics of risk." />
 <meta property="og:url" content="/" />
 <meta property="og:image" content="/og-default.png" />
-<title>QuantPoker — Play your way to a better understanding.</title>
+<title>DeltaDeck — Play your way to a better understanding.</title>
 </head><body><div id="root"></div><script type="module" src="/assets/index.js"></script></body></html>`
 
 const assets = {
@@ -95,15 +95,15 @@ function tag(html: string, property: string) {
 }
 
 describe('GET /u/<username>', () => {
-  it('GET /u/alice returns the app with og:title "alice · QuantPoker" and the rating in og:description', async () => {
+  it('GET /u/alice returns the app with og:title "alice · DeltaDeck" and the rating in og:description', async () => {
     const response = await get('/u/alice')
     expect(response.status).toBe(200)
     const html = await response.text()
     expect(html).toContain('<div id="root"></div>')
-    expect(html).toContain('<title>alice · QuantPoker</title>')
-    expect(tag(html, 'og:title')).toBe('alice · QuantPoker')
+    expect(html).toContain('<title>alice · DeltaDeck</title>')
+    expect(tag(html, 'og:title')).toBe('alice · DeltaDeck')
     expect(tag(html, 'og:description')).toBe(
-      'Rating 1612 ± 64 over 48 rated heads-up matches on QuantPoker.',
+      'Rating 1612 ± 64 over 48 rated heads-up matches on DeltaDeck.',
     )
     expect(tag(html, 'description')).toBe(tag(html, 'og:description'))
     expect(tag(html, 'og:type')).toBe('profile')
@@ -125,10 +125,10 @@ describe('GET /u/<username>', () => {
 
   it('says provisional, or nothing about a rating, when that is the truth', async () => {
     expect(tag(await (await get('/u/bob')).text(), 'og:description')).toBe(
-      'Provisional rating 1540 ± 121 after 13 rated heads-up matches on QuantPoker.',
+      'Provisional rating 1540 ± 121 after 13 rated heads-up matches on DeltaDeck.',
     )
     expect(tag(await (await get('/u/carol')).text(), 'og:description')).toBe(
-      'carol plays rated heads-up poker on QuantPoker.',
+      'carol plays rated heads-up poker on DeltaDeck.',
     )
   })
 
@@ -137,7 +137,7 @@ describe('GET /u/<username>', () => {
     expect(missing.status).toBe(404)
     const html = await missing.text()
     expect(html).toContain('<div id="root"></div>')
-    expect(tag(html, 'og:title')).toBe('QuantPoker')
+    expect(tag(html, 'og:title')).toBe('DeltaDeck')
     asked = []
     for (const path of ['/u/Alice', '/u/a', '/u/alice/x', '/u/al%22ice'])
       expect((await get(path)).status).toBe(404)
@@ -153,7 +153,7 @@ describe('GET /u/<username>', () => {
     const html = await (await get('/u/evil')).text()
     expect(html).not.toContain('script>alert')
     expect(html.match(/<script/g)).toHaveLength(1)
-    expect(tag(html, 'og:title')).toBe('evil · QuantPoker')
+    expect(tag(html, 'og:title')).toBe('evil · DeltaDeck')
     // The rewriter escapes values too: a quote cannot close an attribute.
     expect(html).not.toMatch(/content="[^"]*"[^ />]/)
   })
@@ -162,13 +162,13 @@ describe('GET /u/<username>', () => {
     down = true
     const response = await get('/u/alice')
     expect(response.status).toBe(200)
-    expect(tag(await response.text(), 'og:title')).toBe('QuantPoker')
+    expect(tag(await response.text(), 'og:title')).toBe('DeltaDeck')
   })
 
   it('one read per name per minute: repeats come from the edge cache', async () => {
     for (let i = 0; i < 5; i++) {
       const html = await (await get('/u/alice')).text()
-      expect(tag(html, 'og:title')).toBe('alice · QuantPoker')
+      expect(tag(html, 'og:title')).toBe('alice · DeltaDeck')
     }
     expect(asked).toHaveLength(1)
   })
