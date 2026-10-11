@@ -78,14 +78,27 @@ export function SixTable({
   const { view, seat } = state
   const dealt = view && isSeated(view) ? view : null
   const live = view && !view.result ? view : null
+  // Our own seat's controls. The hand we are dealt into while it is being
+  // played, if any: a rebuy waits for it to end, and a stand during it
+  // keeps the seat until then. The wire has no marker of that pending
+  // stand (ADR, clarifications from PR-12), so we remember the hand and
+  // seat we stood from ourselves, in this tab, so a reload still knows.
+  const playing = dealt && !dealt.result ? dealt : null
+  const handKey = view ? `${view.matchId}:${view.handNo}` : null
+  const standKey = playing ? `${handKey}:${playing.you}` : null
+  const [stoodFrom, setStoodFrom] = useState(readStood)
+  const leaving = standKey !== null && stoodFrom === standKey
   // The bar only while the move is ours to make: dealt in, our turn by the
-  // server's own legal moves, a socket to send on and no move in flight.
+  // server's own legal moves, a socket to send on, no move in flight, and
+  // not after we stood from this hand (the table folds us; it refuses a
+  // move from a player who stood).
   const legal =
     dealt &&
     !dealt.result &&
     dealt.toAct === dealt.you &&
     state.status === 'open' &&
-    !state.pending
+    !state.pending &&
+    !leaving
       ? dealt.legal
       : null
   // Per-hand names come from the hand's own record once it has one; until
@@ -131,16 +144,6 @@ export function SixTable({
 
   const canSit =
     seat === null && state.status === 'open' && table.status !== 'finished'
-  // Our own seat's controls. The hand we are dealt into while it is being
-  // played, if any: a rebuy waits for it to end, and a stand during it
-  // keeps the seat until then. The wire has no marker of that pending
-  // stand (ADR, clarifications from PR-12), so we remember the hand and
-  // seat we stood from ourselves, in this tab, so a reload still knows.
-  const playing = dealt && !dealt.result ? dealt : null
-  const handKey = view ? `${view.matchId}:${view.handNo}` : null
-  const standKey = playing ? `${handKey}:${playing.you}` : null
-  const [stoodFrom, setStoodFrom] = useState(readStood)
-  const leaving = standKey !== null && stoodFrom === standKey
   const mine =
     seat === null ? undefined : table.players.find((p) => p.seat === seat)
   const controls = state.status === 'open' && table.status !== 'finished'

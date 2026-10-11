@@ -826,6 +826,24 @@ describe('LiveTable at a six-casual table', () => {
     expect(standButton()).toBeInTheDocument()
   })
 
+  it('Stand up on her own turn takes the moves and keys away at once', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    // dave and bob call: the small blind, alice, is to act.
+    let hand = sixHand()
+    hand = engineAct(hand, 5, { type: 'call' })
+    hand = engineAct(hand, 0, { type: 'call' })
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    expect(moves().length).toBeGreaterThan(0)
+    standButton()!.focus()
+    await userEvent.keyboard('{Enter}')
+    // Before the table answers with her fold, nothing offers or takes a
+    // move: the server refuses one from a player who stood.
+    expect(moves()).toEqual([])
+    expect(keysTaken()).toEqual([])
+    expect(socket.sent.map((m) => JSON.parse(m))).toEqual([{ t: 'stand' }])
+  })
+
   it('a reload during the hand she stood from still says Leaving after this hand', async () => {
     const first = render(<LiveTable matchId={MATCH} identity={alice} />)
     const socket = await opened()
