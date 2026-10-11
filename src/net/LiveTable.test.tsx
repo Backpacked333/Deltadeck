@@ -3,8 +3,8 @@ import userEvent from '@testing-library/user-event'
 import { MotionConfig } from 'motion/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act as engineAct, legalActions } from '../engine/hand'
-import type { HandState } from '../engine/types'
-import type { HandRecordV1 } from '../shared/protocol'
+import type { HandState, SeatId } from '../engine/types'
+import type { HandRecordV1, MatchInfo } from '../shared/protocol'
 import { seedRandom } from '../lib/random'
 import type { Identity } from './api'
 import { Lobby } from './Lobby'
@@ -1116,6 +1116,196 @@ describe('LiveTable at a six-casual table', () => {
     ).toBeInTheDocument()
   })
 
+  it('Sit out shows to a seated player who is playing, during a hand too, and sends a bare sit_out', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    // Dealt into the hand being played: she may sit out from the next one.
+    const hand = sixHand()
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    const status = seatStatus()
+    expect(status).toHaveTextContent(/^$/)
+    expect(sitInButton()).toBeNull()
+    sitOutButton()!.focus()
+    await userEvent.keyboard('{Enter}')
+    expect(socket.sent.map((m) => JSON.parse(m))).toEqual([{ t: 'sit_out' }])
+
+    // The table's answer: sitting out, from the next hand. She still plays
+    // this one, so her plate shows her in it, and the live line says when.
+    const out = outIn(sixInfo(), [2])
+    act(() => socket.emit(sixFrame('welcome', 2, 2, 2, hand, { table: out })))
+    expect(status).toHaveTextContent('Sitting out from the next hand.')
+    expect(sitOutButton()).toBeNull()
+    expect(sitInButton()).toBeInTheDocument()
+    expect(within(seat(2)).queryByText('Sitting out')).toBeNull()
+    expect(seat(2)).toHaveFocus()
+
+    // The hand is over: her plate says so, and the line says how back in.
+    const ended = foldedToCarol()
+    act(() =>
+      socket.emit(
+        sixFrame('state', 3, 2, 2, ended, {
+          table: outIn(sixInfo(AFTER_FOLDS), [2]),
+        }),
+      ),
+    )
+    expect(within(seat(2)).getByText('Sitting out')).toBeInTheDocument()
+    expect(status).toHaveTextContent('Sitting out: sit in to be dealt in.')
+    expect(sitInButton()).toBeInTheDocument()
+  })
+
+  it('Sit in sends a bare sit_in, and the seat controls announce she is back from the next hand', async () => {
+    render(<LiveTable matchId={MATCH} identity={identity('erin')} />)
+    const socket = await opened()
+    // erin sits out at seat 4 while a hand she is not in is played.
+    const roster = [
+      ...SIX_ROSTER,
+      { seat: 4 as SeatId, username: 'erin', stack: 1500 },
+    ]
+    const out = outIn(sixInfo(roster), [4])
+    act(() =>
+      socket.emit(sixFrame('welcome', 1, 4, null, sixHand(), { table: out })),
+    )
+    const status = seatStatus()
+    expect(status).toHaveTextContent('Sitting out: sit in to be dealt in.')
+    expect(within(seat(4)).getByText('Sitting out')).toBeInTheDocument()
+    expect(screen.queryByText(/dealt in from the next hand/)).toBeNull()
+    expect(sitOutButton()).toBeNull()
+    // Below 100 bb: she may top up as well, without sitting in.
+    expect(rebuyButton()).toBeInTheDocument()
+    sitInButton()!.focus()
+    await userEvent.keyboard('{Enter}')
+    expect(socket.sent.map((m) => JSON.parse(m))).toEqual([{ t: 'sit_in' }])
+
+    // Back: the line says so until the next hand deals her in.
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 2, 4, null, sixHand(), { table: sixInfo(roster) }),
+      ),
+    )
+    expect(status).toHaveTextContent('Back in from the next hand.')
+    expect(
+      screen.getByText('You are dealt in from the next hand.'),
+    ).toBeInTheDocument()
+    expect(within(seat(4)).queryByText('Sitting out')).toBeNull()
+    expect(sitInButton()).toBeNull()
+    expect(sitOutButton()).toBeInTheDocument()
+    expect(seat(4)).toHaveFocus()
+    const next = { ...sixHand(), config: { ...sixHand().config, handNo: 2 } }
+    act(() =>
+      socket.emit(
+        sixFrame('state', 3, 4, null, next, { table: sixInfo(roster) }),
+      ),
+    )
+    expect(status).toHaveTextContent(/^$/)
+  })
+
+  it('a busted player sitting out is offered Rebuy, not Sit in', async () => {
+    render(<LiveTable matchId={MATCH} identity={identity('erin')} />)
+    const socket = await opened()
+    const busted = [
+      ...SIX_ROSTER,
+      { seat: 4 as SeatId, username: 'erin', stack: 0 },
+    ]
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 1, 4, null, sixHand(), {
+          table: outIn(sixInfo(busted), [4]),
+        }),
+      ),
+    )
+    expect(rebuyButton()).toBeInTheDocument()
+    expect(sitInButton()).toBeNull()
+    expect(sitOutButton()).toBeNull()
+    expect(seatStatus()).toHaveTextContent(
+      'No chips left: rebuy to be dealt in.',
+    )
+  })
+
+  it('a double press on Sit out or Sit in sends one frame until the table answers', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    const ended = foldedToCarol()
+    const sent = () => socket.sent.map((m) => JSON.parse(m))
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 1, 2, 2, ended, { table: sixInfo(AFTER_FOLDS) }),
+      ),
+    )
+    const out = sitOutButton()!
+    fireEvent.click(out)
+    fireEvent.click(out)
+    expect(sent()).toEqual([{ t: 'sit_out' }])
+    expect(sitOutButton()).toBeNull()
+    expect(sitInButton()).toBeNull()
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 2, 2, 2, ended, {
+          table: outIn(sixInfo(AFTER_FOLDS), [2]),
+        }),
+      ),
+    )
+    const back = sitInButton()!
+    fireEvent.click(back)
+    fireEvent.click(back)
+    expect(sent()).toEqual([{ t: 'sit_out' }, { t: 'sit_in' }])
+    expect(sitInButton()).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+    // Neither shows while the socket is down: a press would send nothing.
+    act(() => socket.drop(1006))
+    expect(sitOutButton()).toBeNull()
+    expect(sitInButton()).toBeNull()
+  })
+
+  it('a player stood up after sitting out is told why her seat is gone', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    const ended = foldedToCarol()
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 1, 2, 2, ended, {
+          table: outIn(sixInfo(AFTER_FOLDS), [2]),
+        }),
+      ),
+    )
+    // The table stands her up: its roster drops her, then its welcome
+    // says she has no seat.
+    const left = sixInfo(AFTER_FOLDS.filter((p) => p.seat !== 2))
+    act(() => {
+      socket.emit(sixFrame('state', 2, 2, 2, ended, { table: left }))
+      socket.emit(sixFrame('welcome', 3, null, null, null, { table: left }))
+    })
+    expect(
+      screen.getByText('You were stood up after sitting out.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'Your seat' })).toBeNull()
+    // Sitting down again ends it.
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 4, 2, null, null, { table: sixInfo(AFTER_FOLDS) }),
+      ),
+    )
+    expect(
+      screen.queryByText('You were stood up after sitting out.'),
+    ).toBeNull()
+
+    // A player sitting out who stands up herself is not told so.
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 5, 2, 2, ended, {
+          table: outIn(sixInfo(AFTER_FOLDS), [2]),
+        }),
+      ),
+    )
+    await userEvent.click(standButton()!)
+    act(() =>
+      socket.emit(sixFrame('welcome', 6, null, null, null, { table: left })),
+    )
+    expect(
+      screen.queryByText('You were stood up after sitting out.'),
+    ).toBeNull()
+    expect(screen.getByText('Pick an empty seat to play.')).toBeInTheDocument()
+  })
+
   it('a player who stood keeps their seat on the ring while the hand result shows', async () => {
     render(<LiveTable matchId={MATCH} identity={alice} />)
     const socket = await opened()
@@ -1180,6 +1370,16 @@ function playedOut(start: HandState) {
 /** The Rebuy and Stand up controls, when the table offers them. */
 const rebuyButton = () => screen.queryByRole('button', { name: /^Rebuy/ })
 const standButton = () => screen.queryByRole('button', { name: 'Stand up' })
+/** The Sit out and Sit in controls (PR-16), when the table offers them. */
+const sitOutButton = () => screen.queryByRole('button', { name: 'Sit out' })
+const sitInButton = () => screen.queryByRole('button', { name: 'Sit in' })
+/** `table` with the players in `seats` sitting out. */
+const outIn = (table: MatchInfo, seats: SeatId[]): MatchInfo => ({
+  ...table,
+  players: table.players.map((p) =>
+    seats.includes(p.seat) ? { ...p, status: 'sitting_out' as const } : p,
+  ),
+})
 /** The live line under the viewer's own seat controls. */
 const seatStatus = () =>
   within(screen.getByRole('group', { name: 'Your seat' })).getByRole('status')
