@@ -21,6 +21,8 @@ import { IDLE_MS } from '../src/deadlines'
 import { lobbyStub } from '../src/lobby'
 import type { LobbyDO } from '../src/lobby'
 import { GRACE_MS } from '../src/rated'
+import { REPORT_MS } from '../src/registry'
+import type { Listing } from '../src/registry'
 import { NEXT_HAND_MS } from '../src/table'
 import type { InitBody, TableDO } from '../src/table'
 import { analysisKeys, checkFrames, FLOW_TYPES } from './frames'
@@ -144,6 +146,11 @@ const graces = (matchId: string) =>
     (instance as unknown as { deadlines: Deadline[] }).deadlines.filter(
       (d) => d.kind === 'grace',
     ),
+  )
+/** What the table keeps for its entry in the lobby's list, as stored. */
+const listingOf = (matchId: string) =>
+  runInDurableObject(stub(matchId), (_: TableDO, state) =>
+    state.storage.get<Listing>('listing'),
   )
 /** The table's stored deadlines, as a restarted object reads them. */
 const storedDeadlines = (matchId: string) =>
@@ -906,12 +913,19 @@ describe('a restart while a player is away', () => {
     const grace = { kind: 'grace', at: dueAt, seat: 2, userId: 'rj-2' }
     expect(await graces(matchId)).toEqual([grace])
     expect(await storedDeadlines(matchId)).toContainEqual(grace)
-    // Seat 0 folds hand 1; the next deal waits, with the alarm set for the
+    // Seat 0 folds hand 1; the next deal waits. Seat 2's sit and hand 1's
+    // end were held by the list's throttle, so the waiting table's first
+    // alarm is that report's, 30 s after the first sit reported (ADR,
+    // clarifications from PR-24); it changes no seat. The next is the
     // grace's end, and then seat 2 sits out.
     await move(matchId, { 0: zero.client }, fold)
     await zero.client.next((f) => f.t === 'reveal' && f.handNo === 1)
     await elapse(matchId, NEXT_HAND_MS)
     expect((await peek(matchId)).match.status).toBe('waiting')
+    expect((await storageOf(matchId)).alarm).toBe(t0 + REPORT_MS)
+    await at(matchId, t0 + REPORT_MS)
+    expect(await listingOf(matchId)).toMatchObject({ pending: false })
+    expect((await storedSeat(matchId, 2)).status).toBe('playing')
     expect((await storageOf(matchId)).alarm).toBe(dueAt)
     await at(matchId, dueAt)
     expect((await storedSeat(matchId, 2)).status).toBe('sitting_out')

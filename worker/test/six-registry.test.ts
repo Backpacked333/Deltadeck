@@ -399,6 +399,38 @@ describe('reporting to the lobby', () => {
     expect(sent(matchId).at(-1)).toEqual(counts(1, 20, 2))
   })
 
+  it('a change held at a waiting table goes out when its window passes, not at the idle check', async () => {
+    // Quick-sit skips a table listed as full and ranks by the list, so a
+    // waiting table may not keep a stale count until its idle check (ADR,
+    // clarifications from PR-24, decision 6).
+    const sent = watchReports()
+    const matchId = await sixTable()
+    const t0 = await clockOf(matchId)
+    const a = await sitDown(matchId, 'held-a', 0)
+    await settled(matchId)
+    expect(sent(matchId)).toEqual([counts(1, null, 0)])
+    // A stands at once: held, with the table waiting and empty. Its alarm
+    // is the report's, 30 s after the last one, before the idle check.
+    expect(await standUp(a)).toMatchObject({ seat: null })
+    expect((await storageOf(matchId)).alarm).toBe(t0 + REPORT_MS)
+    await elapse(matchId, REPORT_MS)
+    await settled(matchId)
+    expect(sent(matchId)).toEqual([counts(1, null, 0), counts(0, null, 0)])
+    // A sit at the empty waiting table inside the next window is held
+    // too, and arms the report itself.
+    await setClock(matchId, t0 + REPORT_MS + 10_000)
+    await sitDown(matchId, 'held-c', 2)
+    await settled(matchId)
+    expect(sent(matchId)).toHaveLength(2)
+    expect((await storageOf(matchId)).alarm).toBe(t0 + 2 * REPORT_MS)
+    await elapse(matchId, REPORT_MS - 10_000)
+    await settled(matchId)
+    expect(sent(matchId).at(-1)).toEqual(counts(1, null, 0))
+    // Nothing held: the next alarm is the idle check, as before.
+    expect(await listingOf(matchId)).toMatchObject({ pending: false })
+    expect((await storageOf(matchId)).alarm).toBe(t0 + IDLE_MS)
+  })
+
   it('seated counts a player who stood during a hand, until it ends', async () => {
     const sent = watchReports()
     const matchId = await sixTable()

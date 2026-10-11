@@ -756,7 +756,10 @@ export class TableDO extends DurableObject<WorkerEnv> {
     if (match.status === 'waiting' && match.players.length >= 2) {
       match.status = 'playing'
       await this.startNextHand()
-    }
+    } else if (!report && match.status === 'waiting')
+      // Held, at a table that still waits: nothing else would wake it
+      // before the idle check, so the report gets its own deadline.
+      await this.armAlarm()
   }
 
   /** Whether this is a six table that still seats players. */
@@ -2219,6 +2222,26 @@ export class TableDO extends DurableObject<WorkerEnv> {
     })
   }
 
+  /**
+   * Six-casual: while a change is held at a waiting table, a `report`
+   * deadline at the end of its window. A playing table needs none: a turn
+   * or the next deal wakes it within seconds, and every alarm sends a held
+   * report that is due. Without it a waiting table kept a stale entry
+   * until its idle check, and quick-sit skips a table listed as full (ADR,
+   * clarifications from PR-24, decision 6). Run by armAlarm, as syncSitOut.
+   */
+  private syncReport() {
+    const listing = this.listing
+    const held =
+      this.seatable() && this.match!.status === 'waiting' && listing?.pending
+    this.deadlines = [
+      ...this.deadlines.filter((d) => d.kind !== 'report'),
+      ...(held
+        ? [{ kind: 'report' as const, at: listing!.reportedAt + REPORT_MS }]
+        : []),
+    ]
+  }
+
   /** A held change goes out once its window has passed (run by alarms). */
   private async sendHeldReport() {
     if (!this.listing?.pending) return
@@ -2425,7 +2448,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
           d.kind === 'outbox' ||
           d.kind === 'grace' ||
           d.kind === 'rematch' ||
-          d.kind === 'sitout',
+          d.kind === 'sitout' ||
+          d.kind === 'report',
       ),
       ...(deadline ? [deadline] : []),
     ]
@@ -2433,6 +2457,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
 
   private async armAlarm() {
     this.syncSitOut()
+    this.syncReport()
     await this.ctx.storage.put('deadlines', this.deadlines)
     const at = earliest(this.deadlines)
     if (at === null) await this.ctx.storage.deleteAlarm()
