@@ -432,16 +432,20 @@ The plan gave `rebuy` (here) and `stand` (PR-12) server messages but no control 
   - `a rebuy at 0 chips deals the player in at the next hand`
   - `a rebuy that funds a second player at a waiting table deals at once`
   - `between hands the roster carries the stacks the hand left`
+  - `a rebuy between hands survives a restart before the next deal` (review)
+  - `an account that stands and sits again before the next deal brings a fresh buy-in, not the hand's final stack` (review)
   - chip conservation counts rebuys: `six clients bust and rebuy, chips equal buy-ins plus rebuys across 200 hands`.
   - parser: `accepts a rebuy only bare, so no amount ever reaches the server`.
-  - UI (`LiveTable.test.tsx`): Rebuy only below 100 bb out of the hand being played, bare `{t:'rebuy'}`; Stand up sends bare `{t:'stand'}`; "Leaving after this hand" after a stand from a live hand. e2e: the six-seat keyboard loop and a mid-hand stand.
+  - UI (`LiveTable.test.tsx`): Rebuy only below 100 bb out of the hand being played, bare `{t:'rebuy'}`; Stand up sends bare `{t:'stand'}`; "Leaving after this hand" after a stand from a live hand. After the review: no seat control while the socket reconnects or the table has closed, nor after the hand a player stood from ends; a double press sends one frame; a player who busts hears "No chips left: rebuy to be dealt in." from the seat controls' live region; "Leaving after this hand" survives a reload. e2e: the six-seat keyboard loop and a mid-hand stand.
 - **Risk:** an amount sent by the client must be ignored. The parser refuses any `rebuy` that carries more than its type.
 - **As built (branch `six-w14`):**
   - The rule is the ADR's: a seated account not dealt into the hand being played (one who sat after the deal is not in it; one who folded still is), below 100 bb, tops up to exactly 100 bb. Refusals: `not_seated`, `in_hand`, `not_below`; `illegal` at a heads-up table.
   - The finished hand's stacks reach `match.players` only at the next deal (`settleStacks`). A rebuy between hands reads the final stack and settles the hand itself before adding the top-up, so the deal does not overwrite it. The stack is credited before any await: a second rebuy finds 100 bb.
   - **Roster stacks between hands (ADR amended; the architect signs it off before merge).** `MatchInfo.players[].stack` was "as of the last deal", so between hands it showed the stack a player began the hand with, and the client could not tell who may rebuy. It is now the chips outside the hand being played: as of the deal while the player is dealt into it (unchanged), otherwise what the next hand deals them (the hand's final stack, or 100 bb after a rebuy). The PR-14 review confirmed it is safe: a socket without a seat still gets no per-action `state`, `hand_start`, `hand_end` or `reveal`, and it sees a hand's final stacks at its end rather than at the next deal, 3 s later, numbers the next deal would show it anyway. Even with the old frame code, the early settle a rebuy needs would put final stacks in its roster broadcast, so the ADR's wording had to change, not the code. The ADR's "Sockets without a seat" row now says this (it said "stacks as of the last hand start"), and its "Wire" row lists `not_below`.
   - `worker/test/frames.ts` lists every `ErrorCode` (typed both ways) and `checkFrame` refuses an unlisted code, and refuses six-only codes in heads-up flows.
-  - The stakes live in `src/engine/stacks.ts` (`SIX_BLINDS`), read by the worker's `SIX_CONFIG` and by the live table to know 100 bb.
+  - The stakes live in `src/engine/stacks.ts` (`SIX_BLINDS`), read by the worker's `SIX_CONFIG` and by the live table to know 100 bb. The server tops up from the table's stored `match.config.blinds`; if stakes ever vary per table, 100 bb must come over the wire.
+  - **After the review:** the rebuy's own storage write has a restart test. `settleStacks` and `stackOf` skip a player marked `justSat` (sat since the deal), so an account that stands and sits again before the next deal keeps its fresh buy-in; only the 2-minute cooldown prevented it before. Rebuy, and Stand up between hands, hide once sent until the answer changes the hand, the stack or the seat, or the socket drops. The pending-stand marker is kept per tab in `sessionStorage` (`qp.six.stoodFrom` = `matchId:handNo:seat`).
+  - **Open (product):** Stand up during a hand takes one press, right under the action bar, and folds at the next action. A confirm step for the mid-hand case only is the reviewer's suggestion; not built.
 - **Left for PR-16:** the ADR says a player at 0 chips sits out. Today their status stays `playing` and the controller and the deal skip them for having no chips. PR-16's removal rule (stood up after 3 orbits or 5 minutes without a dealt hand) must count a busted player's undealt hands, or a busted player who never rebuys holds the seat for good. The client says "No chips left: rebuy to be dealt in." to that player.
 
 **PR-15 · P2-04a orbit bank**
@@ -461,6 +465,7 @@ The plan gave `rebuy` (here) and `stand` (PR-12) server messages but no control 
   - **Sit out / Sit in controls** in `SixTable.tsx`, next to PR-14's Rebuy and Stand up in the "Your seat" group (the plan had no UI for them): Sit out sends `sit_out`, Sit in sends `sit_in`, keyboard and screen reader friendly like the other seat controls.
 - **Tests (red):**
   - `two timeouts sit a player out and three orbits out remove them`
+  - `a busted player who never rebuys is stood up after 3 orbits or 5 minutes` (PR-14 left a player at 0 chips `playing`; the deal skips them).
   - frame allowlist for the new message and status field.
   - UI: Sit out and Sit in appear only when allowed and send their bare messages.
 - **Risk:** a sitting-out seat must still be released from the lobby when it is removed.
