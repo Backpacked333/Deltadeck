@@ -623,6 +623,53 @@ describe('leaving the list', () => {
     })
   })
 
+  it('a socket that arrives while the removal is on its way finds the table gone, and cannot sit', async () => {
+    // As above, but the newcomer connects only once the removal is on its
+    // way, after the table has closed the sockets it had: the table must
+    // be gone by then, or the newcomer sits and is wiped with it.
+    let letGo: () => void = () => {}
+    const held = new Promise<void>((resolve) => (letGo = resolve))
+    const remove = LobbyDO.prototype.removeTable
+    const removed = vi
+      .spyOn(LobbyDO.prototype, 'removeTable')
+      .mockImplementation(async function (this: LobbyDO, tableId: string) {
+        await held
+        return remove.call(this, tableId)
+      })
+    const matchId = await sixTable()
+    await standUp(await sitDown(matchId, 'late-a', 0))
+    const alarm = elapse(matchId, IDLE_MS)
+    await eventually(async () =>
+      removed.mock.calls.some(([id]) => id === matchId),
+    )
+    const d = await connect(matchId, 'late-d')
+    await eventually(
+      async () => d.closed !== null || d.frames.some((f) => f.t === 'welcome'),
+    )
+    if (d.closed === null) {
+      d.send({ t: 'sit', seat: 2 })
+      await eventually(async () =>
+        d.frames.some((f) => f.t === 'welcome' && f.seat !== null),
+      )
+    }
+    letGo()
+    await alarm
+    await settled(matchId)
+    expect({
+      seated: d.frames.some((f) => f.t === 'welcome' && f.seat !== null),
+      claim: await lobbyHolds('late-d'),
+      closed: d.closed?.code,
+      table: await storageOf(matchId),
+      entry: await entryOf(matchId),
+    }).toEqual({
+      seated: false,
+      claim: undefined,
+      closed: CLOSE_GONE,
+      table: { keys: [], alarm: null },
+      entry: undefined,
+    })
+  })
+
   it('a six table that halts leaves the list', async () => {
     const removed = vi.spyOn(LobbyDO.prototype, 'removeTable')
     // Hand 2's plan names no players: the table halts as an engine fault.
