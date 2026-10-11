@@ -128,8 +128,9 @@ test('a six-seat table fits 320 px without horizontal scroll', async ({
 }) => {
   await devSignIn(page, 'you_at_the_bottom')
   // The river with the viewer to act: five board cards, two hole cards,
-  // six plates with long names, a shot clock and the action bar at once.
-  await fakeSixTable(page, { street: 'river' })
+  // six plates with long names, a shot clock and the action bar at once,
+  // and two players who dropped, their plates a line taller.
+  await fakeSixTable(page, { street: 'river', away: [2, 4] })
   await page.setViewportSize({ width: 320, height: 640 })
   await page.goto(`/#play/${SIX_TABLE}`)
   const ring = page.getByRole('region', { name: 'Poker table' })
@@ -138,6 +139,12 @@ test('a six-seat table fits 320 px without horizontal scroll', async ({
   await expect(board.getByRole('img', { name: / of / })).toHaveCount(5)
   await expect(page.getByText('6-max · Hand 1')).toBeVisible()
   await expect(page.getByRole('button', { name: /^Fold/ })).toBeVisible()
+  for (const name of ['seraphina_lindqvist', 'evangeline_marten'])
+    await expect(
+      ring
+        .getByRole('group', { name: new RegExp(`^Seat \\d: ${name}`) })
+        .getByText('Disconnected'),
+    ).toBeVisible()
   await expectNoOverflow(page)
 
   const plate = async (slot: number) =>

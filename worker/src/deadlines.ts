@@ -26,9 +26,13 @@ export type Deadline =
   | { kind: 'idle'; at: number }
   /**
    * Rated: a seat whose socket closed. If it is not back by `at`, its turns
-   * are played for it at once (GRACE_MS in rated.ts).
+   * are played for it at once (GRACE_MS in rated.ts). Six-casual: a player
+   * who is playing and has no socket open; not back by `at`, they sit out.
+   * There the grace belongs to the account (`userId`), since seats change
+   * hands; `seat` is only where they sat when it began. Heads-up graces
+   * carry no `userId`, so they are stored as they always were.
    */
-  | { kind: 'grace'; at: number; seat: SeatId }
+  | { kind: 'grace'; at: number; seat: SeatId; userId?: string }
   /** Rated, finished: a lone Rematch press expires at `at` (REMATCH_MS). */
   | { kind: 'rematch'; at: number }
   /**

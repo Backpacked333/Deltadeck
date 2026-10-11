@@ -40,14 +40,16 @@ const SEATS = [
  * between hands, or folds the viewer and frees it as the hand ends. Once
  * the hand is over the roster carries the stacks it left. Sit out and sit
  * in are answered as the table does (PR-16): the viewer's roster status
- * changes, and a sit_in with no chips is refused.
+ * changes, and a sit_in with no chips is refused. `away`: seats whose
+ * players have dropped (PR-17), so their plates say Disconnected.
  */
 export async function fakeSixTable(
   page: Page,
   {
     street = 'preflop',
     hold = false,
-  }: { street?: Street; hold?: boolean } = {},
+    away = [],
+  }: { street?: Street; hold?: boolean; away?: number[] } = {},
 ) {
   const config: HandConfig = {
     handNo: 1,
@@ -74,7 +76,7 @@ export async function fakeSixTable(
             {
               seat,
               username,
-              connected: true,
+              connected: !away.includes(seat),
               consecutiveTimeouts: 0,
               stack: stacks[seat],
               status: seat === 0 ? status : ('playing' as const),

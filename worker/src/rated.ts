@@ -20,7 +20,9 @@ export const RATED_CONFIG: MatchConfig & { handsTotal: number } = {
 
 /**
  * How long a seat may be gone before its turns are played for it at once
- * (check if possible, else fold; each counts as a timeout).
+ * (check if possible, else fold; each counts as a timeout). Six-casual
+ * uses the same grace, after which the player sits out instead (ADR
+ * amendment 2026-10-10, "Reconnect").
  */
 export const GRACE_MS = 60_000
 
