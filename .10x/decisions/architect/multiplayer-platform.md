@@ -193,6 +193,7 @@ Neither the PM file, `tickets.md` nor this ADR defines "average pot" or "players
   - a seat frees between hands (a `stand`, or a removal by the `sitout` alarm or at a deal). A stand during a hand frees the seat when that hand ends, and the hand's end reports.
 
   Status changes, rebuys and connects change no field, so they do not report.
+
 - **The throttle.** A table reports at most once per 30 s by its own clock (`REPORT_MS`). A change inside the window is not dropped; it is held. The table stores `pending` with its other state, and the held change goes out with the first alarm the table runs, or the first change, after the window opens. That report carries the state at that moment. The held change has no alarm of its own, so at a waiting table it can wait until the next idle check (at most `IDLE_MS`). Accepted:
   - an alarm for each held change would add a wake-up to every quiet table;
   - the list is a guide, and quick-sit already treats `table_full` as "try the next table" (the P2-08 row);
@@ -205,6 +206,7 @@ Neither the PM file, `tickets.md` nor this ADR defines "average pot" or "players
   - each queued report would cost storage writes, which the outbox's retries multiply.
 
   The table's registry calls go out one after another, so a removal never lands before a report sent ahead of it. The removal at deletion is awaited, since no hand is in play then. If it fails, expiry drops the entry within 20 minutes.
+
 - **The cost to the lobby.** A report is one `put` and a removal one `delete`; the lobby reads nothing for either. Stale entries are pruned in `tables()`, the read path PR-24 will call. At the 50-table cap that is at most 100 lobby wake-ups a minute from busy tables, and one every 10 minutes from each waiting one.
 - **Restarts and sessions.** The table stores its window (hand pots and account times), when it last reported and whether a change is pending under its own key, `listing`. Each is written with the change it describes, so a restart neither breaks the 30 s throttle nor forgets the hour. A session rotation changes nothing: the table id is the same, so is the entry, and the figures count hands and accounts from every session in the window. Deleting the table deletes `listing` with the rest of its storage.
 - **The read path.** `LobbyDO.tables()` returns the fresh entries with their table ids, in quick-sit's order: tables with a free seat first, fullest first, then full tables, with ties broken by table id. It is an RPC for the Worker's own objects only. No route, lobby message or frame carries it until PR-24 adds the `tables` frame or `GET /api/tables`: the exposure gate stays shut.
