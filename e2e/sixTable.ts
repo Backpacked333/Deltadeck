@@ -1,8 +1,13 @@
 import type { Page } from '@playwright/test'
 import { act, isOver, legalActions, startHand } from '../src/engine/hand'
 import { seatView } from '../src/engine/redact'
-import { seededDeck } from '../src/engine/testing'
-import type { HandConfig, HandState, Street } from '../src/engine/types'
+import { deckWith, seededDeck } from '../src/engine/testing'
+import type {
+  HandConfig,
+  HandState,
+  PlayerAction,
+  Street,
+} from '../src/engine/types'
 import type {
   ClientMsg,
   ErrorCode,
@@ -25,6 +30,39 @@ const SEATS = [
   { username: 'ozymandias_kings', stack: 23020 },
 ]
 
+const CALL = { type: 'call' } as const
+const CHECK = { type: 'check' } as const
+/**
+ * The hand up to the river with two side pots, every seat's move scripted,
+ * the viewer's included: evangeline_marten is all in for 940 pre-flop and
+ * bartholomew_99 for 1,500 on the flop, and the turn is bet and called.
+ * The main pot is 5,640 between all six, side pot 1 2,800 between five
+ * and side pot 2 800 between four, and the viewer is to act.
+ */
+const SIDE_POTS: [number, PlayerAction][] = [
+  [2, CALL],
+  [3, CALL],
+  [4, { type: 'raise', to: 940 }],
+  [5, CALL],
+  [0, CALL],
+  [1, CALL],
+  [2, CALL],
+  [3, CALL],
+  [0, CHECK],
+  [1, CHECK],
+  [2, CHECK],
+  [3, { type: 'raise', to: 560 }],
+  [5, CALL],
+  [0, CALL],
+  [1, CALL],
+  [2, CALL],
+  [0, CHECK],
+  [1, { type: 'raise', to: 200 }],
+  [2, CALL],
+  [5, CALL],
+  [0, CALL],
+]
+
 /**
  * A full six-seat table answered in the browser, with no table server.
  * Six tables cannot be opened over HTTP yet (quick-sit is P2-08), so the
@@ -42,6 +80,10 @@ const SEATS = [
  * in are answered as the table does (PR-16): the viewer's roster status
  * changes, and a sit_in with no chips is refused. `away`: seats whose
  * players have dropped (PR-17), so their plates say Disconnected.
+ * `sidePots`: play SIDE_POTS instead of `street`, to the river with a main
+ * pot and two side pots (P2-06a). `split`: deal a royal flush on the board,
+ * which plays for everyone, so every pot is split between all who can win
+ * it and the result names each of them with their share.
  */
 export async function fakeSixTable(
   page: Page,
@@ -49,7 +91,15 @@ export async function fakeSixTable(
     street = 'preflop',
     hold = false,
     away = [],
-  }: { street?: Street; hold?: boolean; away?: number[] } = {},
+    sidePots = false,
+    split = false,
+  }: {
+    street?: Street
+    hold?: boolean
+    away?: number[]
+    sidePots?: boolean
+    split?: boolean
+  } = {},
 ) {
   const config: HandConfig = {
     handNo: 1,
@@ -84,7 +134,10 @@ export async function fakeSixTable(
           ],
     ),
   })
-  let hand: HandState = startHand(config, seededDeck(2026))
+  let hand: HandState = startHand(
+    config,
+    split ? deckWith(config, {}, 'As Ks Qs Js Ts') : seededDeck(2026),
+  )
   let seq = 0
   let lastReqId: string | null = null
   const passive = (state: HandState) =>
@@ -99,10 +152,14 @@ export async function fakeSixTable(
     while (!isOver(hand) && (hand.toAct !== 0 || standing))
       hand = hand.toAct === 0 ? act(hand, 0, { type: 'fold' }) : passive(hand)
   }
-  others()
-  while (hand.street !== street) {
-    hand = passive(hand)
+  if (sidePots)
+    for (const [seat, action] of SIDE_POTS) hand = act(hand, seat, action)
+  else {
     others()
+    while (hand.street !== street) {
+      hand = passive(hand)
+      others()
+    }
   }
 
   const frame = (t: 'welcome' | 'state'): ServerMsg => {

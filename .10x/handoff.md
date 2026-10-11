@@ -1,6 +1,37 @@
 # Handoff
 
-## Current handoff: SDE → SDE (casual 6-max, PR-14 onward)
+## Current handoff: SDE → SDE (casual 6-max, PR-21 onward)
+
+Date: 2026-10-11 · Status: **#34 to #53 merged and verified live. Every PR the exposure gate waited on is in (PR-12, PR-14, PR-16, PR-17); six tables are still unreachable from outside.**
+
+- **Read first:**
+  - the plan: `.10x/decisions/engineering-manager/six-max-casual.md` (exposure gate, the "As built" and "After the review" notes per PR);
+  - the ADR amendment in `.10x/decisions/architect/multiplayer-platform.md`, with its clarifications from PR-12 to PR-17;
+  - `.10x/status.md` §Casual 6-max.
+- **Order:**
+  1. PR-21 and PR-22 (side-pot display, chip motion).
+  2. PR-23 to PR-25 (table registry, quick-sit, table list), which open the gate.
+  3. PR-26 smoke evidence.
+- **Constraints:**
+  - heads-up stays byte-identical;
+  - every new message or frame field gets a redaction/allowlist test;
+  - the entry chunk stays under 150 kB (143.3 kB now);
+  - nothing creates a six table from outside before PR-23 to PR-25.
+- **Recorded decisions to keep:**
+  - removal sets no sit cooldown;
+  - "active" means connected;
+  - flapping is accepted for play money;
+  - a player who sits in at a waiting table keeps the seat (#52, Devin's finding declined);
+  - a grace ends by the clock, not by its alarm (#53).
+- **Open:**
+  - Devin's security threads on #44 and #46, fixed but left for the owner to resolve;
+  - the declined #52 finding, for the user to confirm.
+
+---
+
+## Handoff history
+
+### 2026-10-11 — SDE → SDE (casual 6-max, PR-14 onward)
 
 Date: 2026-10-11 · Status: **#34 to #49 merged and verified live; PR-14 and PR-15 being built.**
 
@@ -22,10 +53,6 @@ Date: 2026-10-11 · Status: **#34 to #49 merged and verified live; PR-14 and PR-
   - the entry chunk stays under 150 kB;
   - nothing creates a six table from outside before PR-14 and PR-16 land.
 - **Open:** Devin's security threads on #44 and #46, fixed but left for the owner to resolve.
-
----
-
-## Handoff history
 
 ### 2026-10-10 — SDE → DevOps / User (landing v2 ready to ship)
 

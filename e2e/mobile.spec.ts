@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import type { Page } from '@playwright/test'
+import type { Locator, Page } from '@playwright/test'
 import { fakeLadder, fakeProfile, onboard, playHand } from './helpers'
 import { devSignIn, fakeSixTable, SIX_TABLE } from './sixTable'
 
@@ -146,7 +146,75 @@ test('a six-seat table fits 320 px without horizontal scroll', async ({
         .getByText('Disconnected'),
     ).toBeVisible()
   await expectNoOverflow(page)
+  await expectRingFits(page, { board })
+})
 
+test('a six-seat table with two side pots fits 320 px, in the hand and at its result', async ({
+  page,
+}) => {
+  await devSignIn(page, 'you_at_the_bottom')
+  // The river with the viewer to act and two players all in: the middle
+  // holds the total, three pots, five board cards and two hole cards.
+  await fakeSixTable(page, { sidePots: true })
+  await page.setViewportSize({ width: 320, height: 640 })
+  await page.goto(`/#play/${SIX_TABLE}`)
+  const ring = page.getByRole('region', { name: 'Poker table' })
+  const board = ring.getByRole('group', { name: 'Community cards' })
+  await expect(board.getByRole('img', { name: / of / })).toHaveCount(5)
+  const pots = ring.getByRole('list', { name: 'Pots' })
+  await expect(pots.getByRole('listitem')).toHaveText([
+    /^Main pot: 5,640 /,
+    /^Side pot 1: 2,800 /,
+    /^Side pot 2: 800 /,
+  ])
+  await expectNoOverflow(page)
+  await expectRingFits(page, { board, pots })
+
+  // The others check it down and seraphina_lindqvist, the longest name,
+  // takes all three: three lines, the last side pot first.
+  await page.getByRole('button', { name: /^(Call|Check)/ }).click()
+  const paid = ring.getByRole('list', { name: 'Pots paid' })
+  await expect(paid.getByRole('listitem')).toHaveText([
+    /^Side pot 2: 800 .*seraphina_lindqvist$/,
+    /^Side pot 1: 2,800 .*seraphina_lindqvist$/,
+    /^Main pot: 5,640 .*seraphina_lindqvist$/,
+  ])
+  await expectRingFits(page, { board, pots: paid })
+})
+
+test('a six-seat table fits 320 px when its side pots are split between the longest names', async ({
+  page,
+}) => {
+  await devSignIn(page, 'you_at_the_bottom')
+  // A royal flush on the board plays for everyone, so each pot is split
+  // between all who can win it: the "Pots paid" lines are the longest the
+  // middle gets, up to six names with a share each.
+  await fakeSixTable(page, { sidePots: true, split: true })
+  await page.setViewportSize({ width: 320, height: 640 })
+  await page.goto(`/#play/${SIX_TABLE}`)
+  const ring = page.getByRole('region', { name: 'Poker table' })
+  const board = ring.getByRole('group', { name: 'Community cards' })
+  await expect(board.getByRole('img', { name: / of / })).toHaveCount(5)
+  await page.getByRole('button', { name: /^(Call|Check)/ }).click()
+  const paid = ring.getByRole('list', { name: 'Pots paid' })
+  await expect(paid.getByRole('listitem')).toHaveText([
+    'Side pot 2: 800 chips, split: you 200, maximilian_okafor 200, seraphina_lindqvist 200, ozymandias_kings 200',
+    'Side pot 1: 2,800 chips, split: you 560, maximilian_okafor 560, seraphina_lindqvist 560, bartholomew_99 560, ozymandias_kings 560',
+    'Main pot: 5,640 chips, split: you 940, maximilian_okafor 940, seraphina_lindqvist 940, bartholomew_99 940, evangeline_marten 940, ozymandias_kings 940',
+  ])
+  await expectNoOverflow(page)
+  await expectRingFits(page, { board, pots: paid })
+})
+
+/**
+ * The ring from 320 to 860 px. Phones get the grid and wider screens the
+ * oval; what is in the middle (the board, and any pots) must clear every
+ * plate in both, the oval's narrow middle included. (From 681 to 743 px
+ * the app's header alone runs past the screen, on every page, so the page
+ * width is checked on either side of that band.)
+ */
+async function expectRingFits(page: Page, middle: Record<string, Locator>) {
+  const ring = page.getByRole('region', { name: 'Poker table' })
   const plate = async (slot: number) =>
     (await ring.locator(`[data-slot="${slot}"] .six-plate`).boundingBox())!
   const overlap = (
@@ -157,22 +225,22 @@ test('a six-seat table fits 320 px without horizontal scroll', async ({
     b.x < a.x + a.width &&
     a.y < b.y + b.height &&
     b.y < a.y + a.height
-  // Phones get the grid and wider screens the oval; the board must clear
-  // every plate in both, the oval's narrow middle included. (From 681 to
-  // 743 px the app's header alone runs past the screen, on every page, so
-  // the page width is checked on either side of that band.)
   for (const width of [320, 360, 412, 681, 700, 760, 860]) {
     await page.setViewportSize({ width, height: 800 })
     if (width <= 680 || width >= 744) await expectNoOverflow(page)
-    const cards = (await board.boundingBox())!
     const you = await plate(0)
+    for (const [name, item] of Object.entries(middle)) {
+      const box = (await item.boundingBox())!
+      for (const slot of [0, 1, 2, 3, 4, 5])
+        expect(
+          overlap(box, await plate(slot)),
+          `${width} px: ${name} on slot ${slot}`,
+        ).toBe(false)
+    }
+    // Where the slots sit lives only in live.css: the viewer's plate is
+    // the lowest, and the next seat clockwise is on its left.
     for (const slot of [0, 1, 2, 3, 4, 5]) {
       const other = await plate(slot)
-      expect(overlap(cards, other), `${width} px: board on slot ${slot}`).toBe(
-        false,
-      )
-      // Where the slots sit lives only in live.css: the viewer's plate is
-      // the lowest, and the next seat clockwise is on its left.
       expect(you.y + you.height).toBeGreaterThanOrEqual(
         other.y + other.height - 1,
       )
@@ -180,7 +248,7 @@ test('a six-seat table fits 320 px without horizontal scroll', async ({
     const next = await plate(1)
     expect(next.x + next.width, `${width} px`).toBeLessThanOrEqual(you.x)
   }
-})
+}
 
 test('the space under a six-seat ring keeps its height from turn to turn', async ({
   page,

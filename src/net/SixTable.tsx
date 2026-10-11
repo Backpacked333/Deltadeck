@@ -50,6 +50,11 @@ const keepStood = (key: string) => {
   }
 }
 const chips = (n: number) => Math.round(n).toLocaleString('en-US')
+/** "bob", "bob and carol", "bob, carol and dave". */
+const listed = (names: string[]) =>
+  names.length === 1
+    ? names[0]
+    : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
 const NO_GUESS = {
   show: false,
   value: 0.5,
@@ -271,7 +276,7 @@ export function SixTable({
         clockOffset={state.clockOffset}
         onSit={canSit ? (s) => void sit(s) : undefined}
       >
-        <Middle view={view} />
+        <Middle view={view} nameOf={nameOf} />
       </SixRing>
       <div
         className="six-dock"
@@ -440,7 +445,13 @@ function SeatControls({
 }
 
 /** The middle of the felt: the pot, the board, and the viewer's own cards. */
-function Middle({ view }: { view: SeatView | null }) {
+function Middle({
+  view,
+  nameOf,
+}: {
+  view: SeatView | null
+  nameOf: (seat: SeatId) => string
+}) {
   const mine =
     view && view.you !== null
       ? view.players.find((p) => p.seat === view.you)
@@ -452,6 +463,7 @@ function Middle({ view }: { view: SeatView | null }) {
           Pot <b>{chips(view.pot.total)}</b>
         </p>
       )}
+      {view && <SidePots view={view} nameOf={nameOf} />}
       <div className="six-board" role="group" aria-label="Community cards">
         {Array.from({ length: 5 }, (_, i) =>
           view && view.board[i] !== undefined ? (
@@ -472,6 +484,65 @@ function Middle({ view }: { view: SeatView | null }) {
         </div>
       )}
     </>
+  )
+}
+
+/**
+ * The pots apart once there is a side pot; a single pot keeps the one line
+ * above. During the hand they are the chips gathered on finished streets
+ * (this street's bets are still on the plates, and in the total), and each
+ * says who can still win it. At the result each says who took it, in the
+ * order the chips are pushed: the last side pot first and the main pot
+ * last (HandResult.awards), the order PR-22's chip flights will follow.
+ * Both lists spell out role="list": Safari drops the role of a list styled
+ * list-style: none, and its name with it.
+ */
+function SidePots({
+  view,
+  nameOf,
+}: {
+  view: SeatView
+  nameOf: (seat: SeatId) => string
+}) {
+  const { layers } = view.pot
+  if (layers.length < 2) return null
+  const label = (pot: number) => (pot === 0 ? 'Main pot' : `Side pot ${pot}`)
+  const who = (seat: SeatId) => (seat === view.you ? 'you' : nameOf(seat))
+  const result = view.result
+  // Always "between": a pot down to one seat ends the hand in the same act.
+  if (!result)
+    return (
+      <ul className="six-pots" role="list" aria-label="Pots">
+        {layers.map((pot, i) => (
+          <li key={i}>
+            {label(i)}: <b>{chips(pot.amount)}</b>
+            <span className="sr-only">
+              {` chips between ${listed(pot.eligible.map(who))}`}
+            </span>
+          </li>
+        ))}
+      </ul>
+    )
+  // The awards go pot by pot, a split pot's side by side, so each pot's
+  // first award gives its place.
+  const order = [...new Set(result.awards.map((a) => a.pot))]
+  return (
+    <ol className="six-pots six-paid" role="list" aria-label="Pots paid">
+      {order.map((pot) => {
+        // Only seats that were paid chips are named, as in resultText.
+        const paid = result.awards.filter((a) => a.pot === pot && a.amount > 0)
+        const amount = paid.reduce((sum, a) => sum + a.amount, 0)
+        return (
+          <li key={pot}>
+            {label(pot)}: <b>{chips(amount)}</b>
+            <span className="sr-only"> chips</span>
+            {paid.length === 1
+              ? ` to ${who(paid[0].seat)}`
+              : `, split: ${paid.map((a) => `${who(a.seat)} ${chips(a.amount)}`).join(', ')}`}
+          </li>
+        )
+      })}
+    </ol>
   )
 }
 
@@ -709,11 +780,7 @@ function resultText(
   if (winners.every((s) => (result.netBySeat[s] ?? 0) === 0)) return 'Split pot'
   const phrase = (seats: SeatId[]) => {
     const names = seats.map((s) => (s === view.you ? 'You' : nameOf(s)))
-    const who =
-      names.length === 1
-        ? names[0]
-        : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
-    return `${who} ${names.length === 1 && seats[0] !== view.you ? 'wins' : 'win'}`
+    return `${listed(names)} ${names.length === 1 && seats[0] !== view.you ? 'wins' : 'win'}`
   }
   if (!result.showdown) return phrase(winners)
   // Every award to a seat carries that seat's own hand.
