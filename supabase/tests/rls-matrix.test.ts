@@ -211,6 +211,19 @@ const TABLES: Record<string, Spec> = {
       `insert into public.challenge_scores (user_id, hand, ver, accuracy, receipt, played_at)
        values ('${u}', 'nut-draw', 1, 50, repeat('e', 32), now()) on conflict do nothing`,
   ),
+  'public.practice_hands': owned(
+    'public.practice_hands',
+    'record = record',
+    (u) =>
+      `insert into public.practice_hands (user_id, id, played_at, record)
+       values ('${u}', 'h:new', now(), '{"id": "h:new"}') on conflict do nothing`,
+  ),
+  'public.learning_state': owned(
+    'public.learning_state',
+    'trainer = trainer',
+    (u) =>
+      `insert into public.learning_state (user_id) values ('${u}') on conflict do nothing`,
+  ),
   'private.coach_usage': shared(
     'private.coach_usage',
     'used = used',
@@ -301,6 +314,15 @@ const EXPECTED: Record<string, Record<Who, Cell[]>> = {
     other: [0, D, D, D],
     ...SERVICE,
   },
+  // Practice history on the account: strictly per owner. The learning state
+  // is replaced, never deleted (practice-history.test.ts covers the guards).
+  'public.practice_hands': { ...OWN_ONLY, ...SERVICE },
+  'public.learning_state': {
+    anon: [D, D, D, D],
+    self: [1, 'ok', 1, D],
+    other: [0, D, 0, D],
+    ...SERVICE,
+  },
   // Only reachable through reserve_coach_request (security definer). In this
   // stub service_role has no usage on schema private either; on Supabase the
   // grants may differ, which does not change what browsers can do.
@@ -342,6 +364,10 @@ beforeAll(async () => {
       values ('${ALICE}', gen_random_uuid(), 'user', 'hi', 's', 'l'),
              ('${BOB}', gen_random_uuid(), 'user', 'hi', 's', 'l');
     insert into private.coach_usage (scope, window_start) values ('seed', now());
+    insert into public.practice_hands (user_id, id, played_at, record)
+      values ('${ALICE}', 'h:1', now(), '{"id": "h:1"}'),
+             ('${BOB}', 'h:1', now(), '{"id": "h:1"}');
+    insert into public.learning_state (user_id) values ('${ALICE}'), ('${BOB}');
     insert into public.challenge_scores (user_id, hand, ver, accuracy, receipt, played_at)
       values ('${ALICE}', 'overpair', 1, 80, repeat('a', 32), now()),
              ('${BOB}', 'overpair', 1, 70, repeat('b', 32), now());
@@ -410,7 +436,9 @@ describe('functions', () => {
     const all = await fns()
     expect(all.map((f) => f.name)).toEqual([
       'private.count_abandonment',
+      'private.learning_state_newer',
       'private.player_accuracy',
+      'private.practice_hands_guard',
       'private.rating_change',
       'private.refresh_accuracy',
       'private.refresh_finished_match',
