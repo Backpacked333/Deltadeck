@@ -31,6 +31,11 @@ export type Deadline =
   | { kind: 'grace'; at: number; seat: SeatId }
   /** Rated, finished: a lone Rematch press expires at `at` (REMATCH_MS). */
   | { kind: 'rematch'; at: number }
+  /**
+   * Six-casual: the first player sitting out whose time runs out at `at`
+   * (SIT_OUT_MS in table.ts) is stood up then. One entry, for the earliest.
+   */
+  | { kind: 'sitout'; at: number }
 
 /** A finished table keeps its storage this long for late arrivals. */
 export const IDLE_MS = 600_000

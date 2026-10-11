@@ -110,6 +110,12 @@ export const SIT_COOLDOWN_MS = 120_000
  */
 export const SIT_OUT_ORBITS = 3
 /**
+ * ...or once this long has passed since they sat out, whichever comes
+ * first: no orbit passes while fewer than two can be dealt in, and the
+ * seat must still free then (ADR "Sitting out").
+ */
+export const SIT_OUT_MS = 300_000
+/**
  * Six-casual sessions (ADR amendment 2026-10-10, "Sessions in the
  * archive"): a session ends after this many hands, once its outbox is
  * empty, and the next deal starts a new one.
@@ -158,6 +164,8 @@ type Player = {
    * it survives a restart and a session rotation, as `orbitTravel` does.
    */
   outOrbits?: number
+  /** Six-casual, sitting out: since when (the table's clock). */
+  outSince?: number
   /** Six-casual: sat down since the last deal (dealt in without posting). */
   justSat?: boolean
   /**
@@ -850,6 +858,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     if (stack === 0) this.sitIn(player)
     this.seq++
     await this.ctx.storage.put({ match, seq: this.seq })
+    if (stack === 0) await this.armAlarm()
     this.send(ws, this.frame('welcome', userId))
     this.broadcast('state', { skip: ws, roster: true })
     // A table waiting for funded players deals once two are here.
@@ -877,6 +886,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
       return this.send(ws, this.frame('welcome', userId))
     this.seq++
     await this.ctx.storage.put({ match, seq: this.seq })
+    // Their five minutes start now (syncSitOut).
+    await this.armAlarm()
     this.send(ws, this.frame('welcome', userId))
     this.broadcast('state', { skip: ws, roster: true })
   }
@@ -902,6 +913,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     this.sitIn(player)
     this.seq++
     await this.ctx.storage.put({ match, seq: this.seq })
+    await this.armAlarm()
     this.send(ws, this.frame('welcome', userId))
     this.broadcast('state', { skip: ws, roster: true })
     if (match.status === 'waiting' && this.funded().length >= 2) {
@@ -918,6 +930,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     if (player.status === 'sitting_out') return false
     player.status = 'sitting_out'
     player.outOrbits = 0
+    player.outSince = this.clock()
     return true
   }
 
@@ -926,23 +939,87 @@ export class TableDO extends DurableObject<WorkerEnv> {
     player.status = 'playing'
     player.timeouts = 0
     delete player.outOrbits
+    delete player.outSince
   }
 
   /**
-   * Six-casual, at a deal: the players sitting out whom it stands up (ADR
-   * "Sitting out"). `orbitStart`: this deal starts an orbit, the one place
-   * PR-15 defines (orbitDone's `refill`), so every player sitting out has
-   * one more orbit start since they sat out; at SIT_OUT_ORBITS they go.
-   * Nobody sitting out is in the deal, so it is dealt as it was planned.
+   * The players sitting out whom the table stands up now (ADR "Sitting
+   * out"): SIT_OUT_ORBITS orbit starts, or SIT_OUT_MS, since they sat out,
+   * whichever comes first. `orbitStart`: a deal that starts an orbit, the
+   * one place PR-15 defines (orbitDone's `refill`), so each of them has
+   * one more orbit start since they sat out. Nobody sitting out is in a
+   * deal, so it is dealt as it was planned. One still dealt into the hand
+   * being played is left alone until it ends (leavable).
    */
   private satOutTooLong(orbitStart: boolean) {
+    const t = this.clock()
     const due: Player[] = []
     for (const p of this.match!.players) {
-      if (p.status !== 'sitting_out') continue
+      if (!this.leavable(p)) continue
       if (orbitStart) p.outOrbits = (p.outOrbits ?? 0) + 1
-      if ((p.outOrbits ?? 0) >= SIT_OUT_ORBITS) due.push(p)
+      if ((p.outOrbits ?? 0) >= SIT_OUT_ORBITS || t >= p.outSince! + SIT_OUT_MS)
+        due.push(p)
     }
     return due
+  }
+
+  /**
+   * Six-casual: whether `p` sits out and may be stood up now: never during
+   * a hand they are dealt into (its moves read their seat's account from
+   * the table), nor while they leave it already (standing).
+   */
+  private leavable(p: Player) {
+    if (p.status !== 'sitting_out' || p.standing) return false
+    const hand = this.hand
+    return !hand || isOver(hand) || this.handSeat(p.userId) === null
+  }
+
+  /**
+   * Six-casual: the alarm for the first player sitting out whose
+   * SIT_OUT_MS run out, one `sitout` deadline at the earliest. A player
+   * dealt into the hand being played has none until it ends, when the end
+   * arms it again. Run by armAlarm, so every write that arms the alarm
+   * keeps it right.
+   */
+  private syncSitOut() {
+    const match = this.match
+    if (match?.config.kind !== 'six-casual') return
+    const due = this.seatable()
+      ? match.players
+          .filter((p) => this.leavable(p))
+          .map((p) => p.outSince! + SIT_OUT_MS)
+      : []
+    this.deadlines = [
+      ...this.deadlines.filter((d) => d.kind !== 'sitout'),
+      ...(due.length
+        ? [{ kind: 'sitout' as const, at: Math.min(...due) }]
+        : []),
+    ]
+  }
+
+  /**
+   * The `sitout` alarm: players sitting out whose time ran out leave, as a
+   * stand between hands would, with no cooldown.
+   */
+  private async sitOutTimeUp() {
+    const match = this.match
+    if (!match || !this.seatable()) return
+    const gone = this.satOutTooLong(false)
+    if (!gone.length) return
+    this.unseat(gone, false)
+    // As at the last stand: an open session still ends IDLE_MS after its
+    // last hand started; with none open, the table goes IDLE_MS from now.
+    if (!match.players.length && match.status === 'waiting')
+      this.setGameDeadline(this.idleDeadline())
+    this.seq++
+    await this.ctx.storage.put({
+      match,
+      seq: this.seq,
+      deadlines: this.deadlines,
+    })
+    await this.armAlarm()
+    this.broadcast('state', { roster: true })
+    this.leave(gone)
   }
 
   /**
@@ -1189,6 +1266,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
         }
         if (d.kind === 'rematch') {
           await this.rematchExpired()
+          continue
+        }
+        // Waiting tables too: that is when no orbit passes.
+        if (d.kind === 'sitout') {
+          await this.sitOutTimeUp()
           continue
         }
         if (this.match?.status !== 'playing') continue
@@ -1976,18 +2058,25 @@ export class TableDO extends DurableObject<WorkerEnv> {
     writes.deadlines = this.deadlines
   }
 
-  /** Replaces the turn/next-hand deadline; archive retries and graces stay. */
+  /**
+   * Replaces the turn/next-hand/idle deadline; archive retries, graces,
+   * the rematch and the sit-out alarm stay.
+   */
   private setGameDeadline(deadline: Deadline | null) {
     this.deadlines = [
       ...this.deadlines.filter(
         (d) =>
-          d.kind === 'outbox' || d.kind === 'grace' || d.kind === 'rematch',
+          d.kind === 'outbox' ||
+          d.kind === 'grace' ||
+          d.kind === 'rematch' ||
+          d.kind === 'sitout',
       ),
       ...(deadline ? [deadline] : []),
     ]
   }
 
   private async armAlarm() {
+    this.syncSitOut()
     await this.ctx.storage.put('deadlines', this.deadlines)
     const at = earliest(this.deadlines)
     if (at === null) await this.ctx.storage.deleteAlarm()
