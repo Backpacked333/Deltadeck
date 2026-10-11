@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test'
 import { act, isOver, legalActions, startHand } from '../src/engine/hand'
+import { nextBlinds } from '../src/engine/positions'
 import { seatView } from '../src/engine/redact'
 import { deckWith, seededDeck } from '../src/engine/testing'
 import type {
@@ -114,6 +115,22 @@ const RUNOUT: [number, PlayerAction][] = [
  * slow enough that each street's chips land before the next street's fly.
  */
 const RUNOUT_STEP_MS = 600
+/**
+ * The hand after RUNOUT, which `nextHand()` deals NEXT_HAND_MS after its
+ * result. ozymandias_kings has no chips left and sits out, so the standard
+ * dead button (nextBlinds) puts the big blind on the viewer, leaves the
+ * small blind dead and the button on evangeline_marten's seat.
+ * maximilian_okafor raises to 60 and the others fold to the viewer, whose
+ * move it is; when she folds, the blinds go in and the pot goes to him.
+ */
+const NEXT_HAND: [number, PlayerAction][] = [
+  [1, { type: 'raise', to: 60 }],
+  [2, FOLD],
+  [3, FOLD],
+  [4, FOLD],
+]
+/** The table's pause after a result (NEXT_HAND_MS, worker/src/table.ts). */
+const NEXT_HAND_MS = 3000
 
 /**
  * A full six-seat table answered in the browser, with no table server.
@@ -138,7 +155,9 @@ const RUNOUT_STEP_MS = 600
  * it and the result names each of them with their share. `runout`: deal
  * RUNOUT instead, played up to bartholomew_99's first move; `runout()` then
  * plays the rest, one move every RUNOUT_STEP_MS, and resolves once the
- * result is sent.
+ * result is sent; a player it leaves with no chips sits out, as at the
+ * table. `nextHand()` then deals NEXT_HAND and plays it, at the same pace,
+ * up to the viewer's move.
  */
 export async function fakeSixTable(
   page: Page,
@@ -181,6 +200,8 @@ export async function fakeSixTable(
   /** The roster's stacks: as of the deal, then as the hand left them. */
   const stacks = config.seats.map(({ stack }) => stack)
   let settled = false
+  /** Others the runout left with no chips, sitting out until a rebuy. */
+  const busted = new Set<number>()
   /** The viewer has a seat; they stood during the hand; they sit out. */
   let seated = true
   let standing = false
@@ -198,7 +219,12 @@ export async function fakeSixTable(
               connected: !away.includes(seat),
               consecutiveTimeouts: 0,
               stack: stacks[seat],
-              status: seat === 0 ? status : ('playing' as const),
+              status:
+                seat === 0
+                  ? status
+                  : busted.has(seat)
+                    ? ('sitting_out' as const)
+                    : ('playing' as const),
             },
           ],
     ),
@@ -239,7 +265,10 @@ export async function fakeSixTable(
 
   const frame = (t: 'welcome' | 'state'): ServerMsg => {
     if (isOver(hand) && !settled) {
-      for (const p of hand.players) stacks[p.seat] = p.stack
+      for (const p of hand.players) {
+        stacks[p.seat] = p.stack
+        if (runout && p.seat !== 0 && !p.stack) busted.add(p.seat)
+      }
       settled = true
     }
     const view = seated
@@ -355,7 +384,50 @@ export async function fakeSixTable(
     }
     if (!isOver(hand)) throw new Error('The runout script left the hand open')
   }
-  return { received, release, runout: playRunout }
+  /** NEXT_HAND, dealt as the table deals it, up to the viewer's move. */
+  const playNextHand = async () => {
+    const send = socketSend
+    if (!runout || !send || !isOver(hand) || config.sb == null)
+      throw new Error('No runout has ended')
+    await new Promise((done) => setTimeout(done, NEXT_HAND_MS))
+    const dealt = config.seats
+      .map(({ seat }) => seat)
+      .filter((seat) => !busted.has(seat) && stacks[seat] > 0)
+    const blinds = nextBlinds(
+      {
+        button: config.button,
+        sb: config.sb,
+        bb: config.bb!,
+        sbSeat: config.sb,
+      },
+      dealt,
+    )
+    hand = startHand(
+      {
+        handNo: 2,
+        seats: dealt.map((seat) => ({ seat, stack: stacks[seat] })),
+        button: blinds.button,
+        blinds: config.blinds,
+        sb: blinds.sb,
+        bb: blinds.bb,
+      },
+      seededDeck(2027),
+    )
+    settled = false
+    send(frame('state'))
+    for (const [seat, action] of NEXT_HAND) {
+      await new Promise((done) => setTimeout(done, RUNOUT_STEP_MS))
+      hand = act(hand, seat, action)
+      send(frame('state'))
+    }
+    if (hand.toAct !== 0) throw new Error('The next hand skipped the viewer')
+  }
+  return {
+    received,
+    release,
+    runout: playRunout,
+    nextHand: playNextHand,
+  }
 }
 
 /** Signed in with a development token, past the trainer's first visit. */
