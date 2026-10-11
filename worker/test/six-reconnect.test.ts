@@ -291,6 +291,59 @@ describe('coming back to a six table', () => {
     )
   }, 30_000)
 
+  it('a reconnect after the grace ran out, before its alarm ran, still sits the player out', async () => {
+    const { matchId, clients, hand, dealtAt } = await handTwo('rl')
+    const cards = holesOf(hand)
+    // Seat 4, the big blind, drops as hand 2 is dealt; seat 0 calls 40 s
+    // in. Its grace ends at 60 s, but the alarm is late (a deploy or a
+    // restart), and seat 4 is back 5 s after the end, before it runs.
+    await leave(matchId, clients[4], 'rl-4')
+    await setClock(matchId, dealtAt + 40_000)
+    await move(matchId, clients, call)
+    const from = clients[0].frames.length
+    await setClock(matchId, dealtAt + GRACE_MS + 5_000)
+    const { client: back, welcome } = await comeBack(matchId, 'rl-4')
+    // The grace ran out, so it sits out as the alarm would have sat it
+    // out, its removal clock from now; being back does not deal it in.
+    // It still has its seat and its cards in the hand it was dealt.
+    expect(welcome).toMatchObject({ seat: 4, view: { handNo: 2, you: 4 } })
+    expect(bySeat(welcome.view!.players, 4).cards).toEqual(cards[4])
+    expect(rosterOf(welcome, 4)).toMatchObject({
+      connected: true,
+      status: 'sitting_out',
+    })
+    expect(await storedSeat(matchId, 4)).toMatchObject({
+      status: 'sitting_out',
+      outSince: dealtAt + GRACE_MS + 5_000,
+      outOrbits: 0,
+    })
+    expect(await graces(matchId)).toEqual([])
+    await clients[0].next(
+      (f) => f.t === 'state' && rosterOf(f, 4).status === 'sitting_out',
+      from,
+    )
+    // The late alarm finds nothing left to do.
+    await at(matchId, dealtAt + GRACE_MS + 6_000)
+    expect(await storedSeat(matchId, 4)).toMatchObject({
+      status: 'sitting_out',
+      outSince: dealtAt + GRACE_MS + 5_000,
+    })
+    // It plays out hand 2 (its option), and hand 3 deals seats 0 and 2.
+    const seats = { 0: clients[0], 2: clients[2], 4: back }
+    await move(matchId, seats, call)
+    await move(matchId, seats, check)
+    expect((await peek(matchId)).hand!.actions.at(-1)).toMatchObject({
+      seat: 4,
+      action: { type: 'check' },
+    })
+    const three = await nextHand(matchId, seats)
+    expect(three.config.seats.map((s) => s.seat)).toEqual([0, 2])
+    checkFrames(
+      [...Object.values(clients), back].flatMap((c) => c.frames),
+      'six-casual',
+    )
+  }, 30_000)
+
   it("the reconnect welcome has only that user's cards for the current hand", async () => {
     const { matchId, clients, hand, dealtAt } = await handTwo('rw')
     const cards = holesOf(hand)

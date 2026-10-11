@@ -1286,15 +1286,21 @@ export class TableDO extends DurableObject<WorkerEnv> {
    * A rated seat that (re)connects ends its grace, or its time away. A
    * six-table player back within the grace ends it; one who sat out
    * meanwhile (the grace ran out, or two timeouts) stays out until sit_in.
+   * A grace that ran out before its alarm ran (a late alarm) sits them
+   * out now, as the alarm would have: being back after it ends undoes
+   * nothing. Run before the new socket is accepted, so they are still
+   * away for sixGraceOver.
    */
   private async back(player: Player) {
     const match = this.match!
     if (match.config.kind === 'six-casual') {
-      const kept = this.deadlines.filter(
-        (d) => !(d.kind === 'grace' && d.userId === player.userId),
+      const mine = this.deadlines.filter(
+        (d) => d.kind === 'grace' && d.userId === player.userId,
       )
-      if (kept.length === this.deadlines.length) return
-      this.deadlines = kept
+      if (!mine.length) return
+      this.deadlines = this.deadlines.filter((d) => !mine.includes(d))
+      if (mine.some((d) => d.at <= this.clock()))
+        await this.sixGraceOver([player.userId])
       return this.armAlarm()
     }
     if (!match.adjusted) return
