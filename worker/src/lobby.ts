@@ -28,6 +28,9 @@ import { isStale, listTables } from './registry'
 import type { ListedTable, TableEntry, TableReport } from './registry'
 import type { InitBody, Liveness } from './table'
 
+/** A whole number of seats, chips or accounts: what a table reports. */
+const isCount = (n: unknown) => Number.isSafeInteger(n) && (n as number) >= 0
+
 /** The same two accounts meet at most this often per UTC day. */
 export const PAIRS_PER_DAY = 2
 /** Both players must open a paired table within this time. */
@@ -505,6 +508,15 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    */
   async reportTable(tableId: string, report: TableReport) {
     const { seated, maxSeats, avgPot, playersPerHour } = report
+    // By value too: a name where a count goes would be stored, and NaN
+    // would sort anywhere in quick-sit's order. A report that is not four
+    // counts is refused whole; the table logs it (lobby_report), and an
+    // entry it never replaces expires.
+    if (
+      ![seated, maxSeats, playersPerHour].every(isCount) ||
+      !(avgPot === null || isCount(avgPot))
+    )
+      throw new TypeError('A table report is four counts')
     await this.ctx.storage.put(`table:${tableId}`, {
       seated,
       maxSeats,

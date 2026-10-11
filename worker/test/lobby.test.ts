@@ -629,6 +629,32 @@ describe('the six-table registry (P2-08)', () => {
     })
     const stored = await lobbyState()
     expect(JSON.stringify(stored['table:named'])).not.toMatch(/eve/)
+    // By value too: a field that is not a count (a name where a number
+    // goes, NaN, a fraction, a negative) is refused whole. Nothing is
+    // stored, and an entry already there stays as it was.
+    const mangled: Record<string, unknown>[] = [
+      { avgPot: 'eve' },
+      { seated: 'eve' },
+      { seated: Number.NaN },
+      { playersPerHour: Infinity },
+      { maxSeats: 6.5 },
+      { seated: -1 },
+      { avgPot: undefined },
+    ]
+    for (const fields of mangled) {
+      // A native promise: vitest's rejects does not see an RPC promise
+      // that resolves as a failure.
+      for (const tableId of ['mangled', 'named'])
+        await expect(
+          (async () =>
+            report(tableId, { ...counts(3), ...fields } as TableReport))(),
+        ).rejects.toThrow('A table report is four counts')
+      expect(await entryOf('mangled')).toBeUndefined()
+      expect(await entryOf('named')).toEqual({
+        ...counts(2),
+        updatedAt: LOBBY_AT,
+      })
+    }
   })
 
   it('a table removed from the list is no longer listed', async () => {
