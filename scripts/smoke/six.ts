@@ -50,6 +50,8 @@ type Player = {
   leaving: boolean
   /** A rebuy sent this hand. */
   rebuying: boolean
+  /** This connection has asked to sit. */
+  asked: boolean
 }
 
 type HandLog = {
@@ -99,6 +101,7 @@ export class SixRun {
       idle: false,
       leaving: false,
       rebuying: false,
+      asked: false,
     }))
   }
 
@@ -176,6 +179,7 @@ export class SixRun {
     p.ws = ws
     p.seq = 0
     p.leaving = false
+    p.asked = false
     ws.onclose = (e) => {
       if (p.ws !== ws) return
       p.ws = null
@@ -207,7 +211,11 @@ export class SixRun {
         }
         return this.fail(`player ${p.index}: error ${msg.code} ${msg.message}`)
       case 'welcome':
-        if (sit && p.away === null) this.send(p, { t: 'sit' })
+        // The server welcomes again once seated: sit on the first only.
+        if (sit && !p.asked && p.away === null) {
+          p.asked = true
+          this.send(p, { t: 'sit' })
+        }
         if (msg.view) this.view(p, msg.view)
         return
       case 'state':
