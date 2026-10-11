@@ -32,6 +32,8 @@ const alice = identity('alice')
 beforeEach(() => {
   FakeSocket.all = []
   vi.stubGlobal('WebSocket', FakeSocket)
+  // A six table remembers, per tab, the hand a player stood from.
+  sessionStorage.clear()
 })
 afterEach(() => {
   vi.useRealTimers()
@@ -821,6 +823,38 @@ describe('LiveTable at a six-casual table', () => {
     act(() => socket.emit(sixFrame('welcome', 4, 2, 2, next)))
     expect(screen.getByText('6-max · Hand 7')).toBeInTheDocument()
     expect(screen.queryByText('Leaving after this hand')).toBeNull()
+    expect(standButton()).toBeInTheDocument()
+  })
+
+  it('a reload during the hand she stood from still says Leaving after this hand', async () => {
+    const first = render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    const hand = sixHand()
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    await userEvent.click(standButton()!)
+    expect(seatStatus()).toHaveTextContent('Leaving after this hand')
+
+    // The page reloads mid-hand. Nothing on the wire says she stood (ADR,
+    // clarifications from PR-12); this tab remembers.
+    first.unmount()
+    const reloaded = render(<LiveTable matchId={MATCH} identity={alice} />)
+    const fresh = await opened()
+    act(() => fresh.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    expect(seatStatus()).toHaveTextContent('Leaving after this hand')
+    expect(standButton()).toBeNull()
+
+    // Not another account's: bob, dealt into the same hand in this tab.
+    reloaded.unmount()
+    render(<LiveTable matchId={MATCH} identity={identity('bob')} />)
+    const bobs = await opened()
+    act(() => bobs.emit(sixFrame('welcome', 1, 0, 0, hand)))
+    expect(seatStatus()).toHaveTextContent(/^$/)
+    expect(standButton()).toBeInTheDocument()
+
+    // Nor a later hand's.
+    const next = { ...hand, config: { ...hand.config, handNo: 2 } }
+    act(() => bobs.emit(sixFrame('welcome', 2, 2, 2, next)))
+    expect(seatStatus()).toHaveTextContent(/^$/)
     expect(standButton()).toBeInTheDocument()
   })
 

@@ -27,6 +27,22 @@ const SEATS = 6
 /** The buy-in, and what a rebuy tops up to: 100 bb (R-10). */
 const TOP_UP = buyIn(SIX_BLINDS.bb)
 const noop = () => {}
+/** Where a tab keeps the hand it stood from (`matchId:handNo:seat`). */
+const STOOD_KEY = 'qp.six.stoodFrom'
+const readStood = (): string | null => {
+  try {
+    return sessionStorage.getItem(STOOD_KEY)
+  } catch {
+    return null
+  }
+}
+const keepStood = (key: string) => {
+  try {
+    sessionStorage.setItem(STOOD_KEY, key)
+  } catch {
+    // Storage refused (a private window): this page still knows.
+  }
+}
 const chips = (n: number) => Math.round(n).toLocaleString('en-US')
 const NO_GUESS = {
   show: false,
@@ -113,12 +129,13 @@ export function SixTable({
   // Our own seat's controls. The hand we are dealt into while it is being
   // played, if any: a rebuy waits for it to end, and a stand during it
   // keeps the seat until then. The wire has no marker of that pending
-  // stand (ADR, clarifications from PR-12), so we remember the hand we
-  // stood from ourselves.
+  // stand (ADR, clarifications from PR-12), so we remember the hand and
+  // seat we stood from ourselves, in this tab, so a reload still knows.
   const playing = dealt && !dealt.result ? dealt : null
   const handKey = view ? `${view.matchId}:${view.handNo}` : null
-  const [stoodFrom, setStoodFrom] = useState<string | null>(null)
-  const leaving = playing !== null && stoodFrom === handKey
+  const standKey = playing ? `${handKey}:${playing.you}` : null
+  const [stoodFrom, setStoodFrom] = useState(readStood)
+  const leaving = standKey !== null && stoodFrom === standKey
   const mine =
     seat === null ? undefined : table.players.find((p) => p.seat === seat)
   const controls = state.status === 'open' && table.status !== 'finished'
@@ -149,8 +166,10 @@ export function SixTable({
   }
   const onStand = () => {
     if (!stand()) return
-    if (playing) setStoodFrom(handKey)
-    else setAsked(`stand:${askKey}`)
+    if (standKey) {
+      setStoodFrom(standKey)
+      keepStood(standKey)
+    } else setAsked(`stand:${askKey}`)
   }
   return (
     <div
