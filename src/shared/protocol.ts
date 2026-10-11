@@ -35,7 +35,8 @@ export const CLOSE_RATE_LIMITED = 4429
 /**
  * Quick-sit tries at most this many listed tables (ADR, clarifications from
  * PR-24): a `quick_sit` names at most this many tables it already tried,
- * and with that many tried the lobby opens a table or refuses.
+ * and with that many tried the lobby opens a table if it may, else offers
+ * a seat not tried, else refuses.
  */
 export const QUICK_SIT_TABLES = 3
 
