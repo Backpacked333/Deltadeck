@@ -18,8 +18,7 @@ import { CashController } from '../src/controller'
 import type { Roster } from '../src/controller'
 import { IDLE_MS } from '../src/deadlines'
 import { MATCH_CREATES_PER_DAY, QUICK_SITS } from '../src/limits'
-import { CREATED_MS, lobbyStub, SIX_TABLES_MAX } from '../src/lobby'
-import type { LobbyDO } from '../src/lobby'
+import { CREATED_MS, LobbyDO, lobbyStub, SIX_TABLES_MAX } from '../src/lobby'
 import type { TableEntry, TableReport } from '../src/registry'
 import { REPORT_MS } from '../src/registry'
 import { NEXT_HAND_MS, TableDO } from '../src/table'
@@ -151,6 +150,40 @@ async function tableWith(...users: string[]) {
 
 const fold = (): PlayerAction => ({ type: 'fold' })
 
+/** Waits for `done` to hold, then asserts it does (named `what`). */
+async function until(what: string, done: () => boolean | Promise<boolean>) {
+  for (let i = 0; i < 400 && !(await done()); i++)
+    await new Promise((r) => setTimeout(r, 5))
+  expect(await done(), what).toBe(true)
+}
+
+/**
+ * Holds tables' /init (the first `count` of them, or all) until `letGo`.
+ * The lobby's open is a call that lets other events in, and this keeps it
+ * open while the test acts. The promise is made here, in the test, so the
+ * table can wait on it (workerd's per-object I/O rule).
+ */
+function holdInit(count = Infinity) {
+  let letGo: () => void = () => {}
+  const gate = new Promise<void>((resolve) => (letGo = resolve))
+  let held = 0
+  const real = TableDO.prototype.fetch
+  const spy = vi
+    .spyOn(TableDO.prototype, 'fetch')
+    .mockImplementation(async function (this: TableDO, request: Request) {
+      if (new URL(request.url).pathname === '/init' && held < count) {
+        held++
+        await gate
+      }
+      return real.call(this, request)
+    })
+  return {
+    held: () => held,
+    letGo: () => letGo(),
+    restore: () => spy.mockRestore(),
+  }
+}
+
 describe('quick-sit picks a table', () => {
   it('quick-sit picks the fullest table with a free seat', async () => {
     const two = await listed(2)
@@ -209,6 +242,66 @@ describe('quick-sit picks a table', () => {
     await new Promise((r) => setTimeout(r, 50))
     expect(other.frames.some((f) => f.t === 'matched')).toBe(false)
     expect(q.frames.some((f) => f.t === 'matched')).toBe(false)
+  })
+
+  it('a pairing pass that read the queue before a quick-sit does not pair that account', async () => {
+    // Review B4. The first pairing's /init is held: the passes started by
+    // two later queue requests read the queue (u in it) and wait behind
+    // that pairing. u then quick-sits, which deletes its row without
+    // waiting on them, and is sent to a six table.
+    const init = holdInit(1)
+    const real = (
+      LobbyDO.prototype as unknown as { pairUp: () => Promise<void> }
+    ).pairUp
+    const passes = { started: 0, running: 0 }
+    vi.spyOn(
+      LobbyDO.prototype as unknown as { pairUp: () => Promise<void> },
+      'pairUp',
+    ).mockImplementation(async function (this: LobbyDO) {
+      passes.started++
+      passes.running++
+      try {
+        return await real.call(this)
+      } finally {
+        passes.running--
+      }
+    })
+    const queued = (userId: string) =>
+      runInDurableObject(
+        lobbyStub(env),
+        async (_: LobbyDO, state) =>
+          (await state.storage.get(`queue:${userId}`)) !== undefined,
+      )
+    const [a, b, u, v] = [
+      await inLobby('stale-pq-a'),
+      await inLobby('stale-pq-b'),
+      await inLobby('stale-pq-u'),
+      await inLobby('stale-pq-v'),
+    ]
+    a.send({ t: 'queue', kind: 'hu-casual' })
+    await a.next((f) => f.t === 'queued')
+    b.send({ t: 'queue', kind: 'hu-casual' })
+    await until('a and b are being paired', () => init.held() === 1)
+    u.send({ t: 'queue', kind: 'hu-casual' })
+    await until('u is queued', () => queued('stale-pq-u'))
+    v.send({ t: 'queue', kind: 'hu-casual' })
+    await until('v is queued', () => queued('stale-pq-v'))
+    // a's pass ended; b's, u's and v's are running.
+    await until('three passes wait', () => passes.running === 3)
+    const answer = await quickSit(u)
+    if (answer.t !== 'sit_at') throw new Error(JSON.stringify(answer))
+    init.letGo()
+    await a.next((f) => f.t === 'matched')
+    await until('every pass ended', () => passes.running === 0)
+    // u was not paired for heads-up, and sits where quick-sit sent it.
+    expect(u.frames.filter((f) => f.t === 'matched')).toEqual([])
+    init.restore()
+    const there = await connect(answer.tableId, 'stale-pq-u')
+    await there.next((f) => f.t === 'welcome')
+    expect(await sit(there)).toMatchObject({ t: 'welcome', seat: 0 })
+    // v still waits, alone.
+    expect(await queued('stale-pq-v')).toBe(true)
+    expect(v.frames.filter((f) => f.t === 'matched')).toEqual([])
   })
 })
 
@@ -462,7 +555,9 @@ describe('abuse', () => {
     await runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
       state.storage.put('active:throw-q', tableId),
     )
-    vi.spyOn(TableDO.prototype, 'liveness').mockRejectedValue(new Error('reset'))
+    vi.spyOn(TableDO.prototype, 'liveness').mockRejectedValue(
+      new Error('reset'),
+    )
     const q = await inLobby('throw-q')
     expect(await quickSit(q)).toEqual({
       t: 'error',

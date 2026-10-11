@@ -384,7 +384,8 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    * A paired table for two queued players, unless either is at a table by
    * now: they queued free, but a claim (a six table, an invite) may have
    * seated them since, or another pairing may have paired them meanwhile.
-   * In line with both accounts' claims, so none lands in between.
+   * Nor unless both still wait as this pass read them. In line with both
+   * accounts' claims, so none lands in between.
    */
   private startPaired(
     a: Waiting,
@@ -406,6 +407,17 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
         }
         return null
       }
+      // A quick-sit or a cancel deletes the account's row without waiting
+      // for its claims, so a pass that read the queue before (and waited
+      // here) would pair an account that no longer asks for heads-up. Only
+      // the rows this pass read, unchanged, are paired.
+      const keys = [a, b].map((w) => `queue:${w.userId}`)
+      const rows = await this.ctx.storage.get<Waiting>(keys)
+      const still = (w: Waiting) => {
+        const row = rows.get(`queue:${w.userId}`)
+        return row?.since === w.since && kindOf(row) === kindOf(w)
+      }
+      if (!still(a) || !still(b)) return null
       return this.startMatch(a, b, pairs, count, kind)
     })
   }
