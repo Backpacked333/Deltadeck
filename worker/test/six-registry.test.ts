@@ -794,6 +794,32 @@ describe('when the lobby fails', () => {
     await dealNext(matchId, a, 3)
   })
 
+  it('a report the lobby refuses is still sent again after the table restarts', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const refuse = vi
+      .spyOn(LobbyDO.prototype, 'reportTable')
+      .mockRejectedValue(new Error('lobby down'))
+    // A sits alone at a new table: the sit's report goes at once, and the
+    // lobby refuses it. A quiet table like this one is soon evicted from
+    // memory, so the retry must be in its storage, not only in memory.
+    const matchId = await sixTable()
+    await sitDown(matchId, 'evict-a', 0)
+    await settled(matchId)
+    expect(refuse).toHaveBeenCalledTimes(1)
+    await eventually(async () => (await listingOf(matchId))?.pending === true)
+    const t = (await runInDurableObject(stub(matchId), (i: TableDO) =>
+      i.clock(),
+    )) as number
+    await abortAllDurableObjects()
+    await freezeClock(matchId, t)
+    // The lobby is back: the first alarm after the window sends the table
+    // as it is, long before its idle check would.
+    refuse.mockRestore()
+    await elapse(matchId, REPORT_MS)
+    await settled(matchId)
+    expect(await entryOf(matchId)).toMatchObject(counts(1, null, 0))
+  })
+
   it('a lobby that does not answer holds up no alarm, deal or hand', async () => {
     const matchId = await sixTable()
     const lobby = await slowLobby(matchId)

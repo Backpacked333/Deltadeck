@@ -2194,12 +2194,15 @@ export class TableDO extends DurableObject<WorkerEnv> {
    * not wait: no hand, deal or frame waits on the lobby. A report that
    * fails is logged and held again, so the first alarm or change after the
    * window sends the table as it is then (the outbox would retry a stale
-   * report, and stop behind an archive outage).
+   * report, and stop behind an archive outage). Held in storage too: a
+   * quiet table is soon evicted from memory, and with it a retry held only
+   * there (found in PR-23's review).
    */
   private sendReport() {
     const match = this.match!
+    const listing = this.listing!
     const report = reportOf(
-      this.listing!,
+      listing,
       this.clock(),
       match.players.length,
       match.config.maxSeats ?? 6,
@@ -2208,7 +2211,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
     void this.toLobbyList(tableId, 'lobby_report', (lobby) =>
       lobby.reportTable(tableId, report),
     ).then((sent) => {
-      if (!sent && this.listing) this.listing.pending = true
+      // Only while the table still holds this listing: once it has deleted
+      // itself (listing null), a late failure writes nothing back.
+      if (sent || this.listing !== listing) return
+      listing.pending = true
+      return this.ctx.storage.put('listing', listing)
     })
   }
 
