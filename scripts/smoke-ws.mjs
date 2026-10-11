@@ -7,6 +7,7 @@
 //   npm run worker:dev -- --var DEV_AUTH_SECRET:smoke-local-secret-0001
 //   npm run smoke                     # or: node scripts/smoke-ws.mjs
 //   node scripts/smoke-ws.mjs --pairs 10 --hands 500 --target http://localhost:8787
+//   node scripts/smoke-ws.mjs --six --pairs 3 --hands 200   # one six table (P2-11)
 //
 // --prod plays real, archived matches on production. It refuses unless a
 // person types the confirmation phrase at the terminal and passes --tokens
