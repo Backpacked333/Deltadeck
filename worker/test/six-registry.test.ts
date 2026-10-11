@@ -15,7 +15,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { legalActions } from '../../src/engine/hand'
 import { CLOSE_GONE } from '../../src/shared/protocol'
 import type { HandState, PlayerAction } from '../../src/engine/types'
-import type { MatchConfig } from '../../src/shared/protocol'
+import type {
+  ClientMsg,
+  MatchConfig,
+  ServerMsg,
+} from '../../src/shared/protocol'
 import { CashController } from '../src/controller'
 import type { Roster } from '../src/controller'
 import { IDLE_MS } from '../src/deadlines'
@@ -31,7 +35,8 @@ import {
 import type { Listing, TableEntry, TableReport } from '../src/registry'
 import { NEXT_HAND_MS, SIT_OUT_MS, TableDO } from '../src/table'
 import type { InitBody } from '../src/table'
-import { checkLobbyFrame } from './frames'
+import { forgetUsernames } from '../src/auth'
+import { checkFrame, checkLobbyFrame } from './frames'
 import {
   connect,
   createMatch,
@@ -1115,6 +1120,142 @@ describe('the exposure gate', () => {
       })
       expect(refused.status).toBe(400)
       expect(await storageOf(matchId)).toEqual({ keys: [], alarm: null })
+    }
+  })
+
+  it('the invite route takes no kind from the client', async () => {
+    // Neither the query string nor a JSON body makes an invite a six table.
+    const asks = [
+      { query: '?kind=six-casual', body: undefined },
+      { query: '', body: JSON.stringify({ kind: 'six-casual' }) },
+    ]
+    for (const { query, body } of asks) {
+      const made = await SELF.fetch(`${ORIGIN}/api/matches${query}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token('kind-c')}`,
+          'Content-Type': 'application/json',
+        },
+        body,
+      })
+      expect(made.status).toBe(201)
+      const { matchId } = (await made.json()) as { matchId: string }
+      const { match } = await peek(matchId)
+      expect(
+        (match as unknown as { config: { kind: string } }).config.kind,
+      ).toBe('hu-casual')
+      // One table per account: free it for the next ask.
+      await runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
+        state.storage.delete('active:kind-c'),
+      )
+    }
+  })
+
+  it('a table socket refuses quick_sit and tables', async () => {
+    // They are lobby messages: a table answers each with illegal, and
+    // nothing is opened or listed.
+    const six = await sixTable()
+    const headsUp = await createTable('lobbyish-h')
+    const tried = crypto.randomUUID()
+    for (const [matchId, kind] of [
+      [six, 'six-casual'],
+      [headsUp, 'hu-casual'],
+    ] as const) {
+      const client = await connect(matchId, 'lobbyish-h')
+      await client.next((f) => f.t === 'welcome')
+      const lobbyOnly: ClientMsg[] = [
+        { t: 'quick_sit' },
+        { t: 'quick_sit', tried: [tried] },
+        { t: 'tables' },
+      ]
+      for (const msg of lobbyOnly) {
+        const from = client.frames.length
+        client.send(msg)
+        expect(await client.next((f) => f.t === 'error', from)).toMatchObject({
+          code: 'illegal',
+        })
+      }
+      for (const f of client.frames) checkFrame(f, kind)
+      expect(client.closed).toBeNull()
+    }
+    expect(await listed()).toEqual([])
+    expect(
+      await runInDurableObject(lobbyStub(env), async (_: LobbyDO, state) => [
+        ...(await state.storage.list({ prefix: 'created:' })).keys(),
+      ]),
+    ).toEqual([])
+    expect((await storageOf(tried)).keys).toEqual([])
+  })
+
+  it('a socket opened on a listed table without sitting gets the roster, never a card or an account id', async () => {
+    // ADR, clarifications from PR-24, decision 7 (D1): a listed table's
+    // roster is public to signed-in accounts; nothing of a hand is, and
+    // no account id. Real (uuid) accounts with names, so an id is not
+    // also a username.
+    const ids = [0, 1, 2, 3].map(() => crypto.randomUUID())
+    const names = ['d1-ann', 'd1-ben', 'd1-cat', 'd1-dan']
+    const realFetch = globalThis.fetch
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(
+          input instanceof Request ? input.url : String(input),
+        )
+        if (url.origin !== new URL(env.SUPABASE_URL).origin)
+          return realFetch(input, init)
+        if (url.pathname === '/rest/v1/players') {
+          const id = url.searchParams.get('user_id')!.slice(3)
+          return Response.json([{ username: names[ids.indexOf(id)] }])
+        }
+        if (url.pathname.endsWith('/audit_hand'))
+          return Response.json({ verified: true })
+        return new Response(null, { status: 204 })
+      },
+    )
+    forgetUsernames()
+    try {
+      const matchId = await sixTable()
+      const a = await sitDown(matchId, ids[0], 0)
+      const b = await sitDown(matchId, ids[1], 2)
+      await a.next(isState(1))
+      await settled(matchId)
+      // The watcher finds the table in the list, and opens it, not sitting.
+      const lobbySocket = await lobby(ids[2])
+      lobbySocket.send({ t: 'tables' })
+      const list = await lobbySocket.next((f) => f.t === 'tables')
+      if (list.t !== 'tables') throw new Error('no tables frame')
+      expect(list.tables.map((r) => r.tableId)).toEqual([matchId])
+      const watcher = await connect(list.tables[0].tableId, ids[2])
+      const welcome = await watcher.next((f) => f.t === 'welcome')
+      expect(welcome).toMatchObject({ seat: null, view: null })
+      // The roster, by username: the accepted exposure.
+      expect(
+        (welcome as Extract<ServerMsg, { t: 'welcome' }>).table.players.map(
+          (p) => p.username,
+        ),
+      ).toEqual(['d1-ann', 'd1-ben'])
+      // The hand plays out, the next is dealt, and someone sits down.
+      await playOut(matchId, { 0: a, 2: b }, fold)
+      await dealNext(matchId, a, 2)
+      await sitDown(matchId, ids[3], 4)
+      await watcher.next(
+        (f) =>
+          f.t === 'state' &&
+          f.table.players.some((p) => p.username === 'd1-dan'),
+      )
+      // Through all of it: a summary and roster changes, never a view,
+      // and no account's id anywhere.
+      expect(watcher.frames.length).toBeGreaterThanOrEqual(2)
+      for (const f of watcher.frames) {
+        expect(['welcome', 'state']).toContain(f.t)
+        checkFrame(f, 'six-casual')
+        expect((f as { view?: unknown }).view).toBeNull()
+      }
+      const seen = JSON.stringify(watcher.frames)
+      for (const id of ids) expect(seen).not.toContain(id)
+    } finally {
+      vi.unstubAllGlobals()
+      forgetUsernames()
     }
   })
 })
