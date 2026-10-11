@@ -46,12 +46,15 @@ async function shareLink(url: string, accuracy: number, title: string) {
 export function ScoreCard({
   finished,
   rival = null,
+  signedIn = false,
   onSave,
   onAgain,
 }: {
   finished: FinishedChallenge
   /** The friend whose link this hand came from (L-13). */
   rival?: Rival | null
+  /** Saving goes to the visitor's account rather than a new one. */
+  signedIn?: boolean
   onSave: () => void
   onAgain: () => void
 }) {
@@ -231,20 +234,22 @@ export function ScoreCard({
 
       <div className="scorecard-save">
         <div>
-          <strong>Save this score to a free account</strong>
+          <strong>
+            {signedIn
+              ? 'Save this score to your account'
+              : 'Save this score to a free account'}
+          </strong>
           <span>
-            Your score, a rating once you play people, a public profile and a
-            school badge. Google or an email link, no password.
+            {signedIn
+              ? 'Your best score on each hand is kept with your account.'
+              : 'Your score, a rating once you play people, a public profile and a school badge. Google or an email link, no password.'}
           </span>
         </div>
-        <button
-          className="btn btn-accent btn-lg"
-          onClick={() => {
-            track('signup_start')
-            onSave()
-          }}
-        >
-          Save your score and create an account <ArrowRight size={16} />
+        <button className="btn btn-accent btn-lg" onClick={onSave}>
+          {signedIn
+            ? 'Save your score'
+            : 'Save your score and create an account'}{' '}
+          <ArrowRight size={16} />
         </button>
       </div>
       <div className="scorecard-cta">

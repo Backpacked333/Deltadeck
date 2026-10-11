@@ -1,9 +1,6 @@
-// Who sees the landing page (L-1), decided once at boot so it never changes
-// under a visitor mid-hand. Entry-safe: plain storage reads, no imports from
-// the landing or online chunks.
-import type { Progress } from './storage'
-
-const LANDED_KEY = 'qp.landed'
+// The landing page's entry-side helpers: who is signed in, who is back from
+// a sign-in redirect, and the score waiting to be saved. Entry-safe: plain
+// storage reads, no imports from the landing or online chunks.
 export const PENDING_CLAIM_KEY = 'qp.pendingClaim'
 
 /** A score waiting to be attached to an account after sign-up (O-4). */
@@ -25,7 +22,7 @@ const read = (key: string) => {
 }
 
 /** True when this browser holds a Supabase session (any project). */
-function signedIn() {
+export function signedIn() {
   try {
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i) ?? ''
@@ -38,27 +35,12 @@ function signedIn() {
 }
 
 /**
- * A first visit: no trainer progress, never landed or skipped the landing
- * page, not signed in, and not coming back from a sign-in redirect.
+ * Back from a sign-in provider with no route to restore (authReturn): the
+ * bare URL then opens the app, which finishes the sign-in, not the landing.
  */
-export function isFirstVisit(progress: Progress, location = window.location) {
-  const params = new URLSearchParams(location.search)
-  if (params.has('code') || params.has('error_description')) return false
-  return (
-    !progress.onboarded &&
-    progress.hands.length === 0 &&
-    read(LANDED_KEY) === null &&
-    !signedIn()
-  )
-}
-
-/** The visitor finished the challenge or skipped it: next time, the app. */
-export function markLanded() {
-  try {
-    localStorage.setItem(LANDED_KEY, '1')
-  } catch {
-    // The landing page shows again next time; harmless.
-  }
+export function backFromSignIn(search = window.location.search) {
+  const params = new URLSearchParams(search)
+  return params.has('code') || params.has('error_description')
 }
 
 export function savePendingClaim(claim: PendingClaim) {

@@ -96,37 +96,67 @@ describe('who sees the landing page', () => {
     )
   })
 
-  it('not a returning player, unless they open #start', async () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ onboarded: true }))
-    const { unmount } = render(<App />)
-    expect(
-      await screen.findByRole('region', { name: 'Poker table' }),
-    ).toBeVisible()
-    expect(landingHeading()).not.toBeInTheDocument()
-    unmount()
-    window.history.replaceState(null, '', '/#start')
-    render(<App />)
-    expect(
-      await screen.findByRole('heading', { level: 1, name: /misprice/ }),
-    ).toBeVisible()
-  })
-
-  it('not someone who landed before, is signed in, or is back from sign-in', async () => {
+  it('every visit to the bare URL, a returning or signed-in player too', async () => {
     for (const setup of [
-      () => localStorage.setItem('qp.landed', '1'),
+      () =>
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ onboarded: true })),
       () => localStorage.setItem('sb-abc-auth-token', '{}'),
-      () => window.history.replaceState(null, '', '/?code=xyz'),
     ]) {
       localStorage.clear()
       window.history.replaceState(null, '', '/')
       setup()
       const { unmount } = render(<App />)
       expect(
-        await screen.findByRole('region', { name: 'Poker table' }),
+        await screen.findByRole('heading', { level: 1, name: /misprice/ }),
       ).toBeVisible()
-      expect(landingHeading()).not.toBeInTheDocument()
       unmount()
     }
+  })
+
+  it('not someone back from a sign-in redirect: the app finishes it', async () => {
+    window.history.replaceState(null, '', '/?code=xyz')
+    render(<App />)
+    expect(
+      await screen.findByRole('region', { name: 'Poker table' }),
+    ).toBeVisible()
+    expect(landingHeading()).not.toBeInTheDocument()
+  })
+
+  it('the logo goes home to the landing page, at the bare URL', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ onboarded: true }))
+    window.history.replaceState(null, '', '/?code=xyz#table')
+    const user = userEvent.setup()
+    render(<App />)
+    expect(
+      await screen.findByRole('region', { name: 'Poker table' }),
+    ).toBeVisible()
+    const home = screen.getByRole('link', { name: 'QuantPoker home' })
+    expect(home).toHaveAttribute('href', '/')
+    await user.click(home)
+    expect(
+      await screen.findByRole('heading', { level: 1, name: /misprice/ }),
+    ).toBeVisible()
+    expect(window.location.href).toBe(`${window.location.origin}/`)
+  })
+
+  it('"How it works" scrolls down the page and stays on it', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findByRole('heading', { level: 1, name: /misprice/ })
+    await user.click(screen.getByRole('link', { name: 'How it works' }))
+    expect(window.location.hash).toBe('')
+    expect(landingHeading()).toBeVisible()
+  })
+
+  it('a signed-in visitor is offered play online, not a new account', async () => {
+    localStorage.setItem('sb-abc-auth-token', '{}')
+    render(<App />)
+    await screen.findByRole('heading', { level: 1, name: /misprice/ })
+    expect(screen.queryByText('Sign in')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Create free account/)).not.toBeInTheDocument()
+    expect(
+      screen.getAllByRole('button', { name: /Play online/ }).length,
+    ).toBeGreaterThan(0)
   })
 })
 
@@ -175,7 +205,6 @@ describe('the challenge', () => {
       hand: 'overpair',
       accuracy: expected.accuracy,
     })
-    expect(localStorage.getItem('qp.landed')).toBe('1')
     expect(beacons.map((b) => b.name)).toEqual(
       expect.arrayContaining([
         'challenge_start',
