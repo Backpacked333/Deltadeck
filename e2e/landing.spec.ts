@@ -63,7 +63,7 @@ test('the hero offers an account; practice needs one; the bare URL stays home', 
   await hero.getByRole('button', { name: /Create free account/ }).click()
   await expect(page).toHaveURL(/#signup$/)
   await expect(
-    page.getByRole('heading', { level: 1, name: 'Join QuantPoker' }),
+    page.getByRole('heading', { level: 1, name: 'Join DeltaDeck' }),
   ).toBeVisible()
   // The practice table sends a signed-out visitor to sign up too.
   await page.goto('/#table')
@@ -83,7 +83,7 @@ test('the logo leads home from the trainer', async ({ page }) => {
   )
   await page.goto('/#table')
   await expect(page.locator('.table')).toBeVisible()
-  await page.getByRole('link', { name: 'QuantPoker home' }).click()
+  await page.getByRole('link', { name: 'DeltaDeck home' }).click()
   await expect(page.getByRole('heading', { name: /misprice/ })).toBeVisible()
   expect(new URL(page.url()).hash).toBe('')
 })

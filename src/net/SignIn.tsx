@@ -171,7 +171,7 @@ export function SignIn({ client, url, apiKey, mode, titles = {} }: Props) {
         ? 'Reset your password'
         : step.kind === 'signup'
           ? (titles.signup ?? 'Create your free account')
-          : (titles.signin ?? 'Sign in to QuantPoker')
+          : (titles.signin ?? 'Sign in to DeltaDeck')
 
   return (
     <section className="panel live-signin" aria-labelledby="signin-title">
@@ -262,7 +262,7 @@ export function SignIn({ client, url, apiKey, mode, titles = {} }: Props) {
             </>
           ) : (
             <p className="live-switch">
-              New to QuantPoker?{' '}
+              New to DeltaDeck?{' '}
               <button
                 type="button"
                 className="btn btn-quiet live-link"
@@ -342,7 +342,8 @@ export function SignIn({ client, url, apiKey, mode, titles = {} }: Props) {
       <p className="live-muted live-small">
         By continuing you confirm you are 18 or older and agree to the{' '}
         <a href="#terms">Terms</a>. Play money only: no prizes, no deposits.
-        Your username and finished hands are public; your email is not.
+        Your username and finished hands are public; your email is not.{' '}
+        <a href="#privacy">Privacy</a> says what we keep.
       </p>
     </section>
   )

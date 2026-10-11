@@ -64,6 +64,6 @@ export const sources: readonly SourceRecord[] = [
     url: 'https://ies.ed.gov/ncee/wwc/PracticeGuide/1',
     references: [teachingSource],
     originalExamples:
-      'Review intervals and scoring rules are product design choices, not an experimentally validated QuantPoker intervention.',
+      'Review intervals and scoring rules are product design choices, not an experimentally validated DeltaDeck intervention.',
   },
 ]

@@ -17,7 +17,7 @@ import { PROTOCOL } from '../../src/shared/protocol'
 import { ACK_P95_LIMIT_MS, percentile, verdict } from '../smoke-stats'
 import type { SmokeResult } from '../smoke-stats'
 
-const PROD = 'https://quantpoker.bbcroysalman.workers.dev'
+const PROD = 'https://deltadeck.net'
 /** Typed by a person, at the keyboard, before any load reaches production. */
 const PHRASE = 'I approve a load test against production'
 const DEFAULT_SECRET = 'smoke-local-secret-0001'
@@ -323,7 +323,10 @@ export async function main(argv: string[]) {
   const target = (
     args.prod ? PROD : (args.target ?? 'http://localhost:8787')
   ).replace(/\/$/, '')
-  if (!args.prod && target.includes('workers.dev'))
+  if (
+    !args.prod &&
+    /(^|\.)(deltadeck\.net|workers\.dev)$/.test(new URL(target).hostname)
+  )
     throw new Error('Production is reached only with --prod; refusing.')
   const tokens = args.prod
     ? await confirmProduction(args.tokens)

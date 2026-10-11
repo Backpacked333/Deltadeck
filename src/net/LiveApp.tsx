@@ -107,7 +107,7 @@ export default function LiveApp() {
             <h1>Signing you in</h1>
           ) : account === 'up' ? (
             <>
-              <h1>Join QuantPoker</h1>
+              <h1>Join DeltaDeck</h1>
               <p>
                 One free account for practice against Atlas, the lessons, rated
                 play and your public profile. Your hands are saved to it.

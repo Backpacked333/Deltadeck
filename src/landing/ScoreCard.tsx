@@ -33,7 +33,7 @@ async function shareLink(url: string, accuracy: number, title: string) {
   const text = `I scored ${accuracy}/100 on “${title}”. Beat me.`
   try {
     if (navigator.share) {
-      await navigator.share({ title: 'QuantPoker challenge', text, url })
+      await navigator.share({ title: 'DeltaDeck challenge', text, url })
       return 'shared'
     }
     await navigator.clipboard.writeText(`${text} ${url}`)
