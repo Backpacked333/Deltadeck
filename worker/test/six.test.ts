@@ -1868,6 +1868,138 @@ describe('six clients over many hands', () => {
     expect(counts).toEqual({ stands: 22, newcomers: 11, refused: 11, back: 11 })
     expect((await seated(matchId)).length).toBe(6)
   }, 300_000)
+  it('six clients bust and rebuy, chips equal buy-ins plus rebuys across 200 hands', async () => {
+    // Seeded decks, so a failure replays: hand n deals seededDeck(9000 + n).
+    const cash = new CashController()
+    const matchId = await sixTable({
+      nextHandPlan: (handNo, config, roster) => {
+        const plan = cash.nextHandPlan(handNo, config, roster)
+        return plan && { ...plan, deck: seededDeck(9000 + handNo) }
+      },
+    })
+    const BUY_IN = 2000
+    const seats = [0, 1, 2, 3, 4, 5]
+    const clients = await seatAll(matchId, seats, 'rebuy')
+    await clients[0].next(isState(1))
+    const userOf = (seat: SeatId) => `rebuy-${seat}`
+    // Chips brought: six buy-ins, then every top-up as the table grants it.
+    let bought = seats.length * BUY_IN
+    const toppedUp: Record<string, number> = {}
+    const counts = { busts: 0, between: 0, during: 0, partial: 0, refused: 0 }
+    /** Busted players who rebuy only once the next hand is under way. */
+    let later: SeatId[] = []
+    /** Rebuys `seat` from `stack`; checks the answer and books the chips. */
+    const topUp = async (seat: SeatId, stack: number) => {
+      const answer = await rebuy(clients[seat])
+      expect(answer, `seat ${seat} from ${stack}`).toMatchObject({
+        t: 'welcome',
+        seat,
+      })
+      expect(rosterStack(answer, seat)).toBe(BUY_IN)
+      bought += BUY_IN - stack
+      toppedUp[userOf(seat)] = (toppedUp[userOf(seat)] ?? 0) + BUY_IN - stack
+    }
+    // Every third hand the first to act moves all in and the next calls,
+    // so stacks bust; otherwise the soak's betting.
+    const choose = (hand: HandState): PlayerAction => {
+      const legal = legalActions(hand)
+      const n = hand.config.handNo
+      if (n % 3 === 0 && hand.street === 'preflop') {
+        if (hand.actions.length === 0 && legal.canRaise)
+          return { type: 'raise', to: legal.maxRaiseTo }
+        if (hand.actions.length === 1) return passive(hand)
+        return legal.toCall ? { type: 'fold' } : passive(hand)
+      }
+      if (n % 5 === 0) return passive(hand)
+      if (hand.street === 'preflop' && hand.actions.length === 0)
+        return legal.canRaise
+          ? { type: 'raise', to: Math.min(60, legal.maxRaiseTo) }
+          : passive(hand)
+      if (legal.toCall === 0) return { type: 'check' }
+      return legal.toCall <= 40 && n % 3 === 1
+        ? { type: 'call' }
+        : { type: 'fold' }
+    }
+    for (let n = 1; n <= 200; n++) {
+      const dealt = (await peek(matchId)).hand!
+      expect(dealt.config.handNo).toBe(n)
+      // Busted players who waited rebuy during this hand: not in it, so
+      // dealt in at the next one.
+      for (const seat of later) {
+        expect(dealt.config.seats.map((s) => s.seat)).not.toContain(seat)
+        await topUp(seat, 0)
+        counts.during++
+      }
+      later = []
+      // Every tenth hand someone dealt in asks, and is told to wait.
+      if (n % 10 === 0) {
+        const asker = dealt.config.seats[0].seat
+        expect(await rebuy(clients[asker])).toMatchObject({ code: 'in_hand' })
+        counts.refused++
+      }
+      const ended = await playOut(matchId, clients, choose)
+      const { match } = await peek(matchId)
+      const { players, netByUser: net } = match as unknown as {
+        players: { seat: SeatId; userId: string; stack: number }[]
+        netByUser: Record<string, number>
+      }
+      // Chips at the table: a dealt seat's stack after the hand, anyone
+      // else's as the table holds it (a top-up during the hand included).
+      const after = new Map(ended.players.map((p) => [p.seat, p.stack]))
+      const stackOf = (seat: SeatId) =>
+        after.get(seat) ?? bySeat(players, seat).stack
+      const chips = seats.reduce((sum, seat) => sum + stackOf(seat), 0)
+      expect(chips, `hand ${n}`).toBe(bought)
+      expect(
+        Object.values(ended.result!.netBySeat).reduce((x, y) => x + y, 0),
+      ).toBe(0)
+      // Each account's net is its stack against what it brought: a rebuy
+      // is chips brought, never a win.
+      for (const seat of seats)
+        expect(net[userOf(seat)] ?? 0, `seat ${seat} after hand ${n}`).toBe(
+          stackOf(seat) - BUY_IN - (toppedUp[userOf(seat)] ?? 0),
+        )
+      if (n === 200) break
+      await clients[0].next((f) => f.t === 'reveal' && f.handNo === n)
+      // Between hands: the busted rebuy (one in four waits for the next
+      // hand to start), and every fourth hand anyone short tops up.
+      for (const seat of seats) {
+        const stack = stackOf(seat)
+        if (stack === 0) {
+          counts.busts++
+          if (counts.busts % 4 === 0) later.push(seat)
+          else {
+            await topUp(seat, 0)
+            counts.between++
+          }
+        } else if (stack < BUY_IN && n % 4 === 1) {
+          await topUp(seat, stack)
+          counts.partial++
+        } else if (stack >= BUY_IN && n % 25 === 0) {
+          expect(await rebuy(clients[seat])).toMatchObject({
+            code: 'not_below',
+          })
+          counts.refused++
+        }
+      }
+      await elapse(matchId, NEXT_HAND_MS)
+      await clients[0].next(isState(n + 1))
+    }
+    // The seeded decks make every count exact: busts, top-ups from 0
+    // between hands and during the next, partial top-ups, and refusals.
+    expect(counts).toEqual({
+      busts: 30,
+      between: 23,
+      during: 7,
+      partial: 59,
+      refused: 53,
+    })
+    expect(bought).toBe(76_280)
+    expect(bought).toBe(
+      seats.length * BUY_IN +
+        Object.values(toppedUp).reduce((x, y) => x + y, 0),
+    )
+  }, 300_000)
 })
 
 describe('the archive of a six table', () => {
