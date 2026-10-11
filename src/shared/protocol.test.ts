@@ -1,10 +1,15 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest'
 import { lcg } from '../lib/sim'
-import { MAX_FRAME, parseClientMsg } from './protocol'
+import { MAX_FRAME, parseClientMsg, QUICK_SIT_TABLES } from './protocol'
 import type { MatchKind } from './protocol'
 
 const frame = (v: unknown) => JSON.stringify(v)
+// Table ids are the lobby's crypto.randomUUID().
+const T1 = '0b7c4a52-6f0e-4d7b-9b55-3c1f2a9e8d01'
+const T2 = '1c8d5b63-7a1f-4e8c-8c66-4d2a3b0f9e12'
+const T3 = '2d9e6c74-8b2a-4f9d-9d77-5e3b4c1a0f23'
+const T4 = '3e0f7d85-9c3b-4a0e-ae88-6f4c5d2b1a34'
 const act = {
   t: 'act',
   reqId: 'r-1_a',
@@ -46,6 +51,16 @@ describe('parseClientMsg', () => {
     // socket account's own (ADR amendment 2026-10-10, "Sitting out").
     expect(parseClientMsg(frame({ t: 'sit_out' }))).toEqual({ t: 'sit_out' })
     expect(parseClientMsg(frame({ t: 'sit_in' }))).toEqual({ t: 'sit_in' })
+    // In the lobby: quick-sit, bare or with the tables it tried, and the
+    // list of six tables (P2-08).
+    expect(parseClientMsg(frame({ t: 'quick_sit' }))).toEqual({
+      t: 'quick_sit',
+    })
+    expect(parseClientMsg(frame({ t: 'quick_sit', tried: [T1] }))).toEqual({
+      t: 'quick_sit',
+      tried: [T1],
+    })
+    expect(parseClientMsg(frame({ t: 'tables' }))).toEqual({ t: 'tables' })
   })
 
   it('rejects malformed messages', () => {
@@ -142,6 +157,9 @@ describe('parseClientMsg', () => {
           'rebuy',
           'sit_in',
           'sit_out',
+          'quick_sit',
+          'tables',
+          T1,
           'r1',
           5,
           6,
@@ -160,6 +178,7 @@ describe('parseClientMsg', () => {
         'kind',
         'seat',
         'amount',
+        'tried',
         'x',
       ]
       return Object.fromEntries(
@@ -184,6 +203,8 @@ describe('parseClientMsg', () => {
           'rebuy',
           'sit_in',
           'sit_out',
+          'quick_sit',
+          'tables',
         ]).toContain(msg.t)
     }
   })
@@ -300,5 +321,34 @@ describe('parseClientMsg', () => {
     }
     expect(bare.sit_in).toBeGreaterThan(300)
     expect(bare.sit_out).toBeGreaterThan(300)
+  })
+
+  it('accepts a quick_sit only bare or with up to three distinct table ids it tried', () => {
+    expect(QUICK_SIT_TABLES).toBe(3)
+    expect(
+      parseClientMsg(frame({ t: 'quick_sit', tried: [T1, T2, T3] })),
+    ).toEqual({ t: 'quick_sit', tried: [T1, T2, T3] })
+    for (const bad of [
+      // Nothing names a player, a seat or a table to take: the lobby picks.
+      { t: 'quick_sit', userId: 'eve' },
+      { t: 'quick_sit', seat: 2 },
+      { t: 'quick_sit', tableId: T1 },
+      // `tried` is one to three distinct table ids, or absent.
+      { t: 'quick_sit', tried: [] },
+      { t: 'quick_sit', tried: [T1, T2, T3, T4] },
+      { t: 'quick_sit', tried: [T1, T1] },
+      { t: 'quick_sit', tried: T1 },
+      { t: 'quick_sit', tried: [T1.toUpperCase()] },
+      { t: 'quick_sit', tried: ['host'] },
+      { t: 'quick_sit', tried: [`${T1}x`] },
+      { t: 'quick_sit', tried: [1] },
+      { t: 'quick_sit', tried: [null] },
+      { t: 'quick_sit', tried: null },
+      { t: 'quick_sit', tried: { 0: T1 } },
+      // The list request is bare.
+      { t: 'tables', kind: 'six-casual' },
+      { t: 'tables', tableId: T1 },
+    ])
+      expect(parseClientMsg(frame(bad)), JSON.stringify(bad)).toBeNull()
   })
 })

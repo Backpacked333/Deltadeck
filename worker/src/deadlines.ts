@@ -40,6 +40,14 @@ export type Deadline =
    * (SIT_OUT_MS in table.ts) is stood up then. One entry, for the earliest.
    */
   | { kind: 'sitout'; at: number }
+  /**
+   * Six-casual, waiting: a change to the table's entry in the lobby's list
+   * that the throttle held goes out at `at`, when its window has passed
+   * (REPORT_MS after the last report). It does nothing itself: every alarm
+   * ends by sending a held report that is due (ADR, clarifications from
+   * PR-24, decision 6).
+   */
+  | { kind: 'report'; at: number }
 
 /** A finished table keeps its storage this long for late arrivals. */
 export const IDLE_MS = 600_000

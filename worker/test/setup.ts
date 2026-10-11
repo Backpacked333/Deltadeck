@@ -1,6 +1,7 @@
 // Tests reuse the same player names, and an unfinished table from an earlier
 // test would (correctly) keep them busy. Each test starts with an empty lobby
-// on the real clock, with every account's frame budget full.
+// on the real clock, with every account's frame and quick-sit budgets full
+// (the quick-sit budgets are in the lobby's storage).
 import { env, runInDurableObject } from 'cloudflare:test'
 import { beforeEach } from 'vitest'
 import { now } from '../src/clock'

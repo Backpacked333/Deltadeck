@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-10-11 by SDE (casual 6-max: PR-01 to PR-19 live in #34 to #53, every PR the exposure gate waited on is in; six tables stay unreachable from outside until PR-23 to PR-25). Earlier: landing page phases 1 and 2 (#30); rating P1-12 to P1-16 live; hands of a live match closed to clients; S7-11 waits on U-4
+Last updated: 2026-10-11 by SDE (casual 6-max: PR-01 to PR-23 live in #34 to #58, except PR-20 (optional); six tables stay unreachable from outside until PR-24 and PR-25). Earlier: landing page phases 1 and 2 (#30); rating P1-12 to P1-16 live; hands of a live match closed to clients; S7-11 waits on U-4
 
 **Standing instructions from the user (2026-10-09):**
 
@@ -105,11 +105,16 @@ Merged and deployed, each one verified in production after its merge:
   - the orbit bank: 20 s per decision, a 30 s bank refilled each orbit (#51);
   - sit-out and removal, with the Sit out and Sit in controls (#52);
   - the 60 s reconnect grace and the Disconnected marker on the seat plate (#53).
+  - side pots shown apart and paid in award order (#54);
+  - chip motion at the six table, with a six-seat frame-time gate (#55);
+  - a registry of six tables in the lobby, counts only (#58).
   - #47 fixed two Supabase tests that timed out under load: their database boot moved into a hook.
-- **Exposure gate:** every PR it waited on is in: PR-12 (claims), PR-14 (rebuy), PR-16 (sit-out and removal) and PR-17 (reconnect). No route creates a six table yet: the invite route sends no `kind`, the lobby queue refuses `six-casual`, and init refuses a six table with an opponent. PR-23 to PR-25 (table registry, quick-sit, table list) open it.
-- **Next:** PR-21 and PR-22 (side-pot display, chip motion), then PR-23 to PR-25 (these open the gate), then PR-26 (smoke evidence).
+- **Exposure gate:** every PR it waited on is in: PR-12 (claims), PR-14 (rebuy), PR-16 (sit-out and removal) and PR-17 (reconnect), and the registry (PR-23) is live. No route creates or lists a six table yet: the invite route sends no `kind`, the lobby queue refuses `six-casual`, init refuses a six table with an opponent, and `GET /api/tables` is 404 (a test pins all of it). PR-24 (quick-sit) and PR-25 (table list) open it.
+- **Next:** PR-24 (quick-sit) and PR-25 (table list), which open the gate, then PR-26 (smoke evidence).
 - **Open for the user:**
   - Devin's security threads, fixed and replied to but left open for the owner: two on #46, and one on #44 that #46 closed.
+  - "players/hour" in the registry is built as distinct players dealt in during the last hour (PR-23). If it should be hands per hour, say so before PR-25 shows it.
+  - The heads-up frame test's median sits at 33.3 ms, 0.7 ms under its limit, on main; the trainer's backdrop blurs cause it (found in PR-22, suggested as a separate task).
   - One review finding was declined, not fixed: on #52, Devin asked to stand up a player who sits in at a waiting table once their earlier sit-out clocks run out. They are playing and their seat blocks nobody, so they keep it; a guard test and an ADR clarification record this. Say if you want it the other way.
 
 **6-max arenas (P2-13/P2-14): stopped at the pre-check, 2026-10-10.** 100,000 simulated 6-max hands with 0 failures; 0 of the 1,000 human casual 6-max hands the gate needs, because casual 6-max is unbuilt and production archives nothing until U-4. Path: `.10x/decisions/architect/six-max-arena.md`.

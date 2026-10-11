@@ -33,6 +33,14 @@ export const CLOSE_ELSEWHERE = 4409
 export const CLOSE_RATE_LIMITED = 4429
 
 /**
+ * Quick-sit tries at most this many listed tables (ADR, clarifications from
+ * PR-24): a `quick_sit` names at most this many tables it already tried,
+ * and with that many tried the lobby opens a table if it may, else offers
+ * a seat not tried, else refuses.
+ */
+export const QUICK_SIT_TABLES = 3
+
+/**
  * `six-casual`: a casual table of 2 to 6 seats, one archived session at a
  * time (ADR amendment 2026-10-10, Phase 2). Never rated or graded.
  */
@@ -111,6 +119,16 @@ export type ClientMsg =
    * the missed-decision count back at 0. Bare, as `sit_out`.
    */
   | { t: 'sit_in' }
+  /**
+   * In the lobby: a six table to sit at now (P2-08). The account's own
+   * table first; then the fullest listed table with a free seat it has not
+   * `tried` (tables that answered `table_full`, `sit_cooldown` or closed
+   * in this quick-sit, at most QUICK_SIT_TABLES); then a new one. The
+   * account is the socket's: the frame names no player.
+   */
+  | { t: 'quick_sit'; tried?: string[] }
+  /** In the lobby: the list of six tables, answered with a `tables` frame. */
+  | { t: 'tables' }
 
 /**
  * A seated six-casual player: dealt in from the next hand, or sitting out
@@ -152,6 +170,12 @@ export type ErrorCode =
    * they rebuy (a rebuy at 0 chips deals them in without sit_in).
    */
   | 'no_chips'
+  /**
+   * The lobby, to a quick-sit: no table has a seat for this account and
+   * none can open now. Unlike a table's `table_full`, not a cue to try
+   * another table: try again later.
+   */
+  | 'tables_full'
 
 /**
  * Everything one seat may know about the table. There is deliberately no
@@ -379,6 +403,18 @@ export type ServerMsg = { seq: number; matchId: string } & (
     }
 )
 
+/**
+ * A six table in the lobby's list: counts only, never an account (ADR,
+ * clarifications from PR-23). `avgPot` is in chips.
+ */
+export type TableRow = {
+  tableId: string
+  seated: number
+  maxSeats: number
+  avgPot: number | null
+  playersPerHour: number
+}
+
 export type LobbyMsg = { seq: number } & (
   | { t: 'queued'; position: number; since: number }
   /** A table to go to: a new pairing, or (resumed) one already in play. */
@@ -386,6 +422,10 @@ export type LobbyMsg = { seq: number } & (
   /** `queued` counts every line; `rated`, those of them waiting for rated. */
   | { t: 'presence'; online: number; queued: number; rated?: number }
   | { t: 'error'; code: ErrorCode; message: string }
+  /** Quick-sit's answer: open this six table and `sit` (lowest free seat). */
+  | { t: 'sit_at'; tableId: string }
+  /** The six tables, answering `tables`, in quick-sit's order. */
+  | { t: 'tables'; tables: TableRow[] }
 )
 
 // ---- Validation ---------------------------------------------------------------
@@ -398,6 +438,16 @@ const onlyKeys = (v: Json, keys: string[]) =>
 const isCount = (v: unknown, min = 0) =>
   typeof v === 'number' && Number.isSafeInteger(v) && v >= min
 const REQ_ID = /^[A-Za-z0-9_-]{1,64}$/
+/** A table id: the lobby's crypto.randomUUID(), lowercase. */
+const TABLE_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+/** 1..QUICK_SIT_TABLES distinct table ids, or null. */
+function parseTried(v: unknown): string[] | null {
+  if (!Array.isArray(v) || v.length < 1 || v.length > QUICK_SIT_TABLES)
+    return null
+  if (!v.every((id) => typeof id === 'string' && TABLE_ID.test(id))) return null
+  return new Set(v).size === v.length ? [...(v as string[])] : null
+}
 
 function parseAction(v: unknown): PlayerAction | null {
   if (!isObject(v)) return null
@@ -457,7 +507,16 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case 'rebuy':
     case 'sit_out':
     case 'sit_in':
+    case 'tables':
       return onlyKeys(v, ['t']) ? { t: v.t } : null
+    case 'quick_sit': {
+      // The account is the socket's, and the lobby picks the table: the
+      // frame names only tables this quick-sit was refused at.
+      if (!onlyKeys(v, ['t', 'tried'])) return null
+      if (v.tried === undefined) return { t: 'quick_sit' }
+      const tried = parseTried(v.tried)
+      return tried ? { t: 'quick_sit', tried } : null
+    }
     case 'sit':
       if (!onlyKeys(v, ['t', 'seat'])) return null
       if (v.seat === undefined) return { t: 'sit' }
