@@ -22,6 +22,7 @@ import { MatchReview } from './MatchReview'
 import { Profile } from './profile/Profile'
 import { loadOnline } from './supabase'
 import type { Online } from './supabase'
+import type { QuickSit } from './TableList'
 import './live.css'
 
 const PLAY = /^#play\/([0-9a-f-]{36})$/
@@ -83,6 +84,32 @@ export default function LiveApp() {
     if (dev && account) replaceRoute(takeAuthReturn() ?? HOME_ROUTE)
   }, [dev, account])
 
+  // A quick-sit on its way between the lobby and a table (ADR,
+  // clarifications from PR-25): the page that leaves sets it, the page that
+  // arrives takes it. This component navigates, once the quick-sit has
+  // committed: the hashchange render is synchronous, and could mount the
+  // next page before an update queued by the one leaving. Each table is a
+  // new history entry pushed from the lobby page, and a refusal goes back
+  // to that entry, so Back from any table returns to the lobby, and Back
+  // on the lobby page leaves it (ending the quick-sit with its socket).
+  const [quickSit, setQuickSit] = useState<QuickSit | null>(null)
+  useEffect(() => {
+    if (!quickSit) return
+    if (quickSit.at !== null) window.location.hash = `#play/${quickSit.at}`
+    // Still on the table that refused: back to the lobby page under it.
+    else if (window.location.hash === `#play/${quickSit.from}`)
+      window.history.back()
+    // The player went elsewhere meanwhile: the quick-sit ends.
+    else setQuickSit(null)
+  }, [quickSit])
+  // Carried only between the lobby and a table: anywhere else (Back
+  // pressed as a table refused, say), it is dropped, so a later visit to
+  // the lobby asks nothing.
+  const between = matchId !== null || /^#lobby(\/find)?$/.test(hash)
+  useEffect(() => {
+    if (quickSit && !between) setQuickSit(null)
+  }, [quickSit, between])
+
   if (hash === '#signout')
     return (
       <div className="page live-page">
@@ -140,12 +167,20 @@ export default function LiveApp() {
     onboarding ? (
       <Onboarding identity={identity} client={online?.client ?? null} />
     ) : matchId ? (
-      <LiveTable key={matchId} matchId={matchId} identity={identity} />
+      <LiveTable
+        key={matchId}
+        matchId={matchId}
+        identity={identity}
+        quickSit={quickSit}
+        setQuickSit={setQuickSit}
+      />
     ) : (
       <Lobby
         identity={identity}
         autoFind={autoFind}
         client={online?.client ?? null}
+        quickSit={quickSit}
+        setQuickSit={setQuickSit}
       />
     )
 

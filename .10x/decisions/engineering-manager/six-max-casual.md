@@ -670,6 +670,24 @@ The plan gave `rebuy` (here) and `stand` (PR-12) server messages but no control 
 
 - **Files:** new `src/net/TableList.tsx`; `Lobby.tsx:142-147`; `lobbyClient.ts:13-26,179-205`.
 - **Tests (red):** `TableList.test › lists tables with seats taken of 6 and Quick sit navigates to the table the lobby chose`.
+- **Decided before the code** (ADR, "Clarifications from PR-25"; a design panel of three and a judge, the design kept in the session scratchpad):
+  - the lobby socket is reopened on a retry, not kept open across the navigation; the quick-sit crosses pages as `LiveApp` state, set by the page that leaves, navigated by `LiveApp` after it commits, taken and cleared by the page that arrives; nothing in the URL or storage;
+  - the table page sends one bare `sit` per arrival, and moves on at `table_full`, `sit_cooldown`, `illegal`, a `finished` welcome or a 4404; 4409 goes to the named table; at most four lobby asks; the first table pushes a history entry and every later hop replaces it;
+  - a sit unanswered for 10 s is given up with one `resync` (the Worker can stay silent after a claim; answering there is a follow-up);
+  - the list is read-only: Seats, Average pot (bb), Players in the last hour; asked on open, every 15 s while visible, and on becoming visible; ten rows, then how many more;
+  - Quick sit and the Find buttons exclude each other in the UI;
+  - files: new `src/net/TableList.tsx`; `LiveApp.tsx`, `Lobby.tsx`, `LiveTable.tsx` (`useSitOnArrival`), `SixTable.tsx` (`taking`), `client.ts` and `useTable.ts` (bare `sit()`, `resync()`), `live.css`; no Worker, protocol or `lobbyClient` code change (the plan's `lobbyClient.ts` lines are not needed).
+
+- **As built** (branch `claude/sharp-cannon-4150j6`; `src/net/TableList.tsx` new; `LiveApp.tsx`, `Lobby.tsx`, `LiveTable.tsx`, `SixTable.tsx`, `client.ts`, `useTable.ts`, `lobbyClient.ts` (exports `LIMITED` only), `live.css`; no Worker or protocol change):
+  - **The card.** "6-max tables" now says "Six seats, blinds 10/20, a 100 bb buy-in, play money. Sit down and you are dealt in from the next hand.", then Quick sit, a status line (role=status, always mounted: the search, the reason for a retry, or why the lobby is out of reach), the lobby's refusal (role=alert, kept through a reconnect), and the list: a `<table>` captioned "Six-max tables" with Seats ("4 of 6", ", full"), Average pot ("6.5 bb", "–") and Players in the last hour ("100+" at the cap), ten rows, then "And N more."; or "No tables are running right now. Quick sit opens one."
+  - **The retry.** `LiveApp` holds the quick-sit (`QuickSit` in `TableList.tsx`); `Lobby` hands `sitAt` to it and, back from a refusal, asks `quick_sit {tried}` on its new socket and focuses the card's heading; `useSitOnArrival` in `LiveTable` sends the bare sit, moves on or stops as the ADR says, and keeps "Taking a seat…" through a hand-off; `SixTable`'s `taking` hides Sit here and the flash meanwhile, and moves focus to the player's seat (or the table status) when the sit ends with focus nowhere.
+  - **Tests.** `TableList.test.tsx` (43, the whole app rendered: the ticket's acceptance test, the list's cadence and limits, every refusal and stop, history, focus, the lobby away, and 14 pinned by mutation); `client.test.ts` (bare sit, resync); `imports.test.ts` (the list stays in the lazy chunk); `lobby.test.tsx` (four tests pin the new `tables` ask in their exact frame sequences); e2e: Quick sit from the keyboard against the real Worker with axe on the cards, a refusal at one faked table seating at the next with Back landing on the lobby, and the list at 320 px.
+  - **After the review** (races, player experience, mutation; each finding checked by a skeptic; ADR "After PR-25's review"): history (a refusal goes back to the lobby entry instead of replacing it), one message per hand-off, a six ending at a closed fourth table, a lobby away said in the card, a refusal not re-announced on reconnect, and 14 mutation-gap tests. 17 of 18 re-applied mutants fail a test; LT22 is equivalent.
+  - **Caught on the way:** the lobby page's first clear of the quick-sit re-rendered `LiveApp`, which read the hash after `#lobby/find` had become `#lobby`, so "Find another match" no longer searched; an existing `lobby.test.tsx` test caught it, and the pages now clear only a quick-sit they hold.
+- **Left for later:**
+  - Worker: answer a sit whose lobby claim returned after the table halted, or whose claim threw (`table.ts`, after the claim), and send `finished` to seatless sockets; the client's 10 s deadline covers both until then.
+  - The six-table flash timer does not hide when the error goes back to null within 3 s (pre-existing, `SixTable.tsx`).
+  - **Open (PM):** "Players in the last hour" shows distinct players dealt in during the last hour, as built in PR-23. If "players/hour" meant hands per hour, the Worker field and this label change together.
 
 ### Phase E
 

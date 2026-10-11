@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { BookOpen, Link2, Swords, Trophy, Users } from 'lucide-react'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { MatchKind } from '../shared/protocol'
@@ -6,12 +6,16 @@ import { AccuracyPanel } from './AccuracyPanel'
 import { createMatch, fetchActiveMatch } from './api'
 import type { Identity } from './api'
 import type { LobbyState } from './lobbyClient'
+import { TableList } from './TableList'
+import type { QuickSit } from './TableList'
 import { useLobby } from './useLobby'
 
 /** With nobody else queued this long, offer a way out. */
 export const BAIL_OUT_MS = 60_000
 /** Rated: the rating window has visibly widened (worker/src/pairing.ts). */
 export const WIDEN_AFTER_MS = 60_000
+
+const keep = () => {}
 
 const clock = (ms: number) => {
   const s = Math.max(0, Math.floor(ms / 1000))
@@ -24,6 +28,8 @@ export function Lobby({
   fetcher,
   autoFind = false,
   client = null,
+  quickSit = null,
+  setQuickSit = keep,
 }: {
   identity: Identity
   fetcher?: typeof fetch
@@ -31,8 +37,35 @@ export function Lobby({
   autoFind?: boolean
   /** Reads the player's accuracy; absent with a dev identity. */
   client?: SupabaseClient | null
+  /** A quick-sit on its way between pages (LiveApp). */
+  quickSit?: QuickSit | null
+  setQuickSit?: (next: QuickSit | null) => void
 }) {
   const { state, connection } = useLobby(identity.getToken)
+  // Back from a table that refused: take the quick-sit and ask again on
+  // this page's socket, naming every table tried (ADR, PR-25). Taken on
+  // the first render and cleared, so a later visit asks nothing.
+  const [arrival] = useState(() => (quickSit?.at === null ? quickSit : null))
+  const [retry, setRetry] = useState(arrival)
+  // Cleared only if there is one: a needless update re-renders LiveApp,
+  // which reads the hash again, and #lobby/find has become #lobby by then.
+  const [held] = useState(quickSit !== null)
+  useEffect(() => {
+    if (held) setQuickSit(null)
+  }, [held, setQuickSit])
+  useEffect(() => {
+    if (arrival) connection?.quickSit(arrival.tried)
+  }, [arrival, connection])
+  // Sent to a table: LiveApp goes there, carrying what was tried.
+  useEffect(() => {
+    if (state.sitAt) setQuickSit({ tried: retry?.tried ?? [], at: state.sitAt })
+  }, [state.sitAt, retry, setQuickSit])
+  // A route change leaves focus on <body>; on a phone the card may be
+  // off-screen. Back from a table, the card says why.
+  const sixTitle = useRef<HTMLHeadingElement>(null)
+  useEffect(() => {
+    if (arrival) sixTitle.current?.focus()
+  }, [arrival])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [active, setActive] = useState<string | null>(null)
@@ -141,9 +174,22 @@ export function Lobby({
         </article>
         <article className="panel live-card">
           <Users size={22} />
-          <h2>6-max tables</h2>
-          <p>Six seats, side pots and scheduled arenas.</p>
-          <p className="live-muted">Coming after heads-up.</p>
+          <h2 ref={sixTitle} tabIndex={-1}>
+            6-max tables
+          </h2>
+          <p>
+            Six seats, blinds 10/20, a 100 bb buy-in, play money. Sit down and
+            you are dealt in from the next hand.
+          </p>
+          <TableList
+            state={state}
+            connection={connection}
+            retry={retry && retry.at === null ? retry.passed : null}
+            onQuickSit={() => {
+              setRetry(null)
+              connection?.quickSit()
+            }}
+          />
         </article>
         <article className="panel live-card">
           <BookOpen size={22} />
@@ -180,9 +226,10 @@ function QuickMatch({
   const [now, setNow] = useState(() => Date.now())
   const [startedAt, setStartedAt] = useState<number | null>(null)
   const [keepWaiting, setKeepWaiting] = useState(false)
-  // One queue at a time: the other card waits while this one looks.
+  // One search at a time: the other card waits while this one looks, and
+  // both while a quick-sit asks for a six table.
   const looking = state.looking && state.kind === kind
-  const elsewhere = state.looking && state.kind !== kind
+  const elsewhere = (state.looking && state.kind !== kind) || state.seating
   useEffect(() => {
     if (!looking) return
     setStartedAt(Date.now())
