@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test'
 import { act, isOver, legalActions, startHand } from '../src/engine/hand'
+import { nextBlinds } from '../src/engine/positions'
 import { seatView } from '../src/engine/redact'
 import { deckWith, seededDeck } from '../src/engine/testing'
 import type {
@@ -64,6 +65,74 @@ const SIDE_POTS: [number, PlayerAction][] = [
 ]
 
 /**
+ * A 3-way all-in with two side pots, for the frame test (P2-06b). The
+ * button is bartholomew_99's, so the viewer acts first and folds, and so
+ * do the others not in it; ozymandias_kings brings 2,600 here, not 23,020.
+ * evangeline_marten is all in for 940 pre-flop, bartholomew_99 for 1,500
+ * on the flop and ozymandias_kings for 2,600 on the turn, each called by
+ * maximilian_okafor, who covers them all; the river runs out. Each street
+ * closes with three or four bets to gather, and the result pays three
+ * pots to three seats: side pot 2 (2,200) to maximilian_okafor's queens,
+ * side pot 1 (1,680) to bartholomew_99's kings and the main pot (3,760)
+ * to evangeline_marten's aces, the order the chips go out in. The engine
+ * runs a board out in the act that closes the betting, as a real table
+ * does, so every frame here is one a real table could send: the street
+ * by street pace comes from the all-ins landing on successive streets.
+ * `RUNOUT_DEALT`: played before the page connects, bartholomew_99 to act.
+ */
+const RUNOUT_STACKS: Record<number, number> = { 5: 2600 }
+const RUNOUT_HOLES = {
+  0: 'Td 6s',
+  1: 'Qs Qh',
+  2: '5d 5s',
+  3: 'Ks Kh',
+  4: 'As Ah',
+  5: '7c 2d',
+}
+const RUNOUT_BOARD = '3c 8d 9s 4h Jc'
+const FOLD = { type: 'fold' } as const
+const RUNOUT_DEALT: [number, PlayerAction][] = [
+  [0, FOLD],
+  [1, CALL],
+  [2, FOLD],
+]
+const RUNOUT: [number, PlayerAction][] = [
+  [3, CALL],
+  [4, { type: 'raise', to: 940 }],
+  [5, CALL],
+  [1, CALL],
+  [3, CALL],
+  [5, CHECK],
+  [1, CHECK],
+  [3, { type: 'raise', to: 560 }],
+  [5, CALL],
+  [1, CALL],
+  [5, { type: 'raise', to: 1100 }],
+  [1, CALL],
+]
+/**
+ * Between the runout's moves: quick players, so the test stays short, but
+ * slow enough that each street's chips land before the next street's fly.
+ */
+const RUNOUT_STEP_MS = 600
+/**
+ * The hand after RUNOUT, which `nextHand()` deals NEXT_HAND_MS after its
+ * result. ozymandias_kings has no chips left and sits out, so the standard
+ * dead button (nextBlinds) puts the big blind on the viewer, leaves the
+ * small blind dead and the button on evangeline_marten's seat.
+ * maximilian_okafor raises to 60 and the others fold to the viewer, whose
+ * move it is; when she folds, the blinds go in and the pot goes to him.
+ */
+const NEXT_HAND: [number, PlayerAction][] = [
+  [1, { type: 'raise', to: 60 }],
+  [2, FOLD],
+  [3, FOLD],
+  [4, FOLD],
+]
+/** The table's pause after a result (NEXT_HAND_MS, worker/src/table.ts). */
+const NEXT_HAND_MS = 3000
+
+/**
  * A full six-seat table answered in the browser, with no table server.
  * Six tables cannot be opened over HTTP yet (quick-sit is P2-08), so the
  * page's socket is routed here, and each frame is the redacted view a real
@@ -83,7 +152,12 @@ const SIDE_POTS: [number, PlayerAction][] = [
  * `sidePots`: play SIDE_POTS instead of `street`, to the river with a main
  * pot and two side pots (P2-06a). `split`: deal a royal flush on the board,
  * which plays for everyone, so every pot is split between all who can win
- * it and the result names each of them with their share.
+ * it and the result names each of them with their share. `runout`: deal
+ * RUNOUT instead, played up to bartholomew_99's first move; `runout()` then
+ * plays the rest, one move every RUNOUT_STEP_MS, and resolves once the
+ * result is sent; a player it leaves with no chips sits out, as at the
+ * table. `nextHand()` then deals NEXT_HAND and plays it, at the same pace,
+ * up to the viewer's move.
  */
 export async function fakeSixTable(
   page: Page,
@@ -93,25 +167,41 @@ export async function fakeSixTable(
     away = [],
     sidePots = false,
     split = false,
+    runout = false,
   }: {
     street?: Street
     hold?: boolean
     away?: number[]
     sidePots?: boolean
     split?: boolean
+    runout?: boolean
   } = {},
 ) {
-  const config: HandConfig = {
-    handNo: 1,
-    seats: SEATS.map(({ stack }, seat) => ({ seat, stack })),
-    button: 5,
-    blinds: { sb: 10, bb: 20 },
-    sb: 0,
-    bb: 1,
-  }
+  const config: HandConfig = runout
+    ? {
+        handNo: 1,
+        seats: SEATS.map(({ stack }, seat) => ({
+          seat,
+          stack: RUNOUT_STACKS[seat] ?? stack,
+        })),
+        button: 3,
+        blinds: { sb: 10, bb: 20 },
+        sb: 4,
+        bb: 5,
+      }
+    : {
+        handNo: 1,
+        seats: SEATS.map(({ stack }, seat) => ({ seat, stack })),
+        button: 5,
+        blinds: { sb: 10, bb: 20 },
+        sb: 0,
+        bb: 1,
+      }
   /** The roster's stacks: as of the deal, then as the hand left them. */
-  const stacks = SEATS.map(({ stack }) => stack)
+  const stacks = config.seats.map(({ stack }) => stack)
   let settled = false
+  /** Others the runout left with no chips, sitting out until a rebuy. */
+  const busted = new Set<number>()
   /** The viewer has a seat; they stood during the hand; they sit out. */
   let seated = true
   let standing = false
@@ -129,14 +219,23 @@ export async function fakeSixTable(
               connected: !away.includes(seat),
               consecutiveTimeouts: 0,
               stack: stacks[seat],
-              status: seat === 0 ? status : ('playing' as const),
+              status:
+                seat === 0
+                  ? status
+                  : busted.has(seat)
+                    ? ('sitting_out' as const)
+                    : ('playing' as const),
             },
           ],
     ),
   })
   let hand: HandState = startHand(
     config,
-    split ? deckWith(config, {}, 'As Ks Qs Js Ts') : seededDeck(2026),
+    runout
+      ? deckWith(config, RUNOUT_HOLES, RUNOUT_BOARD)
+      : split
+        ? deckWith(config, {}, 'As Ks Qs Js Ts')
+        : seededDeck(2026),
   )
   let seq = 0
   let lastReqId: string | null = null
@@ -152,7 +251,9 @@ export async function fakeSixTable(
     while (!isOver(hand) && (hand.toAct !== 0 || standing))
       hand = hand.toAct === 0 ? act(hand, 0, { type: 'fold' }) : passive(hand)
   }
-  if (sidePots)
+  if (runout)
+    for (const [seat, action] of RUNOUT_DEALT) hand = act(hand, seat, action)
+  else if (sidePots)
     for (const [seat, action] of SIDE_POTS) hand = act(hand, seat, action)
   else {
     others()
@@ -164,7 +265,10 @@ export async function fakeSixTable(
 
   const frame = (t: 'welcome' | 'state'): ServerMsg => {
     if (isOver(hand) && !settled) {
-      for (const p of hand.players) stacks[p.seat] = p.stack
+      for (const p of hand.players) {
+        stacks[p.seat] = p.stack
+        if (runout && p.seat !== 0 && !p.stack) busted.add(p.seat)
+      }
       settled = true
     }
     const view = seated
@@ -187,8 +291,10 @@ export async function fakeSixTable(
 
   const received: ClientMsg[] = []
   let held: (() => void) | null = null
+  let socketSend: ((msg: ServerMsg) => void) | null = null
   await page.routeWebSocket(/\/ws\/table\//, (ws) => {
     const send = (msg: ServerMsg) => ws.send(JSON.stringify(msg))
+    socketSend = send
     const error = (code: ErrorCode, message: string, reqId?: string) =>
       send({
         t: 'error',
@@ -267,7 +373,61 @@ export async function fakeSixTable(
     held?.()
     held = null
   }
-  return { received, release }
+  /** The rest of RUNOUT, a frame per move, as the table would send them. */
+  const playRunout = async () => {
+    const send = socketSend
+    if (!runout || !send) throw new Error('No runout table is connected')
+    for (const [seat, action] of RUNOUT) {
+      await new Promise((done) => setTimeout(done, RUNOUT_STEP_MS))
+      hand = act(hand, seat, action)
+      send(frame('state'))
+    }
+    if (!isOver(hand)) throw new Error('The runout script left the hand open')
+  }
+  /** NEXT_HAND, dealt as the table deals it, up to the viewer's move. */
+  const playNextHand = async () => {
+    const send = socketSend
+    if (!runout || !send || !isOver(hand) || config.sb == null)
+      throw new Error('No runout has ended')
+    await new Promise((done) => setTimeout(done, NEXT_HAND_MS))
+    const dealt = config.seats
+      .map(({ seat }) => seat)
+      .filter((seat) => !busted.has(seat) && stacks[seat] > 0)
+    const blinds = nextBlinds(
+      {
+        button: config.button,
+        sb: config.sb,
+        bb: config.bb!,
+        sbSeat: config.sb,
+      },
+      dealt,
+    )
+    hand = startHand(
+      {
+        handNo: 2,
+        seats: dealt.map((seat) => ({ seat, stack: stacks[seat] })),
+        button: blinds.button,
+        blinds: config.blinds,
+        sb: blinds.sb,
+        bb: blinds.bb,
+      },
+      seededDeck(2027),
+    )
+    settled = false
+    send(frame('state'))
+    for (const [seat, action] of NEXT_HAND) {
+      await new Promise((done) => setTimeout(done, RUNOUT_STEP_MS))
+      hand = act(hand, seat, action)
+      send(frame('state'))
+    }
+    if (hand.toAct !== 0) throw new Error('The next hand skipped the viewer')
+  }
+  return {
+    received,
+    release,
+    runout: playRunout,
+    nextHand: playNextHand,
+  }
 }
 
 /** Signed in with a development token, past the trainer's first visit. */

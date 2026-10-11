@@ -26,6 +26,7 @@ export function SixRing({
   clockOffset,
   onSit,
   children,
+  overlay,
 }: {
   /** Seated players, in any order; a seat missing here is empty. */
   players: PlateSeat[]
@@ -44,6 +45,11 @@ export function SixRing({
   onSit?: (seat: SeatId) => void
   /** The middle of the table: board and pot. */
   children?: ReactNode
+  /**
+   * Drawn over the whole ring, outside its grid: the chip flights, which
+   * go from the plates to the middle and back.
+   */
+  overlay?: ReactNode
 }) {
   const bySeat = new Map(players.map((p) => [p.seat, p]))
   // DOM order is clockwise from the viewer, so reading and tab order go
@@ -68,6 +74,7 @@ export function SixRing({
         />
       ))}
       <div className="six-mid">{children}</div>
+      {overlay}
     </section>
   )
 }
