@@ -3,6 +3,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
@@ -82,7 +83,8 @@ import { Tour } from './components/Tour'
 import { CardDefs } from './components/cards/CardArt'
 import type { TourStep } from './components/Tour'
 import { backFromSignIn } from './lib/landing'
-import { signedIn, useAccount } from './lib/account'
+import { hadAccount, signedIn, useAccount } from './lib/account'
+import { rememberAuthReturn } from './lib/authReturn'
 import { AccountMenu } from './components/AccountMenu'
 import { track } from './lib/track'
 
@@ -91,17 +93,25 @@ type View =
   | 'curriculum'
   | 'quick'
   | 'progress'
+  | 'me'
   | 'gallery'
   | 'live'
   | 'info'
   | 'landing'
+  /** A page that needs an account, while the visitor is on their way to one. */
+  | 'locked'
 type Route = { view: View; lesson: LessonId | null }
+/** Practice, the lessons, progress and Your profile: for signed-in players only. */
+const ACCOUNT_VIEWS: View[] = ['play', 'progress', 'me', 'curriculum', 'quick']
+/** A new account's name until it chooses one. */
+const PLACEHOLDER_NAME = /^player_[0-9a-f]{12}$/
 const Curriculum = lazy(() => import('./curriculum/Curriculum'))
 const LiveApp = lazy(() => import('./net/LiveApp'))
 // Signed in: checks the stored session with the account service (lazy, so
 // the account client never reaches the entry chunk).
 const SessionKeeper = lazy(() => import('./net/Session'))
 const InfoPage = lazy(() => import('./info/InfoPages'))
+const MyProfile = lazy(() => import('./profile/MyProfile'))
 const Gallery = lazy(() => import('./dev/Gallery'))
 const Landing = lazy(() => import('./landing/Landing'))
 // The lab is the heaviest view; it loads in parallel with the first paint.
@@ -112,7 +122,7 @@ const Lab = lazy(() => labModule.then((module) => ({ default: module.Lab })))
  * Hash routes: the landing page (the bare URL, #start, or #c/<receipt> for a
  * friend's challenge), #table (default), #progress, #lobby[/find],
  * #play/<id>, #ladder[/month], #u/<username> and #match/<id> (online play),
- * #signup and #signin, #fair-play, #terms and #method, #learn/...
+ * #me (Your profile), #signup and #signin, #fair-play, #terms, #privacy and #method, #learn/...
  * and #learn/quick[/id]. A return from a sign-in provider (?code=…) opens the
  * online area, which finishes the sign-in, whatever the hash.
  */
@@ -132,6 +142,7 @@ function parseRoute(hash: string, search = ''): Route {
   }
   if (isLearningRoute(hash)) return { view: 'curriculum', lesson: null }
   if (hash === '#progress') return { view: 'progress', lesson: null }
+  if (hash === '#me') return { view: 'me', lesson: null }
   if (
     /^#lobby(?:\/find)?$/.test(hash) ||
     /^#play\/[0-9a-f-]{36}$/.test(hash) ||
@@ -144,7 +155,12 @@ function parseRoute(hash: string, search = ''): Route {
     hash === '#signout'
   )
     return { view: 'live', lesson: null }
-  if (hash === '#fair-play' || hash === '#terms' || hash === '#method')
+  if (
+    hash === '#fair-play' ||
+    hash === '#terms' ||
+    hash === '#privacy' ||
+    hash === '#method'
+  )
     return { view: 'info', lesson: null }
   if (import.meta.env.DEV && hash === '#dev/gallery')
     return { view: 'gallery', lesson: null }
@@ -280,10 +296,35 @@ export default function App() {
   const { spots, request } = useSpots()
   const hash = useHash()
   const search = useSearch()
-  const { view, lesson } = parseRoute(hash, search)
+  const route = parseRoute(hash, search)
+  const { lesson } = route
   // Signed in or not, as the entry chunk can tell; the online chunk confirms.
   const account = useAccount()
   const member = account.signedIn
+  // Practice, lessons and progress need an account, with a name chosen. A
+  // visitor without one goes to sign up (or sign in, on a browser that has
+  // had an account) and comes back here afterwards. Replace, not push, so
+  // Back leaves for the page before; ?seed and the like are kept.
+  const locked =
+    ACCOUNT_VIEWS.includes(route.view) &&
+    (!member ||
+      (account.username !== null && PLACEHOLDER_NAME.test(account.username)))
+  const view: View = locked ? 'locked' : route.view
+  useLayoutEffect(() => {
+    if (!locked) return
+    rememberAuthReturn(hash || '#table')
+    const target = member
+      ? '#welcome/onboard'
+      : hadAccount()
+        ? '#signin'
+        : '#signup'
+    window.history.replaceState(
+      null,
+      '',
+      `${window.location.pathname}${window.location.search}${target}`,
+    )
+    window.dispatchEvent(new HashChangeEvent('hashchange'))
+  }, [locked, member, hash])
   // Signed out elsewhere (another tab, or a session the service ended): start
   // afresh, so nothing of the account stays in this page.
   const wasMember = useRef(member)
@@ -335,7 +376,8 @@ export default function App() {
     !progress.onboarded &&
     view !== 'live' &&
     view !== 'info' &&
-    view !== 'landing'
+    view !== 'landing' &&
+    view !== 'locked'
   // Atlas waits while you are away from the table.
   const blocked = welcome || tour || view !== 'play'
   const legal = legalActions(game.turn === 0 ? game : { ...game, turn: 0 })
@@ -872,13 +914,13 @@ export default function App() {
             e.preventDefault()
             go('')
           }}
-          aria-label="QuantPoker home"
+          aria-label="DeltaDeck home"
         >
           <span className="brand-mark">
             <Spade size={18} fill="currentColor" />
           </span>
           <span>
-            quant<span className="brand-light">poker</span>
+            delta<span className="brand-light">deck</span>
           </span>
         </a>
         <nav className="nav" aria-label="Main">
@@ -1184,9 +1226,11 @@ export default function App() {
               page={
                 hash === '#terms'
                   ? 'terms'
-                  : hash === '#method'
-                    ? 'method'
-                    : 'fair-play'
+                  : hash === '#privacy'
+                    ? 'privacy'
+                    : hash === '#method'
+                      ? 'method'
+                      : 'fair-play'
               }
             />
           </Suspense>
@@ -1205,6 +1249,17 @@ export default function App() {
         {view === 'gallery' && (
           <Suspense fallback={null}>
             <Gallery />
+          </Suspense>
+        )}
+        {view === 'me' && (
+          <Suspense
+            fallback={
+              <div className="curriculum-loading" role="status">
+                Opening your profile…
+              </div>
+            }
+          >
+            <MyProfile progress={progress} username={account.username} />
           </Suspense>
         )}
         {view === 'progress' && (

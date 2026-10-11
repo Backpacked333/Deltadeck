@@ -1,7 +1,10 @@
 // One Worker serves the whole site: the built app from ./dist as static
 // assets, and the table server for /api/* and /ws/*. The Git-connected
 // Cloudflare build runs `npm run build` then `npx wrangler deploy`, which
-// reads this file; the name must match the dashboard Worker.
+// reads this file; the name must match the dashboard Worker. Its addresses
+// (deltadeck.net, www.deltadeck.net) are custom domains set in the
+// dashboard, not here: declaring routes would turn workers.dev off and need
+// zone permissions the build token does not have.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "quantpoker",
@@ -12,8 +15,9 @@
     "directory": "./dist",
     "binding": "ASSETS",
     // /u/* is a shared profile and /c/* a shared challenge score: the Worker
-    // adds their link previews.
-    "run_worker_first": ["/api/*", "/ws/*", "/u/*", "/c/*"],
+    // adds their link previews. "/" is the app's one page: the Worker moves
+    // it to CANONICAL_ORIGIN when it is asked for on another host.
+    "run_worker_first": ["/", "/api/*", "/ws/*", "/u/*", "/c/*"],
   },
   "durable_objects": {
     "bindings": [
@@ -63,8 +67,10 @@
   ],
   // Browser-safe values the online area reads from /api/config at runtime.
   // The service-role key is never here: `wrangler secret put` only.
+  // CANONICAL_ORIGIN is the site's one address (worker/src/canonical.ts).
   "vars": {
     "SUPABASE_URL": "https://dbkfuxczfkawxqmaieii.supabase.co",
     "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_DKfxJ0I2bbnrMHMyxiK4eg_tqsrKoI7",
+    "CANONICAL_ORIGIN": "https://deltadeck.net",
   },
 }

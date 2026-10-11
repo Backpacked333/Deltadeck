@@ -10,7 +10,7 @@ import {
   Upload,
   Waves,
 } from 'lucide-react'
-import { calibrationSummary, GRADES } from '../../lib/grading'
+import { handAccuracy, practiceStats } from '../../lib/practiceStats'
 import type { Progress } from '../../lib/storage'
 import { exportProgress, importProgress } from '../../lib/storage'
 import { GradeChip } from '../review/HandReview'
@@ -32,60 +32,17 @@ export function ProgressView({
   onClear: () => void
   onPlay: () => void
 }) {
-  const stats = useMemo(() => {
-    const hands = progress.hands
-    const decisions = hands.flatMap((h) => h.decisions ?? [])
-    const graded = hands.filter((h) => h.decisions?.length)
-    const handAccuracy = graded.map(
-      (h) =>
-        h.decisions!.reduce((s, d) => s + d.accuracy, 0) / h.decisions!.length,
-    )
-    let net = 0,
-      expected = 0
-    const netLine: number[] = [0],
-      expectedLine: number[] = [0]
-    hands.forEach((h) => {
-      net += h.net
-      expected += h.expectedNet ?? h.net
-      netLine.push(net)
-      expectedLine.push(expected)
-    })
-    const grades = GRADES.map((g) => ({
-      grade: g,
-      count: decisions.filter((d) => d.grade === g).length,
-    }))
-    const reads = decisions
-      .filter((d) => d.guess !== undefined)
-      .map((d) => ({
-        guess: d.guess!,
-        actual: d.equity,
-        label: d.handClass || 'Other',
-      }))
-    return {
-      hands,
-      decisions,
-      accuracy: decisions.length
-        ? decisions.reduce((s, d) => s + d.accuracy, 0) / decisions.length
-        : null,
-      handAccuracy,
-      netLine,
-      expectedLine,
-      net,
-      expected,
-      grades,
-      reads,
-      calibration: calibrationSummary(reads),
-      session: hands.filter((h) => h.id.startsWith(sessionId)).length,
-      evLost: decisions.reduce((s, d) => s + d.evLost, 0),
-    }
-  }, [progress.hands, sessionId])
+  const stats = useMemo(
+    () => practiceStats(progress.hands, sessionId),
+    [progress.hands, sessionId],
+  )
 
   if (!stats.hands.length)
     return (
       <div className="page progress-page">
         <header className="page-head">
           <h1>Small decisions. Lasting intuition.</h1>
-          <p>Your progress lives on this device only.</p>
+          <p>Your progress is saved to your account.</p>
         </header>
         <div className="empty">
           <Sparkles size={26} />
@@ -110,8 +67,7 @@ export function ProgressView({
       <header className="page-head">
         <h1>Small decisions. Lasting intuition.</h1>
         <p>
-          {stats.hands.length} hands recorded on this device · {stats.session}{' '}
-          this session
+          {stats.hands.length} hands recorded · {stats.session} this session
         </p>
       </header>
       <div className="tiles">
@@ -290,10 +246,7 @@ export function ProgressView({
             .slice(-12)
             .reverse()
             .map((hand) => {
-              const accuracy = hand.decisions?.length
-                ? hand.decisions.reduce((s, d) => s + d.accuracy, 0) /
-                  hand.decisions.length
-                : null
+              const accuracy = handAccuracy(hand)
               return (
                 <div key={hand.id} className="hand-row">
                   <span
@@ -353,8 +306,8 @@ function DataActions({
   return (
     <div className="data-actions">
       <span>
-        Stored on this device only. Export a backup or move it to another
-        browser.
+        Saved to your account, so it follows you to any device. Export a backup
+        at any time.
       </span>
       {progress.hands.length > 0 && (
         <button
@@ -366,7 +319,7 @@ function DataActions({
             const url = URL.createObjectURL(blob)
             const a = document.createElement('a')
             a.href = url
-            a.download = 'quantpoker-progress.json'
+            a.download = 'deltadeck-progress.json'
             a.click()
             URL.revokeObjectURL(url)
           }}
@@ -389,10 +342,10 @@ function DataActions({
           if (!chosen) return
           const imported = importProgress(await chosen.text())
           if (!imported)
-            window.alert('That file is not a QuantPoker progress export.')
+            window.alert('That file is not a DeltaDeck progress export.')
           else if (
             window.confirm(
-              `Replace this device's progress with ${imported.hands.length} imported hands?`,
+              `Replace your progress with ${imported.hands.length} imported hands?`,
             )
           )
             onReplace(imported)
@@ -404,7 +357,7 @@ function DataActions({
           onClick={() => {
             if (
               window.confirm(
-                'Clear saved hands and lessons on this device? Settings are kept.',
+                'Clear your saved hands and lessons, here and on your account? Settings are kept.',
               )
             )
               onClear()

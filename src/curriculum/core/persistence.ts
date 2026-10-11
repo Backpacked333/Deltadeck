@@ -594,7 +594,7 @@ export function exportLearning(
       )
       .replace(/([\\`*_[\]#|])/g, '\\$1')
   return [
-    '# QuantPoker learning notebook',
+    '# DeltaDeck learning notebook',
     'Schema: quantpoker.learning.v2. Local, editable evidence—not secure certification.',
     `Updated: ${data.updatedAt}`,
     '## Prior core practice',

@@ -2,7 +2,7 @@
 // seat. Heads-up, it is projected into the trainer's Game so the same Table
 // and ActionBar render it; a six-casual table renders the six-seat ring
 // instead (SixTable). No analysis runs here: the lab stays off in play.
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Copy } from 'lucide-react'
 import { ActionBar } from '../components/table/ActionBar'
 import { Table } from '../components/table/Table'
@@ -10,8 +10,13 @@ import { toHeroGame } from '../engine/project'
 import type { SeatId } from '../engine/types'
 import { legalActions } from '../lib/poker'
 import { buildPresets } from '../lib/presets'
-import { isSeated } from '../shared/protocol'
-import type { MatchInfo, SeatedView, SeatView } from '../shared/protocol'
+import { isSeated, QUICK_SIT_TABLES } from '../shared/protocol'
+import type {
+  ErrorCode,
+  MatchInfo,
+  SeatedView,
+  SeatView,
+} from '../shared/protocol'
 import { useRunout } from '../state/runout'
 import { inviteLink } from './api'
 import type { Identity } from './api'
@@ -20,25 +25,55 @@ import { MatchEnd } from './MatchEnd'
 import { matchOverText } from './matchResult'
 import { ReviewLive } from './ReviewLive'
 import { SixTable } from './SixTable'
+import type { Passed, QuickSit } from './TableList'
 import { TurnClock } from './TurnClock'
 import { useTable } from './useTable'
 
 const noop = () => {}
+const keep = () => {}
+
+/**
+ * A quick-sit's sit unanswered this long is given up (ADR, clarifications
+ * from PR-25): the table can stay silent when it halted during the sit's
+ * lobby claim, or the claim threw.
+ */
+export const SIT_ANSWER_MS = 10_000
+
+/** The refusals a quick-sit moves on from, and how the lobby page says it. */
+const MOVE_ON: Partial<Record<ErrorCode, Passed>> = {
+  table_full: 'table_full',
+  sit_cooldown: 'sit_cooldown',
+  // "There is no seat to take here": the table halted since the list.
+  illegal: 'closed',
+}
 
 export function LiveTable({
   matchId,
   identity,
+  quickSit = null,
+  setQuickSit = keep,
 }: {
   matchId: string
   identity: Identity
+  /** A quick-sit on its way between pages (LiveApp). */
+  quickSit?: QuickSit | null
+  setQuickSit?: (next: QuickSit | null) => void
 }) {
-  const { state, act, rematch, sit, rebuy, stand, sitOut, sitIn } = useTable(
+  const { state, act, rematch, sit, resync, rebuy, stand, sitOut, sitIn } =
+    useTable(matchId, identity.getToken)
+  const { taking, arrived } = useSitOnArrival(
     matchId,
-    identity.getToken,
+    state,
+    sit,
+    resync,
+    quickSit,
+    setQuickSit,
   )
   const { status, table, view, seat } = state
 
-  if (status === 'elsewhere')
+  // While a quick-sit hands off to the next page, this one says only that
+  // it is taking a seat: no closed or elsewhere page on the way out.
+  if (status === 'elsewhere' && !taking)
     return (
       <div className="empty live-empty" role="alert">
         <h3>You are already playing at another table.</h3>
@@ -50,7 +85,21 @@ export function LiveTable({
         )}
       </div>
     )
-  if (status === 'closed')
+  // A six table has no invites and no heads-up search to offer.
+  if (
+    status === 'closed' &&
+    !taking &&
+    (arrived || table?.kind === 'six-casual')
+  )
+    return (
+      <div className="empty live-empty" role="alert">
+        <h3>This table has closed.</h3>
+        <a className="btn btn-primary" href="#lobby">
+          Back to the lobby
+        </a>
+      </div>
+    )
+  if (status === 'closed' && !taking)
     return (
       <div className="empty live-empty" role="alert">
         <h3>This table has closed</h3>
@@ -88,6 +137,7 @@ export function LiveTable({
       <SixTable
         table={table}
         state={state}
+        taking={taking}
         act={act}
         sit={sit}
         rebuy={rebuy}
@@ -449,4 +499,98 @@ function HandReviews({ state, you }: { state: TableState; you: SeatId }) {
       )}
     </div>
   )
+}
+
+type Step = 'sit' | 'done' | { since: TableState['error'] }
+
+/**
+ * Sent here by a quick-sit (ADR, clarifications from PR-25): one bare sit
+ * once the table says it has a seat for us to take, and on a refusal, back
+ * to the lobby to ask again, naming this table. True while the sit is on
+ * its way. Every exit ends the quick-sit here: seated; sent on (a refusal,
+ * or the account's own table); or stopped, with Sit here offered, when the
+ * socket went (the sit is never sent twice) or the table never answered.
+ */
+function useSitOnArrival(
+  matchId: string,
+  state: TableState,
+  sit: () => boolean,
+  resync: () => boolean,
+  quickSit: QuickSit | null,
+  setQuickSit: (next: QuickSit | null) => void,
+) {
+  // Taken on the first render and cleared, so a reload, a link or a later
+  // visit to this table sits nobody.
+  const [tried] = useState(() =>
+    quickSit?.at === matchId ? quickSit.tried : null,
+  )
+  const [held] = useState(quickSit !== null)
+  useEffect(() => {
+    if (held) setQuickSit(null)
+  }, [held, setQuickSit])
+  const [taking, setTaking] = useState(tried !== null)
+  // A ref: the effect below runs on every frame, and acts once per step.
+  const step = useRef<Step>(tried ? 'sit' : 'done')
+  const timer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(timer.current), [])
+  const { status, table, seat, error, elsewhere } = state
+  useEffect(() => {
+    if (!tried || step.current === 'done') return
+    // Leaving for another page: still taking a seat until it unmounts,
+    // so this page puts up no refusal of its own on the way out.
+    const end = (leaving = false) => {
+      step.current = 'done'
+      window.clearTimeout(timer.current)
+      if (!leaving) setTaking(false)
+    }
+    const moveOn = (passed: Passed) => {
+      // A whole quick-sit asks the lobby at most 1 + QUICK_SIT_TABLES times.
+      const again = tried.length < QUICK_SIT_TABLES
+      end(again)
+      if (again)
+        setQuickSit({
+          tried: [...new Set([...tried, matchId])],
+          at: null,
+          passed,
+          from: matchId,
+        })
+    }
+    if (status === 'closed') return moveOn('closed')
+    if (status === 'elsewhere') {
+      end(!!elsewhere)
+      if (elsewhere) window.location.replace(`#play/${elsewhere}`)
+      return
+    }
+    if (step.current === 'sit') {
+      if (status === 'replaced' || status === 'failed') return end()
+      if (status !== 'open' || !table) return
+      if (table.kind !== 'six-casual' || seat !== null) return end()
+      if (table.status === 'finished') return moveOn('closed')
+      if (!sit()) return
+      step.current = { since: error }
+      timer.current = window.setTimeout(() => {
+        if (step.current === 'done') return
+        end()
+        resync()
+      }, SIT_ANSWER_MS)
+      return
+    }
+    if (seat !== null) return end()
+    const passed =
+      error && error !== step.current.since ? MOVE_ON[error.code] : undefined
+    if (passed) return moveOn(passed)
+    if (status !== 'open') return end()
+  }, [
+    tried,
+    status,
+    table,
+    seat,
+    error,
+    elsewhere,
+    matchId,
+    sit,
+    resync,
+    setQuickSit,
+  ])
+  return { taking, arrived: tried !== null }
 }

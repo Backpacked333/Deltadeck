@@ -159,7 +159,7 @@ function LearningPath({ completed }: { completed: ModuleId[] }) {
     <>
       <section className="page-heading">
         <div>
-          <div className="eyebrow">THE QUANTPOKER CURRICULUM</div>
+          <div className="eyebrow">THE DELTADECK CURRICULUM</div>
           <h1 tabIndex={-1}>A better way to think about risk.</h1>
           <p>Start at the poker table. Build intuition for the markets.</p>
           <a href="#learn/connections">Core connection diagram</a>
@@ -664,7 +664,7 @@ function Notebook({
   function exportNotes() {
     try {
       const content =
-        '# QuantPoker field notes\n\n' +
+        '# DeltaDeck field notes\n\n' +
         modules
           .map(
             (module) =>
@@ -676,7 +676,7 @@ function Notebook({
       )
       const anchor = document.createElement('a')
       anchor.href = url
-      anchor.download = 'quantpoker-notes.md'
+      anchor.download = 'deltadeck-notes.md'
       anchor.click()
       window.setTimeout(() => URL.revokeObjectURL(url), 1000)
       setExportError(false)
@@ -839,7 +839,7 @@ export default function Curriculum({
   )
   const selected = moduleById[id]
   useEffect(() => {
-    document.title = `${page === 'module' ? selected.title : (navItems.find((item) => item.id === page)?.label ?? 'Learn')} · QuantPoker`
+    document.title = `${page === 'module' ? selected.title : (navItems.find((item) => item.id === page)?.label ?? 'Learn')} · DeltaDeck`
     const focusHeading = () => {
       const h = [...(mainRef.current?.querySelectorAll('h1') ?? [])].find(
         (heading) => {
@@ -860,7 +860,7 @@ export default function Curriculum({
       if (!h) return false
       h.tabIndex = -1
       h.focus({ preventScroll: true })
-      document.title = `${h.textContent} · QuantPoker`
+      document.title = `${h.textContent} · DeltaDeck`
       return true
     }
     const observer = new MutationObserver(() => {
@@ -1117,7 +1117,7 @@ export default function Curriculum({
             )}
             <footer>
               <span>
-                <Spade size={13} /> QuantPoker{' '}
+                <Spade size={13} /> DeltaDeck{' '}
                 <span className="footer-divider">/</span> Better decisions start
                 with better questions.
               </span>

@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Locator, Page } from '@playwright/test'
 import { fakeLadder, fakeProfile, onboard, playHand } from './helpers'
-import { devSignIn, fakeSixTable, SIX_TABLE } from './sixTable'
+import { devSignIn, fakeLobby, fakeSixTable, SIX_TABLE } from './sixTable'
 
 /**
  * Nothing wider than the device. Comparing with innerWidth alone is not
@@ -83,7 +83,7 @@ test('the online lobby fits a phone without horizontal scroll', async ({
   await onboard(page)
   await page.getByRole('button', { name: 'Online', exact: true }).click()
   await expect(
-    page.getByText('Online play is not set up on this site yet.'),
+    page.getByText('Accounts are not set up on this site yet.'),
   ).toBeVisible()
   await expectNoOverflow(page)
 })
@@ -120,6 +120,33 @@ test('the profile, a match review and the Method page fit a phone, down to 320 p
   await expect(
     page.getByRole('heading', { level: 1, name: 'Method' }),
   ).toBeVisible()
+  await expectNoOverflow(page)
+})
+
+test('the six-table list fits 320 px, with long figures and while finding a seat', async ({
+  page,
+}) => {
+  await devSignIn(page, 'you_at_the_bottom')
+  // Twelve tables, some full, with the widest figures the list can show:
+  // 61,728 bb pots and 100+ players. Quick sit's answer is held.
+  const tables = Array.from({ length: 12 }, (_, i) => ({
+    tableId: `0b7c4a52-6f0e-4d7b-9b55-3c1f2a9e8d${String(i).padStart(2, '0')}`,
+    seated: i % 3 === 0 ? 6 : 5,
+    maxSeats: 6,
+    avgPot: i % 4 === 0 ? null : 1_234_560,
+    playersPerHour: 100,
+  }))
+  await fakeLobby(page, { tables, answer: () => null })
+  await page.setViewportSize({ width: 320, height: 640 })
+  await page.goto('/#lobby')
+  const list = page.getByRole('table', { name: 'Six-max tables' })
+  await expect(list.getByRole('row')).toHaveCount(1 + 10)
+  await expect(list.getByText('61,728 bb').first()).toBeVisible()
+  await expect(list.getByText('100+').first()).toBeVisible()
+  await expect(page.getByText('And 2 more.')).toBeVisible()
+  await expectNoOverflow(page)
+  await page.getByRole('button', { name: 'Quick sit' }).click()
+  await expect(page.getByText('Finding you a seat…')).toBeVisible()
   await expectNoOverflow(page)
 })
 

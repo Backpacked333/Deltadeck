@@ -44,13 +44,13 @@ export function NotConfigured() {
   return (
     <div className="empty live-empty">
       <UserRound size={26} />
-      <h3>Online play is not set up on this site yet.</h3>
+      <h3>Accounts are not set up on this site yet.</h3>
       <p>
-        This build has no account service configured. Practice against Atlas
-        works as always.
+        This build has no account service configured, so there is no signing in,
+        online play or saved practice here.
       </p>
-      <a className="btn btn-primary" href="#table">
-        Practice vs Atlas
+      <a className="btn btn-primary" href="/">
+        Back to the home page
       </a>
     </div>
   )

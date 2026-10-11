@@ -1,11 +1,36 @@
 # Project status
 
-Last updated: 2026-10-11 by SDE (casual 6-max: PR-01 to PR-23 live in #34 to #58, except PR-20 (optional); six tables stay unreachable from outside until PR-24 and PR-25). Earlier: landing page phases 1 and 2 (#30); rating P1-12 to P1-16 live; hands of a live match closed to clients; S7-11 waits on U-4
+Last updated: 2026-10-11 by SDE (casual 6-max: PR-01 to PR-25 live in #34 to #69, except PR-20 (optional); a signed-in player reaches a six table from the lobby page's Quick sit, and PR-26 adds the P2-11 run evidence. Accounts first: #57 to #63 live, #64 waits on sign-up reaching strangers). Earlier: landing page phases 1 and 2 (#30); rating P1-12 to P1-16 live; hands of a live match closed to clients; S7-11 waits on U-4
 
 **Standing instructions from the user (2026-10-09):**
 
 - **Merge when green.** Open a PR for each finished piece and merge it to `main` once CI passes. A merge deploys to production, so verify the deploy after each one.
 - **Q1 is answered: B.** Rated heads-up uses fresh decks every hand, with the result luck-adjusted by settling all-in pots at equity.
+
+## Accounts first (2026-10-11)
+
+Accounts, the gate, and history on the account. Six of seven PRs are merged, each green, and each deploy was verified (`verify-deploy`):
+
+- **#57:** sign-up and sign-in with an email and password (confirmed with a 6-digit code), Google or Apple (shown only when enabled), and password reset by code. Sign-out is this browser only.
+- **#59:** `#signup` and `#signin` pages. A provider return (`?code`) is always finished, from any route.
+- **#60:** the account in the header on every page (Sign in / Create free account, or the player's menu) and `#signout`.
+- **#61:** `SessionKeeper` checks a stored session with the service. The account client sits in a lazy `accounts` chunk, and the bundle check guards it.
+- **#62:** migration `20261011100000_practice_history.sql` (`practice_hands`, `learning_state`). Production holds it, checked read-only: RLS on, no anon access, both guard triggers present.
+- **#63:** practice hands, settings and lessons sync to the account and follow the player between devices. Sign-out forgets them locally.
+- **#64 (this PR), not merged on purpose:** practice, lessons and progress need an account. Merge only once a stranger can sign up (below).
+
+**Yours before #64 (dashboard):**
+- **Strangers can't sign up yet.** Production has Google and Apple off. Supabase's built-in email only reaches team addresses, 2 an hour.
+- Buy a domain and add it to the Worker.
+- **Resend on `mail.<domain>`:** SPF, DKIM and DMARC records, and a sending-only key.
+- **Supabase → SMTP:** `smtp.resend.com:465`, user `resend`.
+- **Email templates:** "Confirm signup", "Reset password" and "Magic link" show `{{ .Token }}`. OTP length 6, expiry 3600 s.
+- Minimum password length 8; leaked-password protection on.
+- **URL configuration:** Site URL and redirect URLs for both production origins.
+- **Google OAuth client:** redirect `https://dbkfuxczfkawxqmaieii.supabase.co/auth/v1/callback`.
+- **Apple:** Developer Program, Services ID and key. The secret expires every 6 months. Register `mail.<domain>` for Apple's private relay.
+- **Worker secrets:** `RESEND_API_KEY` and `SCHOOL_EMAIL_FROM`, for school codes.
+- **Check before merging #64:** sign up on the live site from an address outside the Supabase team, and see the code arrive.
 
 ## Landing v2: cinematic 3D (2026-10-10)
 
@@ -107,13 +132,17 @@ Merged and deployed, each one verified in production after its merge:
   - the 60 s reconnect grace and the Disconnected marker on the seat plate (#53).
   - side pots shown apart and paid in award order (#54);
   - chip motion at the six table, with a six-seat frame-time gate (#55);
-  - a registry of six tables in the lobby, counts only (#58).
+  - a registry of six tables in the lobby, counts only (#58);
+  - quick-sit and the `tables` frame on the lobby socket, under a cap of 50 tables (#65);
+  - Quick sit and the read-only list of six tables on the lobby page, with the client's retry across pages (#69).
   - #47 fixed two Supabase tests that timed out under load: their database boot moved into a hook.
-- **Exposure gate:** every PR it waited on is in: PR-12 (claims), PR-14 (rebuy), PR-16 (sit-out and removal) and PR-17 (reconnect), and the registry (PR-23) is live. No route creates or lists a six table yet: the invite route sends no `kind`, the lobby queue refuses `six-casual`, init refuses a six table with an opponent, and `GET /api/tables` is 404 (a test pins all of it). PR-24 (quick-sit) and PR-25 (table list) open it.
-- **Next:** PR-24 (quick-sit) and PR-25 (table list), which open the gate, then PR-26 (smoke evidence).
+- **Exposure gate: open, through the signed-in lobby socket only (#65).** `quick_sit` sends a player to the fullest listed table with a free seat, or opens one under the cap of 50; `tables` lists them to the asking socket alone. Every other path stays shut, and a test pins it: the invite route sends no `kind`, the lobby queue refuses `six-casual`, init refuses a six table with an opponent, and `GET /api/tables` is 404. Since #69 the lobby page's 6-max card has Quick sit and the list: a refused sit goes back to the lobby, which asks again naming the tables tried (at most four asks).
+- **P2-11 run evidence (PR-26):** `node scripts/smoke-ws.mjs --six` against a local Worker with fresh state: six clients and a watcher at one real six table for 200 hands with a mid-hand stand, a join, timeouts until sat out (then sat in) and a reconnect; 0 invariant failures, 0 leaks, 200/200 commitments, client round trip p95 8 ms; and `e2e/live.spec.ts` › two browsers at a six-seat table through the real lobby. The checks were strengthened after an independent review and each is shown to fail on a faulty frame.
+- **Still open for 6-max:** ack-to-render p95 at six seats (S7-05 telemetry), the first 1,000 human casual hands with 0 failures (U-4), Safari background tabs, and P2-09 (6-max grading and payout reports).
 - **Open for the user:**
   - Devin's security threads, fixed and replied to but left open for the owner: two on #46, and one on #44 that #46 closed.
-  - "players/hour" in the registry is built as distinct players dealt in during the last hour (PR-23). If it should be hands per hour, say so before PR-25 shows it.
+  - "Players in the last hour" is on the lobby page (#69): distinct players dealt in during the last hour. If "players/hour" meant hands per hour, the Worker field and the label change together.
+  - A table that refuses a quick-sit sends the player through the lobby page for about half a second before the next table. Keeping the lobby socket open across pages would remove that flash, at about three times the client code; kept as is unless players report it.
   - The heads-up frame test's median sits at 33.3 ms, 0.7 ms under its limit, on main; the trainer's backdrop blurs cause it (found in PR-22, suggested as a separate task).
   - One review finding was declined, not fixed: on #52, Devin asked to stand up a player who sits in at a waiting table once their earlier sit-out clocks run out. They are playing and their seat blocks nobody, so they keep it; a guard test and an ADR clarification record this. Say if you want it the other way.
 

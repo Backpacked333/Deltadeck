@@ -122,7 +122,7 @@ describe('SignIn', () => {
       screen.getByRole('button', { name: 'Create account' }),
     )
     expect(
-      await screen.findByRole('heading', { name: 'Sign in to QuantPoker' }),
+      await screen.findByRole('heading', { name: 'Sign in to DeltaDeck' }),
     ).toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent(
       'There is already an account for a@b.co',

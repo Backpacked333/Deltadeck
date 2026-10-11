@@ -142,6 +142,25 @@
 .live-card .btn {
   justify-self: start;
 }
+/* The six tables (TableList): read-only, figures in columns. */
+.live-tables {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.9rem;
+}
+.live-tables th,
+.live-tables td {
+  text-align: left;
+  padding: 4px 8px 4px 0;
+}
+.live-tables th {
+  font-weight: 600;
+  color: var(--text-2);
+}
+.live-tables td {
+  white-space: nowrap;
+}
 @media (max-width: 520px) {
   .live-row:not(.live-row-tight) {
     flex-direction: column;

@@ -57,7 +57,7 @@ export function AccountMenu({ username }: { username: string | null }) {
           <ul role="list">
             {username && !PLACEHOLDER.test(username) && (
               <li>
-                <a href={`#u/${username}`}>Your profile</a>
+                <a href="#me">Your profile</a>
               </li>
             )}
             <li>

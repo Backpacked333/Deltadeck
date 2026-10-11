@@ -88,7 +88,7 @@ const LESSONS: Record<LessonId, Lesson> = {
     level: 'Mindset',
     body: [
       'A positive-EV decision still loses often. Over a handful of hands, luck dominates the result; over thousands, the average starts to show.',
-      'That is why QuantPoker grades decisions, not results, and why your progress page separates the two lines.',
+      'That is why DeltaDeck grades decisions, not results, and why your progress page separates the two lines.',
     ],
     widget: VarianceWidget,
     connection:
@@ -113,7 +113,7 @@ const LESSONS: Record<LessonId, Lesson> = {
     level: 'Intermediate',
     body: [
       'Before any action, an opponent could hold any of 1,326 starting combinations. Every bet, call and check is evidence that makes some hands more likely and others less.',
-      'QuantPoker applies Bayes’ rule using Atlas’s published strategy: each possible hand is reweighted by how likely Atlas was to take the action it took. Your equity is then measured against that range.',
+      'DeltaDeck applies Bayes’ rule using Atlas’s published strategy: each possible hand is reweighted by how likely Atlas was to take the action it took. Your equity is then measured against that range.',
     ],
     widget: RangeWidget,
     connection:

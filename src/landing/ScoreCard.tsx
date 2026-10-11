@@ -33,7 +33,7 @@ async function shareLink(url: string, accuracy: number, title: string) {
   const text = `I scored ${accuracy}/100 on “${title}”. Beat me.`
   try {
     if (navigator.share) {
-      await navigator.share({ title: 'QuantPoker challenge', text, url })
+      await navigator.share({ title: 'DeltaDeck challenge', text, url })
       return 'shared'
     }
     await navigator.clipboard.writeText(`${text} ${url}`)
@@ -49,6 +49,7 @@ export function ScoreCard({
   signedIn = false,
   onSave,
   onAgain,
+  againLabel = 'Play another hand',
 }: {
   finished: FinishedChallenge
   /** The friend whose link this hand came from (L-13). */
@@ -57,6 +58,8 @@ export function ScoreCard({
   signedIn?: boolean
   onSave: () => void
   onAgain: () => void
+  /** Signed out, the next hand is an account away. */
+  againLabel?: string
 }) {
   const { spec, tree, game, path, decisions } = finished
   const accuracy = scorePath(tree, path)?.accuracy ?? 0
@@ -272,7 +275,7 @@ export function ScoreCard({
           </button>
         )}
         <button className="btn btn-ghost-desk" onClick={onAgain}>
-          <RotateCcw size={15} /> Play another hand
+          <RotateCcw size={15} /> {againLabel}
         </button>
       </div>
       {shared === 'failed' && (

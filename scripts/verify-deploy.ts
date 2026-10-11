@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PROTOCOL } from '../src/shared/protocol.ts'
 
-export const SITE = 'https://quantpoker.bbcroysalman.workers.dev'
+export const SITE = 'https://deltadeck.net'
 
 type Get = (url: string) => Promise<Response>
 const digest = (bytes: Uint8Array) =>

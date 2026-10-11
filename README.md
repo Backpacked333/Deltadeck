@@ -1,8 +1,8 @@
-# QuantPoker
+# DeltaDeck
 
 **Play the hand. Understand the odds.**
 
-QuantPoker is a decision trainer disguised as a poker game. You play heads-up Texas Hold’em for play money against **Atlas**, a transparent practice bot. Before the math appears you commit to a read, then a live quant lab prices every option. After each hand you get chess-style grades on the decisions, with luck shown separately from skill.
+DeltaDeck ([deltadeck.net](https://deltadeck.net)) is a decision trainer disguised as a poker game. You play heads-up Texas Hold’em for play money against **Atlas**, a transparent practice bot. Before the math appears you commit to a read, then a live quant lab prices every option. After each hand you get chess-style grades on the decisions, with luck shown separately from skill.
 
 This is an **educational web app played for play money only**, not a gambling service, trading tool or source of investment advice. Casual heads-up play against other people runs online (see [Online play](#online-play)); the trainer works fully offline without it.
 
@@ -15,7 +15,7 @@ npm ci
 npm run dev          # http://localhost:5173
 ```
 
-No API keys, database, account or environment variables are needed for the trainer. Online play is optional: `.env.example` lists the two browser-safe values that turn on sign-in.
+The practice table, the lessons and Progress need a signed-in account; the landing page, its first challenge hand, the ladder, profiles and match reviews do not. `.env.example` lists the two browser-safe values that point a local build at a Supabase project for sign-in. Without them, practise locally as a development identity: in the browser console run `sessionStorage.setItem('qp.devToken', 'dev.me.local')` and reload (nothing is saved to an account then).
 
 ### The landing page
 
@@ -23,9 +23,11 @@ The bare URL is the home page: it always opens the landing page, and the logo le
 
 - **The challenge:** one of six curated hands against Atlas, played from preset buttons (keys `1`–`6`), each decision graded on the spot.
   - With WebGL, it plays on a cinematic 3D table (`src/landing/stage/`, ADR-001): Atlas's likeliest hands rise as a cloud on the first decision, and a slow-motion verdict plays on the last.
+  - The table is drawn physically: lacquered cards with real pip layouts and court panels, felt with fibre and sheen, a stitched leather rail, a varnished racetrack, clay chips with edge inserts and each player's stack, lit by one spotlight and a studio environment, through a lens pass (bloom, vignette, grain). All artwork is drawn at runtime; the page ships no images for it.
+  - Quality adapts to frame time: tier 2 (full), 1 (phones: lower resolution, lighter lens) and 0 (no shadows or lens; software GPUs start here).
   - Without WebGL, with reduced motion, or with `?motion=off`, it plays on the trainer's 2D table.
-  - `?stageslow=<n>` slows the 3D clock for screenshots.
-- **The rest of the page:** below the hand it explains how QuantPoker works and what a free account gives, with "Create free account" in the header and on the score card.
+  - `?stageslow=<n>` slows the 3D clock and `?stagequality=0|1|2` pins the tier, for screenshots.
+- **The rest of the page:** below the hand it explains how DeltaDeck works and what a free account gives, with "Create free account" in the header and on the score card.
 - **The score card:** the accuracy, a percentile ranked by the Worker (against model players until a hand has 200 real scores), the luck of the cards shown apart from the decisions, and Atlas's reasoning. Its CTA, "Save your score and get rated", leads to sign-up and a three-step onboarding (`#welcome/onboard`).
 - **The trees:** every reachable decision is priced offline by the trainer's own grader into `src/challenge/trees.generated.json`. `src/challenge/generate.test.ts` rebuilds it on every test run and fails on any difference. To regenerate after changing a hand or the grader: `CHALLENGE_WRITE=1 npx vitest run src/challenge/generate.test.ts`.
 - **The server side:** `ScoreDO` in the Worker re-scores each line by lookup, keeps the histograms, counts funnel events (`GET /api/funnel`, aggregates only) and sends claimed scores to Postgres through an outbox.
@@ -34,7 +36,7 @@ The bare URL is the home page: it always opens the landing page, and the logo le
 
 ### Online play
 
-`#signup` and `#signin` (the header's **Create free account** and **Sign in**) create an account with an email and password, confirmed with a 6-digit code, or with Google or Apple when the Supabase project enables them, and ask for a public username. A signed-in player's practice hands, settings and lesson progress are saved to their account (`practice_hands`, `learning_state`) and follow them between devices; signing out removes them from that browser. **Find a match** pairs you with the next player waiting; **Play a friend by link** opens a table and gives you a link to send. A match is 20 hands of heads-up no-limit hold'em for play money, on the same table UI as the trainer, with the quant lab switched off during play. Each decision has a 20-second clock plus a 60-second bank for the match; three missed decisions in a row forfeit. After each hand you can open its review; **Deck verified** means your browser checked the board, the shown hands and your own two cards against the deck commitment it received before the deal. [Fair play](https://quantpoker.bbcroysalman.workers.dev/#fair-play) and [Terms](https://quantpoker.bbcroysalman.workers.dev/#terms) (in the app: `#fair-play`, `#terms`) say what is and is not guaranteed.
+`#signup` and `#signin` (the header's **Create free account** and **Sign in**) create an account with an email and password, confirmed with a 6-digit code, or with Google or Apple when the Supabase project enables them, and ask for a public username. A signed-in player's practice hands, settings and lesson progress are saved to their account (`practice_hands`, `learning_state`) and follow them between devices; signing out removes them from that browser. **Find a match** pairs you with the next player waiting; **Play a friend by link** opens a table and gives you a link to send. A match is 20 hands of heads-up no-limit hold'em for play money, on the same table UI as the trainer, with the quant lab switched off during play. Each decision has a 20-second clock plus a 60-second bank for the match; three missed decisions in a row forfeit. After each hand you can open its review; **Deck verified** means your browser checked the board, the shown hands and your own two cards against the deck commitment it received before the deal. [Fair play](https://deltadeck.net/#fair-play), [Terms](https://deltadeck.net/#terms) and [Privacy](https://deltadeck.net/#privacy) (in the app: `#fair-play`, `#terms`, `#privacy`) say what is and is not guaranteed, and what is kept.
 
 How it is built (decisions in `.10x/decisions/architect/multiplayer-platform.md`):
 
@@ -124,7 +126,7 @@ Important distinctions are taught explicitly:
 - The all-in risk lab uses a binary win/loss payoff with known physical equity. Two equal runouts are treated as independent, so they preserve EV and halve variance; real boards share a depleted deck. A cashout charges a percentage of the fair gross payout. The Kelly model repeats constant, independent odds, resizes after every result, and defines ruin as crossing a selected drawdown floor over a finite horizon—not literal bankruptcy.
 - Cashing out sells the whole pot claim; loss-only insurance pays on a defined losing event while retaining the hand. The latter is the closer credit-default-swap analogy. The lab has no reference entity, default timing, recovery auction, credit-spread curve, discounting, collateral, or counterparty credit risk and does not produce a market CDS price.
 
-Curriculum records now use `quantpoker.learning.v2`; valid learning-v1 notes and core completions migrate without becoming new foundation evidence. Normal migration leaves `quantpoker.learning.v1` untouched as a fallback. Table history and lens mini-lessons retain the separate `quantpoker.progress.v1` key, which curriculum reset never removes. Malformed records are preserved with recovery/export choices; storage failures retain work in the root session until the tab closes. JSON and Markdown exports, bounded retention, and multi-tab conflict warnings are included. There is no JSON importer, account, or cloud sync.
+Curriculum records now use `quantpoker.learning.v2`; valid learning-v1 notes and core completions migrate without becoming new foundation evidence. Normal migration leaves `quantpoker.learning.v1` untouched as a fallback. Table history and lens mini-lessons retain the separate `quantpoker.progress.v1` key, which curriculum reset never removes. Malformed records are preserved with recovery/export choices; storage failures retain work in the root session until the tab closes. JSON and Markdown exports, bounded retention, and multi-tab conflict warnings are included. There is no JSON importer; signed in, the record is also saved to the account (`learning_state`, newer copy wins).
 
 ### R1 foundations and specialist laboratories
 
@@ -141,7 +143,7 @@ All ten introductory units have retrieval (including an explicitly recorded skip
 
 The first F10 transfer/review bank contains three finance-only final cases: equipment service, seasonal inventory and a warranty book. Each has at least six scored items across setup, calculation, interpretation and limitation, plus critical ledger/probability checks, distinct hints and an ungraded written defense. Changed review regimes reverse research choice, floor feasibility or default. Original hypothetical contract terms are explicit; no external source is claimed to validate these businesses.
 
-The four pathways link real introductory resources and prerequisite bridges. Atlas filters cover domain, pathway, mathematical level, availability and text; the lab catalog searches question, role and concepts. **Available** means selected introductory assessed mechanisms—not the entire research family. Broader/research mechanisms remain **partial/planned**, and future capstones are not playable links or included in progress denominators. Sources show claim-specific locators and verification status; citations do not prove QuantPoker improves learning.
+The four pathways link real introductory resources and prerequisite bridges. Atlas filters cover domain, pathway, mathematical level, availability and text; the lab catalog searches question, role and concepts. **Available** means selected introductory assessed mechanisms—not the entire research family. Broader/research mechanisms remain **partial/planned**, and future capstones are not playable links or included in progress denominators. Sources show claim-specific locators and verification status; citations do not prove DeltaDeck improves learning.
 
 Predictions are committed before structured answers/reveals. Hints and repeated exposed cases remain practice, not unaided demonstration. A fresh transfer needs at least 80% and all critical items correct; prose and simulated profits are never graded. Delayed review uses device-clock reminders at 3, then 10, then 30 days; failed/assisted reviews retry at 1 day. This editable local evidence is not secure certification.
 
@@ -275,9 +277,9 @@ These do not replace testing with real learners, screen-reader users and a range
 
 ## Operations (online play)
 
-Production is the Worker `quantpoker` on Cloudflare (site, `/api/*`, `/ws/*`, Durable Objects, queues) and the Supabase project `quantpoker` (accounts and the hand archive). Nothing below needs SQL.
+Production is [deltadeck.net](https://deltadeck.net): the Worker `quantpoker` on Cloudflare (site, `/api/*`, `/ws/*`, Durable Objects, queues) and the Supabase project `quantpoker` (accounts and the hand archive). The code, storage keys and those two names keep the old working name, QuantPoker. `deltadeck.net` and `www.deltadeck.net` are custom domains on the Worker (Settings → Domains & Routes); a page asked for on any other address, such as the old `quantpoker.bbcroysalman.workers.dev` or `www`, gets a 301 to `https://deltadeck.net` with its path (`CANONICAL_ORIGIN`, `worker/src/canonical.ts`), while `/api/*` and `/ws/*` still answer there. Nothing below needs SQL.
 
-**Hands per day.** Open [`/api/stats`](https://quantpoker.bbcroysalman.workers.dev/api/stats): archived and verified hands for each of the last 7 UTC days, from the archive, cached for 5 minutes. `hands` minus `verified` is the backlog still being checked (normally zero within a minute).
+**Hands per day.** Open [`/api/stats`](https://deltadeck.net/api/stats): archived and verified hands for each of the last 7 UTC days, from the archive, cached for 5 minutes. `hands` minus `verified` is the backlog still being checked (normally zero within a minute).
 
 **Logs.** Cloudflare → Workers & Pages → `quantpoker` → Observability → Logs. Every event is one JSON line with an `evt` field and ids only (`worker/src/log.ts`; never cards, decks, secrets, tokens or addresses):
 

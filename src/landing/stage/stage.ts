@@ -1,18 +1,40 @@
 // The landing page's 3D table (ADR-001): one spotlight over a felt table in
-// a dark void, cards dealt from a deck and flipped with weight, chips that
+// a dark room, cards dealt from a deck and flipped with weight, chips that
 // slide, a camera that moves, and the decision beats (range cloud, grade
 // stamp light, slow-motion verdict). React owns the hand; this module only
 // shows it. Loaded lazily: three.js never reaches the entry chunk.
+//
+// The look: physically based materials lit by the spotlight and a studio
+// environment (lacquered cards, brushed felt with sheen, stitched leather,
+// varnished wood, clay chips), soft shadows, a visible shaft of light, and
+// a lens pass (bloom, vignette, grain). Quality steps down with frame time.
 import * as THREE from 'three'
-import { chipStacks } from '../../lib/chips'
+import { chipStacks, DENOMINATIONS } from '../../lib/chips'
+import type { Denomination } from '../../lib/chips'
 import type { Card, Game } from '../../lib/poker'
 import type { RangeEntry } from '../../challenge/score'
+import { backdrop, lightBeam, studioEnvironment } from './atmosphere'
+import {
+  cardGeometry,
+  chipGeometry,
+  cushionProfile,
+  sweepGeometry,
+} from './geometry'
+import { Lens } from './post'
 import {
   cardBack,
   cardFace,
+  chipEdge,
+  chipFace,
   comboTexture,
   dotTexture,
+  feltNormal,
   feltTexture,
+  leatherNormal,
+  leatherTexture,
+  linenNormal,
+  seeded,
+  woodTexture,
 } from './textures'
 import {
   easeInOutCubic,
@@ -28,11 +50,15 @@ const code = (c: Card) => `${RANKS[c.rank - 2]}${c.suit}`
 
 const CARD_W = 0.62
 const CARD_H = 0.88
-const CARD_T = 0.012
-const CHIP_R = 0.15
-const CHIP_H = 0.034
+const CARD_T = 0.01
+const CHIP_R = 0.16
+const CHIP_H = 0.032
 const TABLE_X = 4.2
 const TABLE_Z = 2.4
+/** The wooden racetrack between the felt and the rail, and the rail itself. */
+const TRACK_W = 0.22
+const RAIL_W = 0.5
+const RAIL_H = 0.25
 
 /** Where things sit on the felt (y is up; the hero sits at +z). */
 const SPOT = {
@@ -72,6 +98,9 @@ const RIG = {
 }
 type RigName = keyof typeof RIG
 
+const LAMP = new THREE.Vector3(0, 7.5, 1.2)
+const SPOT_ON = 46
+
 export type Tier = 0 | 1 | 2
 export type StageOptions = {
   /** Called once if WebGL is lost or cannot start: show the 2D table. */
@@ -80,7 +109,30 @@ export type StageOptions = {
 }
 export type AnchorName = 'atlas' | 'hero' | 'pot' | 'equityBar' | 'priceBar'
 
-type CardMesh = THREE.Mesh<THREE.BoxGeometry, THREE.Material[]>
+type CardMesh = THREE.Mesh<THREE.BufferGeometry, THREE.Material[]>
+/** One chip to draw: its denomination, where it sits, a seed for its wobble. */
+type Placed = { d: Denomination; x: number; y: number; z: number; seed: number }
+type ChipGroup = 'heroBet' | 'atlasBet' | 'pot' | 'heroStack' | 'atlasStack'
+
+/**
+ * The tier to start at: `?stagequality=0|1|2` pins it (for screenshots and
+ * QA); a software GPU starts at 0; a phone at 1; anything else at 2.
+ */
+function startingTier(renderer: THREE.WebGLRenderer): {
+  tier: Tier
+  pinned: boolean
+} {
+  const asked = new URLSearchParams(location.search).get('stagequality')
+  if (asked && /^[012]$/.test(asked))
+    return { tier: Number(asked) as Tier, pinned: true }
+  const gl = renderer.getContext()
+  const info = gl.getExtension('WEBGL_debug_renderer_info')
+  const name = info ? String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) : ''
+  if (/swiftshader|llvmpipe|softpipe|software/i.test(name))
+    return { tier: 0, pinned: false }
+  const phone = Math.min(window.innerWidth, window.innerHeight) < 600
+  return { tier: phone ? 1 : 2, pinned: false }
+}
 
 export class Stage {
   readonly renderer: THREE.WebGLRenderer
@@ -89,17 +141,33 @@ export class Stage {
   private tweens = new Tweens()
   private spot: THREE.SpotLight
   private rim: THREE.DirectionalLight
+  private beam: THREE.ShaderMaterial
   private dust: THREE.Points
   private dustBase: Float32Array
+  private backdrop: THREE.Group
+  private environment: THREE.WebGLRenderTarget
+  private lens: Lens | null = null
   private textures = new Map<string, THREE.Texture>()
-  private back: THREE.Texture
+  private faceWidth: number
+  private cardShape = cardGeometry(CARD_W, CARD_H, CARD_T, 0.036)
+  private cardBack: THREE.MeshPhysicalMaterial
+  private cardEdge: THREE.MeshStandardMaterial
+  private linen: THREE.Texture
   private cards = new Map<string, CardMesh>()
-  private chips = {
+  private chips: Record<ChipGroup, THREE.Group> = {
     heroBet: new THREE.Group(),
     atlasBet: new THREE.Group(),
     pot: new THREE.Group(),
+    heroStack: new THREE.Group(),
+    atlasStack: new THREE.Group(),
   }
-  private chipValues = { heroBet: 0, atlasBet: 0, pot: 0 }
+  private chipValues: Record<ChipGroup, number> = {
+    heroBet: 0,
+    atlasBet: 0,
+    pot: 0,
+    heroStack: 0,
+    atlasStack: 0,
+  }
   private bars: { equity: THREE.Mesh; price: THREE.Mesh } | null = null
   private cloud: THREE.Group | null = null
   private look = RIG.seat.at.clone()
@@ -107,7 +175,9 @@ export class Stage {
   private raf = 0
   private frameTimes: number[] = []
   private lastFrame = 0
+  private measured = false
   private tier: Tier
+  private pinned: boolean
   private disposed = false
   /** Where the table sits across a wide screen: + right of centre, − left. */
   private shift = 0.17
@@ -138,45 +208,87 @@ export class Stage {
       alpha: false,
       powerPreference: 'high-performance',
     })
-    const mobile = Math.min(window.innerWidth, window.innerHeight) < 600
-    this.tier = mobile ? 1 : 2
+    const start = startingTier(this.renderer)
+    this.tier = start.tier
+    this.pinned = start.pinned
+    this.faceWidth = this.tier === 2 ? 640 : 384
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping
-    this.renderer.toneMappingExposure = 1.05
+    this.renderer.toneMappingExposure = 0.95
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
     canvas.addEventListener('webglcontextlost', this.lost)
 
-    this.scene.background = new THREE.Color('#050807')
-    this.scene.fog = new THREE.Fog('#050807', 9, 20)
     const anisotropy = Math.min(
-      8,
+      this.tier === 2 ? 16 : 8,
       this.renderer.capabilities.getMaxAnisotropy(),
     )
-    this.back = cardBack(anisotropy)
-    this.textures.set('back', this.back)
+    this.scene.background = this.roomTone()
+    this.scene.fog = new THREE.Fog('#040706', 11, 26)
+    this.environment = studioEnvironment(this.renderer)
+    this.scene.environment = this.environment.texture
+    this.scene.environmentIntensity = 0.45
 
-    // Lights: one warm spotlight, a cool rim from behind, a whisper of fill.
-    this.spot = new THREE.SpotLight('#fff3dc', 0, 20, 0.7, 0.6, 1.1)
-    this.spot.position.set(0, 7.5, 1.2)
+    // Lights: one warm spotlight, a cool rim from behind, a whisper of fill;
+    // the environment adds the lamp's reflections.
+    this.spot = new THREE.SpotLight('#fff1d8', 0, 20, 0.66, 0.62, 1.1)
+    this.spot.position.copy(LAMP)
     this.spot.target.position.set(0, 0, 0)
-    this.spot.shadow.mapSize.set(1024, 1024)
-    this.spot.shadow.bias = -0.0004
+    const shadow = this.tier === 2 ? 2048 : 1024
+    this.spot.shadow.mapSize.set(shadow, shadow)
+    this.spot.shadow.bias = -0.00025
+    this.spot.shadow.normalBias = 0.012
+    this.spot.shadow.camera.near = 3
+    this.spot.shadow.camera.far = 13
     this.scene.add(this.spot, this.spot.target)
-    this.rim = new THREE.DirectionalLight('#7fb6f0', 0.35)
-    this.rim.position.set(-3, 3, -6)
+    this.rim = new THREE.DirectionalLight('#b9cadb', 0.32)
+    this.rim.position.set(-3, 3.5, -6)
+    // A soft fill from over the viewer's shoulder, so the rail's leather and
+    // the racetrack's varnish read at the edge of the pool of light.
+    const fill = new THREE.SpotLight('#ffe2bf', 14, 24, 0.85, 1, 1.2)
+    fill.position.set(0, 6.5, 10)
+    fill.target.position.set(0, -0.2, 2.4)
     this.scene.add(
       this.rim,
-      new THREE.HemisphereLight('#a9c6b6', '#050807', 0.12),
+      fill,
+      fill.target,
+      new THREE.HemisphereLight('#a9c6b6', '#050807', 0.08),
     )
+    const shaft = lightBeam(LAMP, new THREE.Vector3(0, 0, 0), 3.1)
+    this.beam = shaft.material
+    this.scene.add(shaft.beam)
+    const far = backdrop(this.tier === 2 ? 34 : 18)
+    this.backdrop = far.group
+    this.textures.set('bokeh', far.map)
+    this.scene.add(this.backdrop)
+
+    this.linen = linenNormal(anisotropy)
+    this.linen.repeat.set(5, 7)
+    this.textures.set('linen', this.linen)
+    const back = cardBack(anisotropy, this.faceWidth)
+    this.textures.set('back', back)
+    this.cardBack = new THREE.MeshPhysicalMaterial({
+      map: back,
+      roughness: 0.36,
+      clearcoat: 0.55,
+      clearcoatRoughness: 0.25,
+      normalMap: this.linen,
+      normalScale: new THREE.Vector2(0.18, 0.18),
+    })
+    this.cardEdge = new THREE.MeshStandardMaterial({
+      color: '#e7e1d2',
+      roughness: 0.7,
+    })
 
     this.buildTable(anisotropy)
     for (const group of Object.values(this.chips)) this.scene.add(group)
     this.chips.heroBet.position.copy(SPOT.heroBet)
     this.chips.atlasBet.position.copy(SPOT.atlasBet)
     this.chips.pot.position.copy(SPOT.pot)
+    this.chips.heroStack.position.copy(SPOT.heroStack)
+    this.chips.atlasStack.position.copy(SPOT.atlasStack)
 
     // Dust drifting through the beam.
-    const count = this.tier === 2 ? 420 : 160
+    const count = this.tier === 2 ? 520 : 180
     this.dustBase = new Float32Array(count * 3)
     for (let i = 0; i < count; i++) {
       const a = (i * 2.399963) % (Math.PI * 2)
@@ -193,13 +305,13 @@ export class Stage {
     this.dust = new THREE.Points(
       dustGeo,
       new THREE.PointsMaterial({
-        size: 0.045,
+        size: 0.028,
         map: dotTexture(),
         transparent: true,
         opacity: 0,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
-        color: '#fff1d6',
+        color: '#ffe9c7',
       }),
     )
     this.scene.add(this.dust)
@@ -214,64 +326,168 @@ export class Stage {
 
   // ---------------------------------------------------------------- scene
 
+  /** The room behind everything: near black, faintly green at the middle. */
+  private roomTone() {
+    const c = document.createElement('canvas')
+    c.width = 256
+    c.height = 256
+    const g = c.getContext('2d')!
+    const tone = g.createRadialGradient(128, 110, 10, 128, 128, 190)
+    tone.addColorStop(0, '#0b1612')
+    tone.addColorStop(0.6, '#060c0a')
+    tone.addColorStop(1, '#020403')
+    g.fillStyle = tone
+    g.fillRect(0, 0, 256, 256)
+    const texture = new THREE.CanvasTexture(c)
+    texture.colorSpace = THREE.SRGBColorSpace
+    this.textures.set('room', texture)
+    return texture
+  }
+
   private buildTable(anisotropy: number) {
+    const add = (mesh: THREE.Mesh, cast = true) => {
+      mesh.castShadow = cast
+      mesh.receiveShadow = true
+      this.scene.add(mesh)
+      return mesh
+    }
+    // The felt: printed cloth with fibre relief and a velvet sheen.
+    const print = feltTexture(anisotropy, this.tier === 2 ? 2048 : 1024)
+    const fibre = feltNormal(anisotropy)
+    fibre.repeat.set(30, 17)
+    this.textures.set('felt', print)
+    this.textures.set('fibre', fibre)
     const felt = new THREE.Mesh(
-      new THREE.CircleGeometry(1, 96),
-      new THREE.MeshStandardMaterial({
-        map: feltTexture(anisotropy),
-        roughness: 0.95,
-        metalness: 0,
+      new THREE.CircleGeometry(1, 128),
+      new THREE.MeshPhysicalMaterial({
+        map: print,
+        roughness: 0.94,
+        normalMap: fibre,
+        normalScale: new THREE.Vector2(0.55, 0.55),
+        sheen: 0.7,
+        sheenColor: new THREE.Color('#2f7458'),
+        sheenRoughness: 0.6,
       }),
     )
     felt.rotation.x = -Math.PI / 2
-    felt.scale.set(TABLE_X, TABLE_Z, 1)
-    felt.receiveShadow = true
-    this.scene.add(felt)
+    felt.scale.set(TABLE_X + 0.03, TABLE_Z + 0.03, 1)
+    // It casts too, so nothing on the table shadows what is under it.
+    add(felt)
 
-    // The leather rail: an elliptical ring, extruded and bevelled.
-    const outer = new THREE.Shape()
-    outer.absellipse(0, 0, TABLE_X + 0.42, TABLE_Z + 0.42, 0, Math.PI * 2)
-    const hole = new THREE.Path()
-    hole.absellipse(0, 0, TABLE_X - 0.02, TABLE_Z - 0.02, 0, Math.PI * 2, true)
-    outer.holes.push(hole)
-    const rail = new THREE.Mesh(
-      new THREE.ExtrudeGeometry(outer, {
-        depth: 0.16,
-        bevelEnabled: true,
-        bevelSize: 0.1,
-        bevelThickness: 0.1,
-        bevelSegments: 6,
-        curveSegments: 96,
-      }),
-      new THREE.MeshStandardMaterial({
-        color: '#2a1d16',
-        roughness: 0.55,
-        metalness: 0.05,
-      }),
+    // The racetrack: a band of varnished mahogany around the felt.
+    const wood = woodTexture(anisotropy)
+    this.textures.set('wood', wood)
+    add(
+      new THREE.Mesh(
+        sweepGeometry(
+          TABLE_X,
+          TABLE_Z,
+          [
+            [0, -0.01],
+            [0, 0.012],
+            [0.012, 0.02],
+            [TRACK_W * 0.5, 0.026],
+            [TRACK_W - 0.012, 0.02],
+            [TRACK_W, 0.01],
+          ],
+          { repeat: 16 },
+        ),
+        new THREE.MeshPhysicalMaterial({
+          map: wood,
+          roughness: 0.4,
+          clearcoat: 1,
+          clearcoatRoughness: 0.14,
+        }),
+      ),
     )
-    rail.rotation.x = -Math.PI / 2
-    rail.position.y = -0.05
-    rail.castShadow = true
-    rail.receiveShadow = true
-    this.scene.add(rail)
 
-    // A dark plinth under the table, catching the spill of the spotlight.
+    // The rail: a padded leather cushion with two rows of stitching.
+    const hide = leatherTexture(anisotropy, [0.24, 0.62])
+    const grain = leatherNormal(anisotropy)
+    hide.repeat.set(1, 1)
+    grain.repeat.set(4, 3)
+    this.textures.set('leather', hide)
+    this.textures.set('grain', grain)
+    const railBase = TABLE_X + TRACK_W - 0.03
+    const zBase = TABLE_Z + TRACK_W - 0.03
+    add(
+      new THREE.Mesh(
+        sweepGeometry(railBase, zBase, cushionProfile(RAIL_W, RAIL_H), {
+          repeat: 30,
+          segments: 320,
+        }),
+        new THREE.MeshPhysicalMaterial({
+          map: hide,
+          roughness: 0.5,
+          normalMap: grain,
+          normalScale: new THREE.Vector2(0.7, 0.7),
+          sheen: 0.6,
+          sheenColor: new THREE.Color('#9a6446'),
+          sheenRoughness: 0.5,
+          clearcoat: 0.22,
+          clearcoatRoughness: 0.4,
+        }),
+      ),
+    )
+
+    // The apron under the rail, black lacquer, and a pedestal to the floor.
+    const lacquer = new THREE.MeshPhysicalMaterial({
+      color: '#0c0908',
+      roughness: 0.4,
+      clearcoat: 0.7,
+      clearcoatRoughness: 0.2,
+    })
+    add(
+      new THREE.Mesh(
+        sweepGeometry(
+          railBase,
+          zBase,
+          [
+            [RAIL_W * 0.95, -0.14],
+            [RAIL_W * 0.9, -0.34],
+            [RAIL_W * 0.6, -0.5],
+            [0, -0.53],
+          ],
+          { segments: 160 },
+        ),
+        lacquer,
+      ),
+    )
+    const pedestal = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.7, 1.1, 1, 48, 1, true),
+      lacquer,
+    )
+    pedestal.position.y = -1.12
+    add(pedestal)
+
+    // The floor: dark carpet, catching the spill of the spotlight.
     const floor = new THREE.Mesh(
-      new THREE.CircleGeometry(16, 64),
+      new THREE.CircleGeometry(18, 64),
       new THREE.MeshStandardMaterial({ color: '#0a0f0d', roughness: 1 }),
     )
     floor.rotation.x = -Math.PI / 2
     floor.position.y = -1.6
-    floor.receiveShadow = true
-    this.scene.add(floor)
+    add(floor, false)
 
-    // The deck, a short stack of backs.
-    for (let i = 0; i < 6; i++) {
-      const card = this.makeCard(null)
-      card.position.copy(SPOT.deck).setY(CARD_T / 2 + i * CARD_T)
-      card.rotation.set(0, 0.35, Math.PI)
-      this.scene.add(card)
+    // The deck: a squared-up stack of backs, each a hair out of line, drawn
+    // as one instanced mesh.
+    const rnd = seeded(3)
+    const deck = new THREE.InstancedMesh(
+      this.cardShape,
+      [this.cardBack, this.cardBack, this.cardEdge],
+      16,
+    )
+    const card = new THREE.Object3D()
+    for (let i = 0; i < 16; i++) {
+      card.position
+        .copy(SPOT.deck)
+        .add(new THREE.Vector3((rnd() - 0.5) * 0.008, 0, (rnd() - 0.5) * 0.008))
+        .setY(CARD_T / 2 + i * CARD_T)
+      card.rotation.set(0, 0.35 + (rnd() - 0.5) * 0.02, Math.PI)
+      card.updateMatrix()
+      deck.setMatrixAt(i, card.matrix)
     }
+    add(deck)
   }
 
   private texture(key: string) {
@@ -279,7 +495,8 @@ export class Stage {
     if (!t) {
       t = cardFace(
         key,
-        Math.min(8, this.renderer.capabilities.getMaxAnisotropy()),
+        Math.min(16, this.renderer.capabilities.getMaxAnisotropy()),
+        this.faceWidth,
       )
       this.textures.set(key, t)
     }
@@ -288,30 +505,30 @@ export class Stage {
 
   /** A card lying face up (rotation.z = 0) or down (π); `null` is a back. */
   private makeCard(face: string | null): CardMesh {
-    const edge = new THREE.MeshStandardMaterial({
-      color: '#f2efe4',
-      roughness: 0.6,
-    })
-    const front = new THREE.MeshStandardMaterial({
-      map: face ? this.texture(face) : this.back,
-      roughness: 0.42,
-      metalness: 0,
-    })
-    const back = new THREE.MeshStandardMaterial({
-      map: this.back,
-      roughness: 0.5,
-    })
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(CARD_W, CARD_T, CARD_H), [
-      edge,
-      edge,
+    const front = face
+      ? new THREE.MeshPhysicalMaterial({
+          map: this.texture(face),
+          roughness: 0.34,
+          clearcoat: 0.55,
+          clearcoatRoughness: 0.24,
+          normalMap: this.linen,
+          normalScale: new THREE.Vector2(0.14, 0.14),
+        })
+      : this.cardBack
+    const mesh = new THREE.Mesh(this.cardShape, [
       front,
-      back,
-      edge,
-      edge,
+      this.cardBack,
+      this.cardEdge,
     ])
     mesh.castShadow = true
     mesh.receiveShadow = true
     return mesh
+  }
+
+  private removeCard(card: CardMesh) {
+    this.scene.remove(card)
+    const front = card.material[0]
+    if (front !== this.cardBack) front.dispose()
   }
 
   // ---------------------------------------------------------------- hand
@@ -325,7 +542,7 @@ export class Stage {
     const now = this.now()
     if (game.id !== this.hand) {
       this.hand = game.id
-      for (const card of this.cards.values()) this.scene.remove(card)
+      for (const card of this.cards.values()) this.removeCard(card)
       this.cards.clear()
       this.shown = { board: 0, atlasUp: false }
       let delay = 0
@@ -377,7 +594,9 @@ export class Stage {
         if (card) this.flip(card, now, 900 + i * 120)
       }
     }
-    // Chips: what each player has in front of them, and the middle.
+    // Chips: each player's stack, what they have in front of them, the middle.
+    this.setStack('heroStack', game.stacks[0])
+    this.setStack('atlasStack', game.stacks[1])
     const potMiddle = game.pot - game.bets[0] - game.bets[1]
     this.setChips('heroBet', game.result ? 0 : game.bets[0], SPOT.heroStack)
     this.setChips('atlasBet', game.result ? 0 : game.bets[1], SPOT.atlasStack)
@@ -415,12 +634,17 @@ export class Stage {
         card.position.lerpVectors(from, to, p)
         card.position.y = CARD_T / 2 + Math.sin(p * Math.PI) * 0.55
         card.rotation.y = lerp(0.35, yaw, p)
+        // A slight bank in flight, as a card skimmed across a table has.
+        card.rotation.x = Math.sin(p * Math.PI) * -0.18
         if (faceUp) card.rotation.z = lerp(Math.PI, 0, easeInOutCubic(p))
       },
       {
         delay,
         ease: easeOutCubic,
-        done: () => card.position.setY(CARD_T / 2),
+        done: () => {
+          card.position.setY(CARD_T / 2)
+          card.rotation.x = 0
+        },
       },
     )
   }
@@ -437,30 +661,90 @@ export class Stage {
     )
   }
 
-  private chipGeometry = new THREE.CylinderGeometry(CHIP_R, CHIP_R, CHIP_H, 28)
-  private chipMaterials = new Map<string, THREE.Material[]>()
+  private chipShape = chipGeometry(CHIP_R, CHIP_H, 0.008)
+  private chipMaterials = new Map<number, THREE.Material[]>()
 
-  private chipMaterial(color: string, stripe: string) {
-    let m = this.chipMaterials.get(color)
+  /** A denomination's side and face materials, made once. */
+  private chipMaterial(d: Denomination) {
+    let m = this.chipMaterials.get(d.value)
     if (!m) {
-      const side = new THREE.MeshStandardMaterial({
-        color: stripe,
-        roughness: 0.5,
-      })
-      const face = new THREE.MeshStandardMaterial({
-        color,
-        roughness: 0.38,
-        metalness: 0.05,
-      })
-      m = [side, face, face]
-      this.chipMaterials.set(color, m)
+      const anisotropy = Math.min(
+        8,
+        this.renderer.capabilities.getMaxAnisotropy(),
+      )
+      const edge = chipEdge(d, anisotropy)
+      const face = chipFace(d, anisotropy)
+      this.textures.set(`chip-edge-${d.value}`, edge)
+      this.textures.set(`chip-face-${d.value}`, face)
+      m = [
+        new THREE.MeshPhysicalMaterial({
+          map: edge,
+          roughness: 0.55,
+          clearcoat: 0.2,
+          clearcoatRoughness: 0.5,
+        }),
+        new THREE.MeshPhysicalMaterial({
+          map: face,
+          roughness: 0.42,
+          clearcoat: 0.45,
+          clearcoatRoughness: 0.28,
+        }),
+      ]
+      this.chipMaterials.set(d.value, m)
     }
     return m
   }
 
+  /**
+   * Replaces `group`'s chips with `placed`: one instanced mesh for each
+   * denomination (a few draw calls, not one per chip), each chip a little
+   * out of true.
+   */
+  private fillChips(group: THREE.Group, placed: Placed[]) {
+    this.emptyChips(group)
+    const byValue = new Map<number, Placed[]>()
+    for (const chip of placed)
+      byValue.set(chip.d.value, [...(byValue.get(chip.d.value) ?? []), chip])
+    const matrix = new THREE.Matrix4()
+    const turn = new THREE.Quaternion()
+    const tilt = new THREE.Euler()
+    const at = new THREE.Vector3()
+    const one = new THREE.Vector3(1, 1, 1)
+    for (const chips of byValue.values()) {
+      const mesh = new THREE.InstancedMesh(
+        this.chipShape,
+        this.chipMaterial(chips[0].d),
+        chips.length,
+      )
+      chips.forEach((chip, i) => {
+        const rnd = seeded(chip.seed)
+        at.set(
+          chip.x + (rnd() - 0.5) * 0.012,
+          chip.y,
+          chip.z + (rnd() - 0.5) * 0.012,
+        )
+        tilt.set(
+          (rnd() - 0.5) * 0.02,
+          rnd() * Math.PI * 2,
+          (rnd() - 0.5) * 0.02,
+        )
+        mesh.setMatrixAt(i, matrix.compose(at, turn.setFromEuler(tilt), one))
+      })
+      mesh.castShadow = true
+      mesh.receiveShadow = true
+      group.add(mesh)
+    }
+  }
+
+  private emptyChips(group: THREE.Group) {
+    for (const child of group.children)
+      if (child instanceof THREE.InstancedMesh) child.dispose()
+    group.clear()
+  }
+
   /** Redraws one chip group for `amount`, sliding new chips in from `from`. */
   private setChips(
-    which: keyof Stage['chips'],
+    which: 'heroBet' | 'atlasBet' | 'pot',
     amount: number,
     from: THREE.Vector3,
   ) {
@@ -468,28 +752,19 @@ export class Stage {
     const grew = amount > this.chipValues[which]
     this.chipValues[which] = amount
     const group = this.chips[which]
-    group.clear()
     const { stacks } = chipStacks(amount, { maxPerStack: 10, maxStacks: 4 })
-    stacks.forEach((stack, s) => {
-      for (let i = 0; i < stack.count; i++) {
-        const chip = new THREE.Mesh(
-          this.chipGeometry,
-          this.chipMaterial(
-            stack.denomination.color,
-            stack.denomination.stripe,
-          ),
-        )
-        chip.position.set(
-          (s - (stacks.length - 1) / 2) * CHIP_R * 2.15,
-          CHIP_H / 2 + i * CHIP_H,
-          (s % 2) * 0.05,
-        )
-        chip.rotation.y = i * 0.7
-        chip.castShadow = true
-        chip.receiveShadow = true
-        group.add(chip)
-      }
-    })
+    this.fillChips(
+      group,
+      stacks.flatMap((stack, s) =>
+        Array.from({ length: stack.count }, (_, i) => ({
+          d: stack.denomination,
+          x: (s - (stacks.length - 1) / 2) * CHIP_R * 2.15,
+          y: CHIP_H / 2 + i * CHIP_H,
+          z: (s % 2) * 0.05,
+          seed: amount * 31 + s * 17 + i,
+        })),
+      ),
+    )
     if (!grew || this.options.reducedMotion) return
     const home = group.position.clone()
     const start = from.clone().sub(home)
@@ -502,6 +777,39 @@ export class Stage {
         group.position.y = Math.sin(p * Math.PI) * 0.25
       },
       { ease: easeOutCubic, done: () => group.position.copy(home) },
+    )
+  }
+
+  /**
+   * A player's stack behind the line: columns of each denomination in two
+   * rows, the tallest at the back, as a player squares them.
+   */
+  private setStack(which: 'heroStack' | 'atlasStack', amount: number) {
+    if (this.chipValues[which] === amount) return
+    this.chipValues[which] = amount
+    const columns: { d: Denomination; count: number }[] = []
+    let rest = Math.max(0, Math.round(amount))
+    for (const d of DENOMINATIONS) {
+      let count = Math.floor(rest / d.value)
+      rest -= count * d.value
+      while (count > 0 && columns.length < 6) {
+        columns.push({ d, count: Math.min(count, 14) })
+        count -= 14
+      }
+    }
+    const away = which === 'atlasStack' ? -1 : 1
+    const across = Math.ceil(columns.length / 2)
+    this.fillChips(
+      this.chips[which],
+      columns.flatMap(({ d, count }, c) =>
+        Array.from({ length: count }, (_, i) => ({
+          d,
+          x: (Math.floor(c / 2) - (across - 1) / 2) * CHIP_R * 2.12,
+          y: CHIP_H / 2 + i * CHIP_H,
+          z: (c % 2 ? 0.5 : -0.5) * CHIP_R * 2.05 * away,
+          seed: c * 101 + i * 7 + d.value,
+        })),
+      ),
     )
   }
 
@@ -520,7 +828,7 @@ export class Stage {
         delay,
         ease: easeInOutCubic,
         done: () => {
-          group.clear()
+          this.emptyChips(group)
           group.position.copy(home)
           this.chipValues.pot = 0
         },
@@ -554,8 +862,8 @@ export class Stage {
     const now = this.now()
     const dust = this.dust.material as THREE.PointsMaterial
     this.tweens.add(now, 1400, (p) => {
-      this.spot.intensity = lerp(0, 46, p)
-      dust.opacity = lerp(0, 0.55, p)
+      this.spot.intensity = lerp(0, SPOT_ON, p)
+      dust.opacity = lerp(0, 0.45, p)
     })
     this.moveCamera('seat', 2400, { delay: 250 })
   }
@@ -584,19 +892,20 @@ export class Stage {
           transparent: true,
           opacity: 0,
           side: THREE.DoubleSide,
+          toneMapped: false,
         }),
       )
       const glow = new THREE.Sprite(
         new THREE.SpriteMaterial({
           map: glowTex,
-          color: tint,
+          color: new THREE.Color(tint).multiplyScalar(1.6),
           transparent: true,
           opacity: 0,
           blending: THREE.AdditiveBlending,
           depthWrite: false,
         }),
       )
-      glow.scale.set(0.6, 0.46, 1)
+      glow.scale.set(0.62, 0.48, 1)
       glow.position.z = -0.02
       card.add(glow)
       // An arc of cards, rows bowed toward the camera.
@@ -654,7 +963,7 @@ export class Stage {
     this.cloud.traverse((o) => {
       if (o instanceof THREE.Mesh || o instanceof THREE.Sprite) {
         const m = o.material as THREE.MeshBasicMaterial
-        if (m.map && m.map !== this.back) m.map.dispose()
+        if (m.map) m.map.dispose()
         m.dispose()
       }
     })
@@ -664,7 +973,7 @@ export class Stage {
   /** A short beat: the light warms green or cools red, then settles. */
   stamp(good: boolean, onDone: () => void) {
     const now = this.now()
-    const base = new THREE.Color('#fff3dc')
+    const base = new THREE.Color('#fff1d8')
     const tint = new THREE.Color(good ? '#b8f5cf' : '#ffb3a8')
     this.tweens.add(
       now,
@@ -672,7 +981,7 @@ export class Stage {
       (p) => {
         const k = Math.sin(p * Math.PI)
         this.spot.color.copy(base).lerp(tint, k)
-        this.spot.intensity = 46 + k * 18
+        this.spot.intensity = SPOT_ON + k * 18
       },
       { beat: true, ease: linear, done: onDone },
     )
@@ -680,21 +989,22 @@ export class Stage {
 
   /**
    * Last decision: time slows, the camera pushes in on the pot, the hero's
-   * equity and the price rise out of the felt as two bars, and the light
-   * turns with the grade.
+   * equity and the price rise out of the felt as two glowing columns, and
+   * the light turns with the grade.
    */
   verdict(equity: number, price: number, good: boolean, onDone: () => void) {
     const now = this.now()
     this.clearBars()
     const make = (color: string, x: number) => {
       const bar = new THREE.Mesh(
-        new THREE.BoxGeometry(0.22, 1, 0.22),
+        new THREE.CylinderGeometry(0.1, 0.1, 1, 40),
         new THREE.MeshStandardMaterial({
           color,
           emissive: color,
-          emissiveIntensity: 1.6,
+          emissiveIntensity: 2.2,
+          roughness: 0.2,
           transparent: true,
-          opacity: 0.92,
+          opacity: 0.9,
         }),
       )
       bar.position.set(x, 0, 0.78)
@@ -840,21 +1150,33 @@ export class Stage {
         this.dustBase[i + 2] + Math.cos(t * 0.11 + phase) * 0.2 * drift
     }
     positions.needsUpdate = true
-    this.renderer.render(this.scene, this.camera)
+    // The shaft follows the lamp: its brightness and its colour.
+    this.beam.uniforms.time.value = t * drift
+    this.beam.uniforms.intensity.value = (this.spot.intensity / SPOT_ON) * 0.05
+    ;(this.beam.uniforms.color.value as THREE.Color).copy(this.spot.color)
+    if (this.lens) this.lens.render(t)
+    else this.renderer.render(this.scene, this.camera)
     this.measure(time)
     this.emitAnchors()
   }
 
-  /** Steps quality down while the first frames come in slow. */
+  /**
+   * Steps quality down while frames come in slow: a first look after 30
+   * frames (a very slow device goes straight to the lowest tier), then every
+   * 90. A pinned tier (?stagequality) stays put.
+   */
   private measure(time: number) {
     if (this.lastFrame) this.frameTimes.push(time - this.lastFrame)
     this.lastFrame = time
-    if (this.frameTimes.length < 90) return
+    if (this.pinned || this.frameTimes.length < (this.measured ? 90 : 30))
+      return
+    this.measured = true
     const sorted = [...this.frameTimes].sort((a, b) => a - b)
-    const median = sorted[Math.floor(sorted.length / 2)]
+    // In wall-clock milliseconds, whatever ?stageslow does to the clock.
+    const median = sorted[Math.floor(sorted.length / 2)] / this.scale
     this.frameTimes = []
-    if (median > 22 && this.tier > 0) {
-      this.tier = (this.tier - 1) as Tier
+    if (this.tier > 0 && median > 22) {
+      this.tier = median > 45 ? 0 : ((this.tier - 1) as Tier)
       this.applyTier()
       this.resize()
     }
@@ -865,25 +1187,37 @@ export class Stage {
   }
 
   private applyTier() {
-    const shadows = this.tier === 2
+    const shadows = this.tier > 0
     this.renderer.shadowMap.enabled = shadows
     this.spot.castShadow = shadows
     const dpr = Math.min(window.devicePixelRatio || 1, 2)
     this.renderer.setPixelRatio(
       this.tier === 2 ? dpr : this.tier === 1 ? Math.min(dpr, 1.5) : 1,
     )
+    // The lens (bloom, grade) from tier 1; multisampled so edges stay clean.
+    this.lens?.dispose()
+    this.lens =
+      this.tier > 0
+        ? new Lens(this.renderer, this.scene, this.camera, {
+            samples: this.tier === 2 ? 4 : 2,
+            bloom: this.tier === 2 ? 0.55 : 0.4,
+          })
+        : null
     this.scene.traverse((o) => {
       if (o instanceof THREE.Mesh)
         for (const m of [o.material].flat())
           (m as THREE.Material).needsUpdate = true
     })
     this.dust.visible = this.tier > 0
+    this.backdrop.visible = this.tier > 0
+    this.canvas.dataset.quality = String(this.tier)
   }
 
   resize() {
     const { clientWidth: w, clientHeight: h } = this.canvas
     if (!w || !h) return
     this.renderer.setSize(w, h, false)
+    this.lens?.setSize(w, h, this.renderer.getPixelRatio())
     this.camera.aspect = w / h
     // Narrow screens pull back so the whole table fits. Wide ones slide the
     // picture right, leaving the left for the headline.
@@ -920,8 +1254,8 @@ export class Stage {
         ? project(bar.position.clone().setY(bar.scale.y + 0.12))
         : project(fallback)
     this.anchorListener({
-      atlas: project(SPOT.atlasStack.clone().setY(0.45)),
-      hero: project(SPOT.heroStack.clone().setY(0.2)),
+      atlas: project(SPOT.atlasStack.clone().setY(0.6)),
+      hero: project(SPOT.heroStack.clone().setY(0.5)),
       pot: project(new THREE.Vector3(SPOT.pot.x + 0.75, 0.05, SPOT.pot.z)),
       equityBar: top(this.bars?.equity, new THREE.Vector3(-0.36, 0, 0.78)),
       priceBar: top(this.bars?.price, new THREE.Vector3(0.36, 0, 0.78)),
@@ -944,8 +1278,14 @@ export class Stage {
         o.geometry.dispose()
         for (const m of [o.material].flat()) (m as THREE.Material).dispose()
       }
+      if (o instanceof THREE.Sprite) o.material.dispose()
     })
+    this.cardShape.dispose()
+    this.chipShape.dispose()
+    for (const m of this.chipMaterials.values()) for (const x of m) x.dispose()
     for (const t of this.textures.values()) t.dispose()
+    this.lens?.dispose()
+    this.environment.dispose()
     this.renderer.dispose()
   }
 }

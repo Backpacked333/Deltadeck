@@ -1,3 +1,4 @@
+import { takeAuthReturn } from '../lib/authReturn'
 // The landing page in the real app (L-1 to L-6): who sees it, a full
 // challenge hand against the pre-scored tree, the score card with the
 // server's percentile (or without it), and the hand-off to sign-up.
@@ -125,13 +126,14 @@ describe('who sees the landing page', () => {
 
   it('the logo goes home to the landing page, at the bare URL', async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ onboarded: true }))
+    seedSession()
     window.history.replaceState(null, '', '/#table')
     const user = userEvent.setup()
     render(<App />)
     expect(
       await screen.findByRole('region', { name: 'Poker table' }),
     ).toBeVisible()
-    const home = screen.getByRole('link', { name: 'QuantPoker home' })
+    const home = screen.getByRole('link', { name: 'DeltaDeck home' })
     expect(home).toHaveAttribute('href', '/')
     await user.click(home)
     expect(
@@ -235,7 +237,34 @@ describe('the challenge', () => {
       await within(card).findByText(/Percentile unavailable/),
     ).toBeVisible()
     expect(localStorage.getItem(PENDING_CLAIM_KEY)).toBeNull()
-    await user.click(screen.getByRole('button', { name: /Play another hand/ }))
+    // One hand is free; the next one is an account away.
+    expect(
+      screen.queryByRole('button', { name: /Play another hand/ }),
+    ).toBeNull()
+    await user.click(
+      screen.getByRole('button', {
+        name: /Create a free account to keep playing/,
+      }),
+    )
+    expect(window.location.hash).toBe('#signup')
+    // Signing in instead still claims the score, in onboarding.
+    expect(takeAuthReturn()).toBe('#welcome/onboard')
+  }, 30_000)
+
+  it('deals a signed-in visitor another hand', async () => {
+    seedSession()
+    localStorage.setItem('qp.vid', visitorFor('nut-draw'))
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findByText('The nut flush draw')
+    await playByCalling(user)
+    await user.click(
+      await screen.findByRole(
+        'button',
+        { name: /Play another hand/ },
+        { timeout: 10_000 },
+      ),
+    )
     expect(
       await screen.findByRole('group', { name: /Your decision/ }),
     ).toBeVisible()
@@ -285,10 +314,10 @@ describe("a friend's challenge link", () => {
 })
 
 describe('what the page explains, and the way to an account', () => {
-  it('says how QuantPoker works and what an account gives you', async () => {
+  it('says how DeltaDeck works and what an account gives you', async () => {
     render(<App />)
     expect(
-      await screen.findByRole('heading', { name: 'How QuantPoker works' }),
+      await screen.findByRole('heading', { name: 'How DeltaDeck works' }),
     ).toBeVisible()
     for (const step of [
       'Play a hand',
@@ -310,10 +339,9 @@ describe('what the page explains, and the way to an account', () => {
     await screen.findByRole('heading', { name: 'Your free account' })
     const header = screen.getByRole('link', { name: /Create free account/ })
     expect(header).toHaveAttribute('href', '#signup')
-    expect(screen.getByRole('link', { name: 'Sign in' })).toHaveAttribute(
-      'href',
-      '#signin',
-    )
+    const signIns = screen.getAllByRole('link', { name: 'Sign in' })
+    expect(signIns.length).toBeGreaterThanOrEqual(2)
+    for (const link of signIns) expect(link).toHaveAttribute('href', '#signin')
     const buttons = screen.getAllByRole('button', {
       name: /Create free account/,
     })

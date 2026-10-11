@@ -15,7 +15,7 @@ export const SHARE_PATH = /^\/c\/([0-9a-f]{32})\/?$/
 export const CHALLENGE_IMAGE = '/og-challenge.png'
 
 const GENERIC: Omit<Preview, 'status'> = {
-  title: 'Most people misprice this hand. Do you? · QuantPoker',
+  title: 'Most people misprice this hand. Do you? · DeltaDeck',
   description:
     'One hand of heads-up poker against Atlas, every decision graded like a chess move. No account needed.',
   type: 'website',
@@ -36,7 +36,7 @@ export function describeShared(shared: SharedScore) {
       ? `, ${shared.percentile}${ordinal(shared.percentile)} percentile`
       : ''
   return {
-    title: `Beat ${shared.accuracy}/100 on “${title}” · QuantPoker`,
+    title: `Beat ${shared.accuracy}/100 on “${title}” · DeltaDeck`,
     description: `Someone scored ${shared.accuracy}/100${rank} on this hand. One hand against Atlas, every decision graded. Your turn.`,
   }
 }

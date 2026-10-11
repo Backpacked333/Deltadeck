@@ -253,7 +253,7 @@ export function Table({
             />
           )}
           <span className="felt-mark">
-            <Spade size={12} fill="currentColor" /> QUANTPOKER
+            <Spade size={12} fill="currentColor" /> DELTADECK
           </span>
           <span className="felt-motto">THINK IN PROBABILITIES</span>
         </div>

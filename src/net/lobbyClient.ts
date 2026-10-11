@@ -34,7 +34,8 @@ export type LobbyState = {
   tables: TableRow[] | null
 }
 
-const LIMITED = 'Too many messages, reconnecting…'
+/** The error while reconnecting after the lobby closed a flood. */
+export const LIMITED = 'Too many messages, reconnecting…'
 
 export const INITIAL_LOBBY: LobbyState = {
   status: 'connecting',

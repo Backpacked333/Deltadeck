@@ -1,6 +1,11 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest'
-import { ACK_P95_LIMIT_MS, percentile, verdict } from './smoke-stats.ts'
+import {
+  ACK_P95_LIMIT_MS,
+  percentile,
+  SIX_ACK_P95_LIMIT_MS,
+  verdict,
+} from './smoke-stats.ts'
 import type { SmokeResult } from './smoke-stats.ts'
 
 const ok: SmokeResult = {
@@ -35,6 +40,15 @@ describe('smoke stats', () => {
     expect(
       verdict({ ...ok, acks: [...Array(94).fill(10), ...Array(6).fill(300)] }),
     ).toEqual([])
+  })
+
+  it(`holds a six-seat run to ${SIX_ACK_P95_LIMIT_MS} ms at p95 (P2-11)`, () => {
+    expect(SIX_ACK_P95_LIMIT_MS).toBe(150)
+    const at = (ms: number) => [...Array(94).fill(10), ...Array(6).fill(ms)]
+    expect(verdict({ ...ok, acks: at(151) }, SIX_ACK_P95_LIMIT_MS)).toEqual([
+      'ack p95 151 ms is over 150 ms',
+    ])
+    expect(verdict({ ...ok, acks: at(150) }, SIX_ACK_P95_LIMIT_MS)).toEqual([])
   })
 
   it('fails on any broken invariant, leak, unverified commitment or missing hand', () => {

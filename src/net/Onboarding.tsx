@@ -7,7 +7,15 @@
 //   3. First move: a rated match, the challenge again, or the curriculum.
 import { useEffect, useState } from 'react'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { BookOpen, Check, GraduationCap, RotateCcw, Swords } from 'lucide-react'
+import {
+  BookOpen,
+  Check,
+  GraduationCap,
+  RotateCcw,
+  Spade,
+  Swords,
+} from 'lucide-react'
+import { takeAuthReturn } from '../lib/authReturn'
 import { track } from '../lib/track'
 import type { Identity } from './api'
 import { claimPendingScore } from './claim'
@@ -127,6 +135,16 @@ export function Onboarding({
             <span>
               Forty hands against a real player near your level. Needs a
               confirmed email.
+            </span>
+          </button>
+          <button
+            className="onboard-move"
+            onClick={() => move('practice', takeAuthReturn() ?? '#table')}
+          >
+            <Spade size={18} />
+            <strong>Practice against Atlas</strong>
+            <span>
+              Shuffled hands, every decision graded, your history saved.
             </span>
           </button>
           <button

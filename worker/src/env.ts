@@ -3,7 +3,7 @@
 // production, and turns on `dev.<userId>.<secret>` tokens.
 // SUPABASE_SECRET_KEY is a Worker secret (`wrangler secret put`); without it
 // nothing is archived, which is how local development runs.
-// RESEND_API_KEY (a secret) and SCHOOL_EMAIL_FROM (e.g. "QuantPoker
+// RESEND_API_KEY (a secret) and SCHOOL_EMAIL_FROM (e.g. "DeltaDeck
 // <verify@example.com>", a sender on a domain verified at Resend) turn on
 // school codes by email (worker/src/school.ts); without them that route
 // answers 503 and nothing else changes.
