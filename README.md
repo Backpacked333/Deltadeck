@@ -15,7 +15,7 @@ npm ci
 npm run dev          # http://localhost:5173
 ```
 
-No API keys, database, account or environment variables are needed for the trainer. Online play is optional: `.env.example` lists the two browser-safe values that turn on sign-in.
+The practice table, the lessons and Progress need a signed-in account; the landing page, its first challenge hand, the ladder, profiles and match reviews do not. `.env.example` lists the two browser-safe values that point a local build at a Supabase project for sign-in. Without them, practise locally as a development identity: in the browser console run `sessionStorage.setItem('qp.devToken', 'dev.me.local')` and reload (nothing is saved to an account then).
 
 ### The landing page
 

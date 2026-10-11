@@ -180,11 +180,23 @@ export default function Landing({ signedIn = false }: { signedIn?: boolean }) {
             </p>
           )}
           <p className="landing-links-row">
+            {signedIn ? (
+              <>
+                <a className="btn btn-accent" href="#table">
+                  Open your table <ArrowRight size={14} />
+                </a>
+                <a href="#lobby">Play online</a>
+              </>
+            ) : (
+              <>
+                <button className="btn btn-accent" onClick={createAccount}>
+                  Create free account <ArrowRight size={14} />
+                </button>
+                <a href="#signin">Sign in</a>
+              </>
+            )}
             <a href="#how" onClick={toHow}>
               How it works
-            </a>
-            <a href="#table">
-              Skip to free practice <ArrowRight size={14} />
             </a>
           </p>
         </div>
@@ -199,7 +211,12 @@ export default function Landing({ signedIn = false }: { signedIn?: boolean }) {
               rival={against}
               signedIn={signedIn}
               onSave={signedIn ? saveScore : signUpToSave}
-              onAgain={again}
+              onAgain={signedIn ? again : signUpToSave}
+              againLabel={
+                signedIn
+                  ? 'Play another hand'
+                  : 'Create a free account to keep playing'
+              }
             />
           ) : (
             <ChallengeHand
@@ -471,7 +488,8 @@ function YourAccount({
       <Reveal as="div" className="landing-account-head">
         <h2 id="account-title">Your free account</h2>
         <p>
-          Playing a hand needs nothing. An account is where it starts to count.
+          Your first hand needs nothing. An account is where it starts to count,
+          and what you play with after it.
         </p>
         <ul className="landing-account-facts">
           <li>

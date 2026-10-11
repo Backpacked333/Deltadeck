@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { FLY_MS } from '../src/net/SixFlights'
+import { signedInVisitor } from './helpers'
 import { devSignIn, fakeSixTable, SIX_TABLE } from './sixTable'
 
 /** Records the gap before every requestAnimationFrame from now on. */
@@ -94,6 +95,7 @@ async function watchFlights(page: Page) {
 // Samples requestAnimationFrame through the heaviest choreography, an all-in
 // runout with card reveals, equity bars and chip flights.
 test('the all-in runout animates without long frames', async ({ page }) => {
+  await signedInVisitor(page)
   await page.addInitScript(() =>
     localStorage.setItem(
       'quantpoker.progress.v2',

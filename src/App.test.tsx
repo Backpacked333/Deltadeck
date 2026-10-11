@@ -17,7 +17,7 @@ import * as atlas from './lib/atlas'
 import { analyzeSpot, quickOutcome } from './lib/range'
 import type { SpotRequest } from './lib/range'
 import { lcg } from './lib/sim'
-import { seedSession } from './test/session'
+import { seedSession, TEST_SESSION_KEY } from './test/session'
 
 // Online play is configured per deployment; tests never reach the network.
 vi.mock('./net/supabase', () => ({ loadOnline: async () => null }))
@@ -62,6 +62,8 @@ beforeAll(() =>
 )
 beforeEach(() => {
   vi.stubGlobal('Worker', AnalysisWorker)
+  // Practice, lessons and progress are for signed-in players.
+  seedSession()
   onboarded()
   // The bare URL is the landing page; these tests start at the trainer.
   window.history.replaceState(null, '', '/#table')
@@ -311,13 +313,13 @@ describe('online play', () => {
     await user.click(screen.getByRole('button', { name: 'Online' }))
     expect(window.location.hash).toBe('#lobby')
     expect(
-      await screen.findByText('Online play is not set up on this site yet.'),
+      await screen.findByText('Accounts are not set up on this site yet.'),
     ).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Online' })).toHaveAttribute(
       'aria-current',
       'page',
     )
-    await user.click(screen.getByRole('link', { name: 'Practice vs Atlas' }))
+    await user.click(screen.getByRole('button', { name: 'Play' }))
     expect(
       (await screen.findByRole('region', { name: 'Poker table' })).textContent,
     ).toBe(hand)
@@ -342,8 +344,10 @@ const appHeader = () => document.querySelector<HTMLElement>('header.header')!
 
 describe('the header', () => {
   it('offers Sign in and Create free account on every page when signed out', async () => {
+    localStorage.removeItem(TEST_SESSION_KEY)
+    localStorage.removeItem('qp.username')
     render(<App />)
-    for (const hash of ['#table', '#progress', '#learn/path']) {
+    for (const hash of ['#ladder', '#fair-play', '#method', '#start']) {
       navigate(hash)
       const header = appHeader()
       expect(
@@ -391,5 +395,85 @@ describe('the header', () => {
     await user.click(screen.getByRole('button', { name: /^Account/ }))
     expect(screen.queryByRole('link', { name: 'Your profile' })).toBeNull()
     expect(screen.getByRole('link', { name: 'Sign out' })).toBeVisible()
+  })
+})
+
+describe('the account gate', () => {
+  const signedOut = () => {
+    localStorage.removeItem(TEST_SESSION_KEY)
+    localStorage.removeItem('qp.username')
+  }
+
+  it('sends a signed-out visitor from practice, lessons or progress to sign up, and remembers the way back', async () => {
+    signedOut()
+    for (const hash of ['#table', '#progress', '#learn/path', '#learn/quick']) {
+      window.history.replaceState(null, '', `/?seed=3${hash}`)
+      const length = window.history.length
+      const { unmount } = render(<App />)
+      expect(
+        await screen.findByRole('heading', {
+          level: 1,
+          name: 'Join QuantPoker',
+        }),
+      ).toBeVisible()
+      expect(window.location.hash).toBe('#signup')
+      expect(window.location.search).toBe('?seed=3')
+      // Replaced, not pushed: Back leaves for the page before.
+      expect(window.history.length).toBe(length)
+      expect(sessionStorage.getItem('qp.afterAuth')).toBe(hash)
+      expect(screen.queryByRole('region', { name: 'Poker table' })).toBeNull()
+      unmount()
+    }
+  })
+
+  it('offers sign-in instead on a browser that has had an account', async () => {
+    signedOut()
+    localStorage.setItem('qp.hadAccount', '1')
+    render(<App />)
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Welcome back' }),
+    ).toBeVisible()
+    expect(window.location.hash).toBe('#signin')
+  })
+
+  it('keeps the public pages open', async () => {
+    signedOut()
+    for (const hash of [
+      '#start',
+      '#ladder',
+      '#fair-play',
+      '#terms',
+      '#method',
+    ]) {
+      window.history.replaceState(null, '', `/${hash}`)
+      const { unmount } = render(<App />)
+      await act(async () => {})
+      expect(window.location.hash, hash).toBe(hash)
+      unmount()
+    }
+  })
+
+  it('does not take a malformed stored session for an account', async () => {
+    signedOut()
+    localStorage.setItem('sb-abc-auth-token', '{}')
+    render(<App />)
+    await screen.findByRole('heading', { level: 1, name: 'Join QuantPoker' })
+    expect(window.location.hash).toBe('#signup')
+  })
+
+  it('asks a new account to choose its name before it plays', async () => {
+    seedSession({ username: 'player_0123456789ab' })
+    render(<App />)
+    await act(async () => {})
+    expect(window.location.hash).toBe('#welcome/onboard')
+    expect(sessionStorage.getItem('qp.afterAuth')).toBe('#table')
+  })
+
+  it('lets a signed-in player play', async () => {
+    render(<App />)
+    expect(
+      await screen.findByRole('region', { name: 'Poker table' }),
+    ).toBeVisible()
+    expect(window.location.hash).toBe('#table')
   })
 })

@@ -92,4 +92,11 @@ describe('replaceRoute', () => {
     expect(window.history.length).toBe(length)
     expect(heard).toHaveBeenCalledTimes(1)
   })
+
+  it("keeps the page's own options, like the seed", () => {
+    at('/?seed=3&code=abc&state=x#signin')
+    replaceRoute('#table')
+    expect(window.location.search).toBe('?seed=3')
+    expect(window.location.hash).toBe('#table')
+  })
 })

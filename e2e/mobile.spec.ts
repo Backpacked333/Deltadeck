@@ -83,7 +83,7 @@ test('the online lobby fits a phone without horizontal scroll', async ({
   await onboard(page)
   await page.getByRole('button', { name: 'Online', exact: true }).click()
   await expect(
-    page.getByText('Online play is not set up on this site yet.'),
+    page.getByText('Accounts are not set up on this site yet.'),
   ).toBeVisible()
   await expectNoOverflow(page)
 })
