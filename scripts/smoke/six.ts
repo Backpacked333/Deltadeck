@@ -351,6 +351,8 @@ export class SixRun {
       seat?.stack !== undefined &&
       seat.stack < 40 * this.bb &&
       !p.rebuying &&
+      // Standing up: the seat may already be gone.
+      p.away === null &&
       (view.result || view.street === 'showdown')
     ) {
       this.events.rebuys++
