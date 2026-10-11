@@ -28,8 +28,7 @@ import {
   REPORT_MS,
 } from '../src/registry'
 import type { TableEntry, TableReport } from '../src/registry'
-import { NEXT_HAND_MS } from '../src/table'
-import type { TableDO } from '../src/table'
+import { NEXT_HAND_MS, TableDO } from '../src/table'
 import { checkLobbyFrame } from './frames'
 import {
   connect,
@@ -64,13 +63,90 @@ function watchReports() {
 
 /**
  * Waits for every registry call the table has made to land: they are sent
- * without the table waiting on them, one after another.
+ * without the table waiting on them, one after another. Until none is
+ * added while it waits, so a call made once an earlier one lands (as a
+ * report sent after the removal would be) is waited for too.
  */
 const settled = (matchId: string) =>
   runInDurableObject(stub(matchId), async (instance: TableDO) => {
-    await (instance as unknown as { listingCalls?: Promise<unknown> })
-      .listingCalls
+    const table = instance as unknown as { listingCalls?: Promise<unknown> }
+    for (let last; last !== table.listingCalls; ) {
+      last = table.listingCalls
+      await last
+    }
   })
+
+/**
+ * A slow lobby, as the table sees it: every report the table sends waits
+ * until the test lets them all go (`letGo`), then goes through. `seen`
+ * counts the reports sent, and records, for each removal the table sends,
+ * how many of its reports had not landed yet.
+ */
+async function slowLobby(matchId: string) {
+  let letGo: () => void = () => {}
+  // Made here, not in the table: a promise the table made could not be
+  // resolved from the test (workerd's per-object I/O rule).
+  const held = new Promise<void>((resolve) => (letGo = resolve))
+  const seen = { reports: 0, inFlight: 0, inFlightAtRemoval: [] as number[] }
+  await runInDurableObject(stub(matchId), (instance: TableDO) => {
+    const real = env.LOBBY
+    const lobbyOf = (id: DurableObjectId) => {
+      const lobby = real.get(id, { locationHint: 'enam' })
+      return {
+        claim: (userId: string, table: string) => lobby.claim(userId, table),
+        release: (userIds: string[], table: string) =>
+          lobby.release(userIds, table),
+        reportTable: async (tableId: string, report: TableReport) => {
+          seen.reports++
+          seen.inFlight++
+          try {
+            await held
+            return await lobby.reportTable(tableId, report)
+          } finally {
+            seen.inFlight--
+          }
+        },
+        removeTable: (tableId: string) => {
+          seen.inFlightAtRemoval.push(seen.inFlight)
+          return lobby.removeTable(tableId)
+        },
+      }
+    }
+    ;(instance as unknown as { env: typeof env }).env = {
+      ...env,
+      LOBBY: {
+        idFromName: (name: string) => real.idFromName(name),
+        get: lobbyOf,
+      } as unknown as typeof env.LOBBY,
+    }
+  })
+  return { letGo: () => letGo(), seen }
+}
+
+/** Every time the table asks to leave the lobby's list, by table. */
+function watchUnlist() {
+  const spy = vi.spyOn(
+    TableDO.prototype as unknown as {
+      unlist: (tableId: string) => Promise<boolean>
+    },
+    'unlist',
+  )
+  return (tableId: string) =>
+    spy.mock.calls.filter(([id]) => id === tableId).length
+}
+
+/** Waits for `done` to hold, then asserts it does (named `what`). */
+async function until(what: string, done: () => boolean | Promise<boolean>) {
+  for (let i = 0; i < 400 && !(await done()); i++)
+    await new Promise((r) => setTimeout(r, 5))
+  expect(await done(), what).toBe(true)
+}
+
+/** The table's clock now. */
+const clockOf = (matchId: string) =>
+  runInDurableObject(stub(matchId), (instance: TableDO) =>
+    instance.clock(),
+  ) as Promise<number>
 
 /** The lobby's stored entry for a table, if any. */
 const entryOf = (tableId: string) =>
@@ -105,6 +181,19 @@ async function standUp(client: Client) {
   const from = client.frames.length
   client.send({ t: 'stand' })
   return client.next((f) => f.t === 'welcome', from)
+}
+
+/** Hand 2's plan names no players: the table halts at its deal. */
+async function haltAtHandTwo(matchId: string) {
+  const cash = new CashController()
+  await runInDurableObject(stub(matchId), (instance: TableDO) => {
+    instance.sixController = {
+      nextHandPlan: (handNo: number, config: MatchConfig, roster?: Roster) => {
+        const plan = cash.nextHandPlan(handNo, config, roster)
+        return plan && handNo === 2 ? { ...plan, users: undefined } : plan
+      },
+    }
+  })
 }
 
 const counts = (
@@ -249,6 +338,8 @@ describe('reporting to the lobby', () => {
 
 describe('leaving the list', () => {
   it('a table that deletes itself removes its entry', async () => {
+    const removed = vi.spyOn(LobbyDO.prototype, 'removeTable')
+    const removals = () => removed.mock.calls.filter(([id]) => id === matchId)
     const matchId = await sixTable()
     const a = await sitDown(matchId, 'del-a', 1)
     const b = await sitDown(matchId, 'del-b', 4)
@@ -259,12 +350,45 @@ describe('leaving the list', () => {
     await elapse(matchId, NEXT_HAND_MS)
     expect((await peek(matchId)).match.status).toBe('waiting')
     // IDLE_MS on, the session ends; the table stays IDLE_MS more, listed
-    // with nobody seated (quick-sit may still send a player there).
+    // with nobody seated (quick-sit may still send a player there). The
+    // session's end removes nothing, not even for a moment: the next
+    // session is the same table, under the same id.
+    await elapse(matchId, IDLE_MS)
+    expect(
+      ((await peek(matchId)).match as unknown as { sessionOver?: boolean })
+        .sessionOver,
+    ).toBe(true)
+    await settled(matchId)
+    expect(removals()).toEqual([])
+    expect(await entryOf(matchId)).toMatchObject(counts(0, 20, 2))
+    // Then it deletes itself, and leaves the list: once.
     await elapse(matchId, IDLE_MS)
     await settled(matchId)
-    expect(await entryOf(matchId)).toMatchObject(counts(0, 20, 2))
-    // Then it deletes itself, and leaves the list.
-    await elapse(matchId, IDLE_MS)
+    expect(await storageOf(matchId)).toEqual({ keys: [], alarm: null })
+    expect(removals()).toEqual([[matchId]])
+    expect(await entryOf(matchId)).toBeUndefined()
+  })
+
+  it('a report still on its way when the table deletes itself lands before the removal is sent', async () => {
+    const unlisted = watchUnlist()
+    const matchId = await sixTable()
+    const lobby = await slowLobby(matchId)
+    // The lobby has not answered the sit's report when the table, empty
+    // again, deletes itself.
+    await standUp(await sitDown(matchId, 'slow-del-a', 0))
+    expect(lobby.seen.reports).toBe(1)
+    const gone = elapse(matchId, IDLE_MS)
+    await until(
+      'the table asked to leave the list',
+      () => unlisted(matchId) > 0,
+    )
+    // The removal waits for the report ahead of it: landing first, it
+    // would be undone by the report, listing a table that is gone.
+    expect(lobby.seen.inFlightAtRemoval).toEqual([])
+    lobby.letGo()
+    await gone
+    await settled(matchId)
+    expect(lobby.seen.inFlightAtRemoval).toEqual([0])
     expect(await storageOf(matchId)).toEqual({ keys: [], alarm: null })
     expect(await entryOf(matchId)).toBeUndefined()
   })
@@ -328,21 +452,10 @@ describe('leaving the list', () => {
   })
 
   it('a six table that halts leaves the list', async () => {
+    const removed = vi.spyOn(LobbyDO.prototype, 'removeTable')
     // Hand 2's plan names no players: the table halts as an engine fault.
-    const cash = new CashController()
     const matchId = await sixTable()
-    await runInDurableObject(stub(matchId), (instance: TableDO) => {
-      instance.sixController = {
-        nextHandPlan: (
-          handNo: number,
-          config: MatchConfig,
-          roster?: Roster,
-        ) => {
-          const plan = cash.nextHandPlan(handNo, config, roster)
-          return plan && handNo === 2 ? { ...plan, users: undefined } : plan
-        },
-      }
-    })
+    await haltAtHandTwo(matchId)
     const a = await sitDown(matchId, 'halt-reg-a', 0)
     const b = await sitDown(matchId, 'halt-reg-b', 3)
     await a.next(isState(1))
@@ -351,7 +464,42 @@ describe('leaving the list', () => {
     await playOut(matchId, { 0: a, 3: b }, fold)
     await elapse(matchId, NEXT_HAND_MS)
     await a.next((f) => f.t === 'match_end')
-    await eventually(async () => (await entryOf(matchId)) === undefined)
+    // The removal follows the lobby's release; once it is sent, whatever
+    // the table sends to the list has landed, and the table is not on it.
+    await eventually(async () =>
+      removed.mock.calls.some(([id]) => id === matchId),
+    )
+    await settled(matchId)
+    expect(await entryOf(matchId)).toBeUndefined()
+  })
+
+  it('a report still on its way when a six table halts lands before the removal is sent', async () => {
+    const unlisted = watchUnlist()
+    const matchId = await sixTable()
+    await haltAtHandTwo(matchId)
+    const lobby = await slowLobby(matchId)
+    const a = await sitDown(matchId, 'slow-halt-a', 0)
+    const b = await sitDown(matchId, 'slow-halt-b', 3)
+    await a.next(isState(1))
+    // 30 s on, hand 1 ends with a report due, behind the sit's that the
+    // lobby has not answered; the next deal halts the table.
+    await setClock(matchId, (await clockOf(matchId)) + REPORT_MS)
+    await playOut(matchId, { 0: a, 3: b }, fold)
+    await elapse(matchId, NEXT_HAND_MS)
+    await a.next((f) => f.t === 'match_end')
+    await until(
+      'the table asked to leave the list',
+      () => unlisted(matchId) > 0,
+    )
+    expect(lobby.seen.inFlightAtRemoval).toEqual([])
+    lobby.letGo()
+    await until(
+      'the removal was sent',
+      () => lobby.seen.inFlightAtRemoval.length > 0,
+    )
+    await settled(matchId)
+    expect(lobby.seen.inFlightAtRemoval).toEqual([0])
+    expect(await entryOf(matchId)).toBeUndefined()
   })
 
   it('a waiting table refreshes its entry at each idle check, so it never goes stale', async () => {
@@ -361,9 +509,13 @@ describe('leaving the list', () => {
     await sitDown(matchId, 'fresh-a', 0)
     await settled(matchId)
     expect(await entryOf(matchId)).toMatchObject({ seated: 1, updatedAt: at })
+    const ids = async () => (await listed()).map((t) => t.tableId)
     // Nobody else comes for half an hour: three idle checks, each of
     // which keeps the table for its seated player and refreshes the entry.
+    // Just before each, the entry is nearly IDLE_MS old, and listed.
     for (let i = 1; i <= 3; i++) {
+      await setLobbyClock(at + i * IDLE_MS - 1)
+      expect(await ids()).toContain(matchId)
       await setLobbyClock(at + i * IDLE_MS)
       await elapse(matchId, IDLE_MS)
       await settled(matchId)
@@ -372,7 +524,15 @@ describe('leaving the list', () => {
         updatedAt: at + i * IDLE_MS,
       })
     }
-    expect((await listed()).map((t) => t.tableId)).toContain(matchId)
+    expect(await ids()).toContain(matchId)
+    // One idle check of slack: with the next one missed (an alarm a whole
+    // IDLE_MS late), the table is still listed 20 minutes after its last
+    // refresh, and taken for dead only after that.
+    const last = at + 3 * IDLE_MS
+    await setLobbyClock(last + 20 * 60_000)
+    expect(await ids()).toContain(matchId)
+    await setLobbyClock(last + 20 * 60_000 + 1)
+    expect(await ids()).not.toContain(matchId)
   })
 })
 
