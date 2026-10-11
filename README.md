@@ -23,8 +23,10 @@ The bare URL is the home page: it always opens the landing page, and the logo le
 
 - **The challenge:** one of six curated hands against Atlas, played from preset buttons (keys `1`–`6`), each decision graded on the spot.
   - With WebGL, it plays on a cinematic 3D table (`src/landing/stage/`, ADR-001): Atlas's likeliest hands rise as a cloud on the first decision, and a slow-motion verdict plays on the last.
+  - The table is drawn physically: lacquered cards with real pip layouts and court panels, felt with fibre and sheen, a stitched leather rail, a varnished racetrack, clay chips with edge inserts and each player's stack, lit by one spotlight and a studio environment, through a lens pass (bloom, vignette, grain). All artwork is drawn at runtime; the page ships no images for it.
+  - Quality adapts to frame time: tier 2 (full), 1 (phones: lower resolution, lighter lens) and 0 (no shadows or lens; software GPUs start here).
   - Without WebGL, with reduced motion, or with `?motion=off`, it plays on the trainer's 2D table.
-  - `?stageslow=<n>` slows the 3D clock for screenshots.
+  - `?stageslow=<n>` slows the 3D clock and `?stagequality=0|1|2` pins the tier, for screenshots.
 - **The rest of the page:** below the hand it explains how DeltaDeck works and what a free account gives, with "Create free account" in the header and on the score card.
 - **The score card:** the accuracy, a percentile ranked by the Worker (against model players until a hand has 200 real scores), the luck of the cards shown apart from the decisions, and Atlas's reasoning. Its CTA, "Save your score and get rated", leads to sign-up and a three-step onboarding (`#welcome/onboard`).
 - **The trees:** every reachable decision is priced offline by the trainer's own grader into `src/challenge/trees.generated.json`. `src/challenge/generate.test.ts` rebuilds it on every test run and fails on any difference. To regenerate after changing a hand or the grader: `CHALLENGE_WRITE=1 npx vitest run src/challenge/generate.test.ts`.
