@@ -44,14 +44,18 @@ type Player = {
   pending: { reqId: string; sentAt: number } | null
   /** Standing up: off the table until `back` hands have passed. */
   away: number | null
-  /** Ignores its turns until the next hand: the clock decides for it. */
+  /** Lets its next decision run out: the clock decides it. */
   idle: boolean
+  /** The decision being left to the clock, as `hand:action`. */
+  skip: string | null
   /** Our own close, so the closed socket is not a failure. */
   leaving: boolean
   /** A rebuy sent this hand. */
   rebuying: boolean
   /** This connection has asked to sit. */
   asked: boolean
+  /** The last frame sent, named in error reports. */
+  last?: string
 }
 
 type HandLog = {
@@ -99,6 +103,7 @@ export class SixRun {
       pending: null,
       away: null,
       idle: false,
+      skip: null,
       leaving: false,
       rebuying: false,
       asked: false,
@@ -191,6 +196,7 @@ export class SixRun {
   }
 
   private send(p: Player, msg: object) {
+    p.last = JSON.stringify(msg)
     if (p.ws?.readyState === WebSocket.OPEN) p.ws.send(JSON.stringify(msg))
   }
 
@@ -209,7 +215,9 @@ export class SixRun {
           p.away = 1
           return
         }
-        return this.fail(`player ${p.index}: error ${msg.code} ${msg.message}`)
+        return this.fail(
+          `player ${p.index}: error ${msg.code} ${msg.message} (after ${p.last})`,
+        )
       case 'welcome':
         // The server welcomes again once seated: sit on the first only.
         if (sit && !p.asked && p.away === null) {
@@ -222,7 +230,6 @@ export class SixRun {
         if (msg.view) this.view(p, msg.view)
         return
       case 'hand_start': {
-        p.idle = false
         p.rebuying = false
         this.bb = msg.blinds.bb
         if (p.index !== 0) return
@@ -360,7 +367,6 @@ export class SixRun {
       this.send(p, { t: 'rebuy' })
     }
     if (
-      p.idle ||
       p.pending ||
       view.result ||
       view.street === 'showdown' ||
@@ -370,6 +376,13 @@ export class SixRun {
       !p.ws
     )
       return
+    // One decision left to the clock, then back to playing.
+    const decision = `${view.handNo}:${view.actions.length}`
+    if (p.idle) {
+      p.idle = false
+      p.skip = decision
+    }
+    if (p.skip === decision) return
     const legal = view.legal
     const roll = Math.random()
     const action =
