@@ -3,7 +3,12 @@ import { act, isOver, legalActions, startHand } from '../src/engine/hand'
 import { seatView } from '../src/engine/redact'
 import { seededDeck } from '../src/engine/testing'
 import type { HandConfig, HandState, Street } from '../src/engine/types'
-import type { ClientMsg, MatchInfo, ServerMsg } from '../src/shared/protocol'
+import type {
+  ClientMsg,
+  ErrorCode,
+  MatchInfo,
+  ServerMsg,
+} from '../src/shared/protocol'
 
 export const SIX_TABLE = '66666666-6666-4666-8666-666666666666'
 
@@ -28,8 +33,12 @@ const SEATS = [
  * posts the small blind; the five others check or call at once. `street`:
  * play check-and-call up to the viewer's first move on that street before
  * the page connects. `received` collects every frame the page sends.
- * `hold`: after each of the viewer's moves the others wait for `release()`,
- * so the page shows someone else to act.
+ * `hold`: after each of the viewer's moves (a stand that folds included)
+ * the others wait for `release()`, so the page shows someone else to act.
+ * Rebuy and stand are answered as the table does (PR-14): a rebuy out of
+ * the hand below 100 bb tops up to 2,000; a stand frees the seat at once
+ * between hands, or folds the viewer and frees it as the hand ends. Once
+ * the hand is over the roster carries the stacks it left.
  */
 export async function fakeSixTable(
   page: Page,
@@ -46,18 +55,30 @@ export async function fakeSixTable(
     sb: 0,
     bb: 1,
   }
-  const table: MatchInfo = {
+  /** The roster's stacks: as of the deal, then as the hand left them. */
+  const stacks = SEATS.map(({ stack }) => stack)
+  let settled = false
+  /** The viewer has a seat; they stood during the hand. */
+  let seated = true
+  let standing = false
+  const table = (): MatchInfo => ({
     kind: 'six-casual',
     status: 'playing',
-    players: SEATS.map(({ username, stack }, seat) => ({
-      seat,
-      username,
-      connected: true,
-      consecutiveTimeouts: 0,
-      stack,
-      status: 'playing' as const,
-    })),
-  }
+    players: SEATS.flatMap(({ username }, seat) =>
+      seat === 0 && !seated
+        ? []
+        : [
+            {
+              seat,
+              username,
+              connected: true,
+              consecutiveTimeouts: 0,
+              stack: stacks[seat],
+              status: 'playing' as const,
+            },
+          ],
+    ),
+  })
   let hand: HandState = startHand(config, seededDeck(2026))
   let seq = 0
   let lastReqId: string | null = null
@@ -65,9 +86,13 @@ export async function fakeSixTable(
     act(state, state.toAct!, {
       type: legalActions(state).canCheck ? 'check' : 'call',
     })
-  /** The others' moves, up to the viewer's turn or the end of the hand. */
+  /**
+   * The others' moves, up to the viewer's turn or the end of the hand; a
+   * viewer who stood folds when the action reaches them.
+   */
   const others = () => {
-    while (!isOver(hand) && hand.toAct !== 0) hand = passive(hand)
+    while (!isOver(hand) && (hand.toAct !== 0 || standing))
+      hand = hand.toAct === 0 ? act(hand, 0, { type: 'fold' }) : passive(hand)
   }
   others()
   while (hand.street !== street) {
@@ -76,40 +101,80 @@ export async function fakeSixTable(
   }
 
   const frame = (t: 'welcome' | 'state'): ServerMsg => {
-    const view = seatView(hand, 0, {
-      matchId: SIX_TABLE,
-      match: table,
-      // 20 s to decide, then the 30 s bank.
-      clock: isOver(hand)
-        ? null
-        : { deadline: Date.now() + 50_000, bankMs: 30_000 },
-      lastReqId,
-      commitment: null,
-    })
+    if (isOver(hand) && !settled) {
+      for (const p of hand.players) stacks[p.seat] = p.stack
+      settled = true
+    }
+    const view = seated
+      ? seatView(hand, 0, {
+          matchId: SIX_TABLE,
+          match: table(),
+          // 20 s to decide, then the 30 s bank.
+          clock: isOver(hand)
+            ? null
+            : { deadline: Date.now() + 50_000, bankMs: 30_000 },
+          lastReqId,
+          commitment: null,
+        })
+      : null
     const base = { seq: ++seq, matchId: SIX_TABLE, serverNow: Date.now() }
     return t === 'welcome'
-      ? { ...base, t, seat: 0, table, view }
-      : { ...base, t, table, view }
+      ? { ...base, t, seat: seated ? 0 : null, table: table(), view }
+      : { ...base, t, table: table(), view }
   }
 
   const received: ClientMsg[] = []
   let held: (() => void) | null = null
   await page.routeWebSocket(/\/ws\/table\//, (ws) => {
     const send = (msg: ServerMsg) => ws.send(JSON.stringify(msg))
+    const error = (code: ErrorCode, message: string, reqId?: string) =>
+      send({
+        t: 'error',
+        seq,
+        matchId: SIX_TABLE,
+        code,
+        message,
+        ...(reqId ? { reqId } : {}),
+      })
+    /** The others play on; a viewer who stood leaves as the hand ends. */
+    const rest = () => {
+      others()
+      send(frame('state'))
+      if (standing && isOver(hand)) {
+        standing = false
+        seated = false
+        send(frame('welcome'))
+      }
+    }
     send(frame('welcome'))
     ws.onMessage((data) => {
       const msg = JSON.parse(String(data)) as ClientMsg
       received.push(msg)
+      if (msg.t === 'rebuy') {
+        if (!seated) return error('not_seated', 'You have no seat here')
+        if (!isOver(hand))
+          return error('in_hand', 'You can rebuy once this hand is over')
+        if (stacks[0] >= 2000)
+          return error('not_below', 'You already have 100 big blinds')
+        stacks[0] = 2000
+        return send(frame('welcome'))
+      }
+      if (msg.t === 'stand') {
+        if (!seated) return error('not_seated', 'You have no seat here')
+        if (isOver(hand)) {
+          seated = false
+          return send(frame('welcome'))
+        }
+        standing = true
+        if (hand.toAct === 0) hand = act(hand, 0, { type: 'fold' })
+        send(frame('welcome'))
+        if (hold) held = rest
+        else rest()
+        return
+      }
       if (msg.t !== 'act') return
       const refuse = (code: 'stale' | 'illegal', message: string) => {
-        send({
-          t: 'error',
-          seq,
-          matchId: SIX_TABLE,
-          code,
-          reqId: msg.reqId,
-          message,
-        })
+        error(code, message, msg.reqId)
         send(frame('state'))
       }
       if (
@@ -125,10 +190,6 @@ export async function fakeSixTable(
       }
       lastReqId = msg.reqId
       send(frame('state'))
-      const rest = () => {
-        others()
-        send(frame('state'))
-      }
       if (hold) held = rest
       else rest()
     })

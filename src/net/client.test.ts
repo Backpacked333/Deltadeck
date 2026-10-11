@@ -3,7 +3,7 @@ import { act as engineAct } from '../engine/hand'
 import { CLOSE_ABUSE, CLOSE_GONE, CLOSE_RATE_LIMITED } from '../shared/protocol'
 import type { HandRecordV1, ServerMsg } from '../shared/protocol'
 import { TableConnection } from './client'
-import { FakeSocket, firstHand, frame, MATCH } from './testing'
+import { FakeSocket, firstHand, frame, MATCH, sixFrame } from './testing'
 
 const flush = () => new Promise((r) => setTimeout(r, 0))
 
@@ -122,6 +122,29 @@ describe('TableConnection', () => {
     socket.emit(frame('welcome', 1, 1, firstHand()))
     expect(connection.act({ type: 'call' })).toBe(false)
     expect(socket.sent).toHaveLength(0)
+  })
+
+  it('sends a bare rebuy and stand from a seat at a six table only', async () => {
+    const { connection } = connect()
+    await flush()
+    const socket = FakeSocket.last()
+    // Not open yet, then open without a seat: nothing to send.
+    expect(connection.rebuy()).toBe(false)
+    expect(connection.stand()).toBe(false)
+    socket.open()
+    socket.emit(sixFrame('welcome', 1, null, null, null))
+    expect(connection.rebuy()).toBe(false)
+    expect(connection.stand()).toBe(false)
+    expect(socket.sent).toEqual([])
+    // Seated: each frame is the type alone. The server finds the seat
+    // from the account and computes the top-up.
+    socket.emit(sixFrame('welcome', 2, 2, null, null))
+    expect(connection.rebuy()).toBe(true)
+    expect(connection.stand()).toBe(true)
+    expect(socket.sent.map((m) => JSON.parse(m))).toEqual([
+      { t: 'rebuy' },
+      { t: 'stand' },
+    ])
   })
 
   it('reconnects with backoff and a fresh token, then gives up', async () => {

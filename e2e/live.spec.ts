@@ -217,6 +217,65 @@ test('keyboard loop at a six-seat table', async ({ browser }) => {
     ),
   )
   expect(taken).toEqual([])
+
+  // Out of the hand on 1,230, below 100 bb: Rebuy, by keyboard, sends
+  // the bare message, and the table's answer takes it away.
+  const own = page.getByRole('group', { name: /^Seat 1:/ })
+  await expect(own).toContainText('1,230')
+  const rebuy = page.getByRole('button', { name: /^Rebuy/ })
+  await expect(rebuy).toHaveAccessibleName('Rebuy to 2,000 chips')
+  await rebuy.focus()
+  await page.keyboard.press('Enter')
+  await expect(rebuy).toHaveCount(0)
+  await expect(own).toContainText('2,000')
+  await expect(own).toBeFocused()
+  // Stand up between hands frees the seat at once.
+  await page.getByRole('button', { name: 'Stand up' }).focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByText('Pick an empty seat to play.')).toBeVisible()
+  expect(table.received.filter((m) => m.t !== 'act')).toEqual([
+    { t: 'rebuy' },
+    { t: 'stand' },
+  ])
+  await me.close()
+})
+
+test('a stand mid-hand at a six-seat table keeps the seat until the hand ends', async ({
+  browser,
+}) => {
+  const me = await player(browser, named('stand'))
+  const { page } = me
+  // The others wait after the viewer's stand, so the page shows the hand
+  // going on without them.
+  const table = await fakeSixTable(page, { hold: true })
+  await page.goto(`/#play/${SIX_TABLE}`)
+  await expect(myTurn(page)).toBeVisible()
+  // Dealt in: no rebuy while the hand is played.
+  await expect(page.getByRole('button', { name: /^Rebuy/ })).toHaveCount(0)
+  const serious = async () =>
+    (
+      await new AxeBuilder({ page }).include('.six-seat-controls').analyze()
+    ).violations
+      .filter((v) => ['serious', 'critical'].includes(v.impact ?? ''))
+      .map((v) => `${v.id}: ${v.help}`)
+  expect(await serious()).toEqual([])
+  await page.getByRole('button', { name: 'Stand up' }).focus()
+  await page.keyboard.press('Enter')
+  // On their turn the stand folds them; the seat stays theirs, and only
+  // their own page knows they are leaving.
+  const seatControls = page.getByRole('group', { name: 'Your seat' })
+  await expect(seatControls.getByRole('status')).toHaveText(
+    'Leaving after this hand',
+  )
+  await expect(page.getByText(/ to act$/)).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Stand up' })).toHaveCount(0)
+  expect(await serious()).toEqual([])
+  expect(table.received).toEqual([{ t: 'stand' }])
+  // The others finish the hand and the seat frees.
+  table.release()
+  await expect(page.getByText('Pick an empty seat to play.')).toBeVisible()
+  await expect(page.getByText('Leaving after this hand')).toHaveCount(0)
+  await expect(seatControls).toHaveCount(0)
   await me.close()
 })
 

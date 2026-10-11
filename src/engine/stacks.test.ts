@@ -4,7 +4,7 @@
 // a 20-chip big blind is 100 × 20 = 2,000 chips (R-10), and a top-up is
 // 2,000 minus the stack.
 import { describe, expect, it } from 'vitest'
-import { BUY_IN_BB, buyIn, rebuyTo } from './stacks'
+import { BUY_IN_BB, buyIn, rebuyTo, SIX_BLINDS } from './stacks'
 import { EngineError } from './types'
 
 describe('buyIn', () => {
@@ -12,6 +12,15 @@ describe('buyIn', () => {
     expect(BUY_IN_BB).toBe(100)
     expect(buyIn(20)).toBe(2000)
     expect(buyIn(50)).toBe(5000)
+  })
+})
+
+describe('SIX_BLINDS', () => {
+  it('six tables play 10/20, so the buy-in is 2,000 chips (R-10)', () => {
+    expect(SIX_BLINDS).toEqual({ sb: 10, bb: 20 })
+    expect(buyIn(SIX_BLINDS.bb)).toBe(2000)
+    // Shared by the server and the live table: nobody may change it.
+    expect(Object.isFrozen(SIX_BLINDS)).toBe(true)
   })
 })
 

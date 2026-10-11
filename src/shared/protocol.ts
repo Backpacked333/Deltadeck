@@ -86,6 +86,12 @@ export type ClientMsg =
    * hand ends; otherwise it frees at once.
    */
   | { t: 'stand' }
+  /**
+   * At a six table: top up to 100 bb from the next hand. Bare on purpose:
+   * the server computes the amount from the stack, so a frame can never
+   * choose it (ADR amendment 2026-10-10, "Stacks and rebuy").
+   */
+  | { t: 'rebuy' }
 
 /** A seated six-casual player: dealt in, or sitting out (P2-04). */
 export type SeatStatus = 'playing' | 'sitting_out'
@@ -112,6 +118,13 @@ export type ErrorCode =
   | 'sit_cooldown'
   /** Six tables: a seat-only message from a socket without a seat. */
   | 'not_seated'
+  /**
+   * Six tables: a rebuy from a player dealt into the hand being played;
+   * it may be sent again once that hand is over.
+   */
+  | 'in_hand'
+  /** Six tables: a rebuy from a player not below 100 bb (the buy-in). */
+  | 'not_below'
 
 /**
  * Everything one seat may know about the table. There is deliberately no
@@ -147,7 +160,12 @@ export type SeatView = {
       username: string
       connected: boolean
       consecutiveTimeouts: number
-      /** Six tables: chips as of the last deal (or the buy-in, if since). */
+      /**
+       * Six tables: the chips outside the hand being played. While the
+       * player is dealt into it, as of its deal; otherwise what the next
+       * hand deals them: as the last hand left it, the buy-in, or 100 bb
+       * after a rebuy.
+       */
       stack?: number
       /** Six tables. */
       status?: SeatStatus
@@ -409,6 +427,7 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case 'dequeue':
     case 'rematch':
     case 'stand':
+    case 'rebuy':
       return onlyKeys(v, ['t']) ? { t: v.t } : null
     case 'sit':
       if (!onlyKeys(v, ['t', 'seat'])) return null
