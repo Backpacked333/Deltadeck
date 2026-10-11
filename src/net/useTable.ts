@@ -34,5 +34,7 @@ export function useTable(
   )
   const rebuy = useCallback(() => connection?.rebuy() ?? false, [connection])
   const stand = useCallback(() => connection?.stand() ?? false, [connection])
-  return { state, act, rematch, sit, rebuy, stand }
+  const sitOut = useCallback(() => connection?.sitOut() ?? false, [connection])
+  const sitIn = useCallback(() => connection?.sitIn() ?? false, [connection])
+  return { state, act, rematch, sit, rebuy, stand, sitOut, sitIn }
 }

@@ -217,8 +217,23 @@ export class TableConnection {
     return this.sendSeated({ t: 'stand' })
   }
 
+  /**
+   * At a six table: sit out from the next hand, keeping the seat. The
+   * frame is the type alone; the welcome carries the new status.
+   */
+  sitOut(): boolean {
+    return this.sendSeated({ t: 'sit_out' })
+  }
+
+  /** At a six table, sitting out: be dealt in again from the next hand. */
+  sitIn(): boolean {
+    return this.sendSeated({ t: 'sit_in' })
+  }
+
   /** Sends a seat-only frame, if this socket is open and has a seat. */
-  private sendSeated(msg: Extract<ClientMsg, { t: 'rebuy' | 'stand' }>) {
+  private sendSeated(
+    msg: Extract<ClientMsg, { t: 'rebuy' | 'stand' | 'sit_out' | 'sit_in' }>,
+  ) {
     const { status, seat } = this.state
     if (status !== 'open' || seat === null) return false
     this.socket!.send(JSON.stringify(msg))
