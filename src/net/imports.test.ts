@@ -42,4 +42,22 @@ describe('src/net imports', () => {
           expect(rule.test(path), `${file} imports ${path}`).toBe(false)
     }
   })
+
+  // The six-seat ring is reached only through the lazy online chunk: an
+  // import from anywhere else could pull it into the entry bundle (ADR,
+  // "Table UI (P2-05)").
+  it('are the only ones to import the six-seat ring', () => {
+    const src = new URL('../', import.meta.url)
+    const files = readdirSync(src, { recursive: true, encoding: 'utf8' })
+      .map((f) => f.replaceAll('\\', '/'))
+      .filter((f) => /\.tsx?$/.test(f) && !f.startsWith('net/'))
+    expect(files.length).toBeGreaterThan(50)
+    for (const file of files) {
+      const source = readFileSync(new URL(file, src), 'utf8')
+      expect(
+        source.match(/(from |import\()'[^']*\/(SixRing|SeatPlate)'/)?.[0],
+        `${file} imports the ring`,
+      ).toBeUndefined()
+    }
+  })
 })

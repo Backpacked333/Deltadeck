@@ -410,11 +410,15 @@ Risks:
   - PR-13: a six table that finishes (only `engine_fault` today) sends `match_end` to sockets without a seat too; six sessions send no `match_end` (ADR "Table and session"). Gate it with the session work.
 
 - **Exposure gate (Devin, #44):** nothing may create a six table from outside (PR-24's route and quick-sit) until these have landed:
-  - PR-12: lobby claims, so one account cannot sit at two tables (Devin's security finding);
+  - PR-12: lobby claims, so one account cannot sit at two tables (Devin's security finding). Landed in #46;
   - PR-16: busted or sitting-out players are stood up after 3 orbits or 5 minutes without a dealt hand, so busted occupants cannot fill a table for good;
   - PR-14 rebuy, or its ADR cut line (automatic top-up).
 
   Until then six tables exist only through the table's own `/init`, which no route calls.
+
+- **Left by PR-19's review** (`src/net` at PR-19). PR-12 and PR-13 landed first, so PR-19 settles both itself. The first needs no change: PR-12 keeps a player who stood in `match.players`, and so in the roster, until the hand ends. The second is done: the client starts its hands afresh under a new matchId.
+  - PR-12: `plates()` in `SixTable.tsx` builds the ring from the roster (`MatchInfo.players`) alone. Once a player can stand mid-hand and leave the roster, their seat would show "Empty" or "Sit here" while their chips are still in the hand. Draw the seats dealt into the hand from `view.players` too.
+  - PR-13: `HandSeen` in `client.ts` (`seen()`, `withView`) is keyed by `handNo` alone, and eviction drops the smallest keys. After the rotation restarts `handNo` at 1, the new session's hands would be evicted first, and `nameOf` in `SixTable.tsx` could read the old session's `record.seats` for the same number. Key it by `matchId:handNo`.
 
 **PR-14 · P2-03f rebuy (cut line)**
 
