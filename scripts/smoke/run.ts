@@ -15,6 +15,7 @@ import type {
 } from '../../src/shared/protocol'
 import { PROTOCOL } from '../../src/shared/protocol'
 import { ACK_P95_LIMIT_MS, percentile, verdict } from '../smoke-stats'
+import { SixRun } from './six'
 import type { SmokeResult } from '../smoke-stats'
 
 const PROD = 'https://deltadeck.net'
@@ -36,6 +37,7 @@ function parse(argv: string[]) {
   }
   return {
     prod: argv.includes('--prod'),
+    six: argv.includes('--six'),
     target: arg('target'),
     pairs: Number(arg('pairs') ?? 10),
     hands: Number(arg('hands') ?? 500),
@@ -334,6 +336,7 @@ export async function main(argv: string[]) {
         { length: args.pairs * 2 },
         (_, i) => `dev.smoke${Date.now().toString(36)}${i}.${args.secret}`,
       )
+  if (args.six) return six(target, tokens, args.hands)
   const pairs = Math.floor(tokens.length / 2)
   const run = new Run({ target, pairs, hands: args.hands, tokens })
   console.log(
@@ -351,6 +354,38 @@ export async function main(argv: string[]) {
   const ms = (p: number) => `${percentile(r.acks, p)} ms`
   console.log(
     `played ${r.hands} hands in ${((Date.now() - started) / 1000).toFixed(1)} s`,
+  )
+  console.log(
+    `ack latency over ${r.acks.length} moves: p50 ${ms(50)} · p95 ${ms(95)} · p99 ${ms(99)} (limit p95 ${ACK_P95_LIMIT_MS} ms)`,
+  )
+  console.log(
+    `invariant failures ${r.failures.length} · leaks ${r.leaks} · commitments ${r.commitments}/${r.hands}`,
+  )
+  const problems = verdict(r)
+  for (const p of problems) console.error(`FAIL ${p}`)
+  console.log(problems.length ? 'FAIL' : 'PASS')
+  return problems.length ? 1 : 0
+}
+
+/** One six table, six clients, with leaves, reconnects and timeouts. */
+async function six(target: string, tokens: string[], hands: number) {
+  const players = tokens.slice(0, 6)
+  if (players.length < 6)
+    throw new Error('--six needs six accounts (--pairs 3 or more); refusing.')
+  const run = new SixRun(target, players, hands)
+  console.log(
+    `smoke --six: 6 clients at one six table, ${hands} hands → ${target}`,
+  )
+  const started = Date.now()
+  await run.run()
+  const r = run.result
+  const e = run.events
+  const ms = (p: number) => `${percentile(r.acks, p)} ms`
+  console.log(
+    `played ${r.hands} hands in ${((Date.now() - started) / 1000).toFixed(1)} s`,
+  )
+  console.log(
+    `chaos: ${e.leaves} stand-and-sit · ${e.reconnects} reconnects · ${e.timeouts} clock timeouts · ${e.rebuys} rebuys asked`,
   )
   console.log(
     `ack latency over ${r.acks.length} moves: p50 ${ms(50)} · p95 ${ms(95)} · p99 ${ms(99)} (limit p95 ${ACK_P95_LIMIT_MS} ms)`,
