@@ -1387,7 +1387,7 @@ describe('LiveTable at a six-casual table', () => {
     // jsdom lays nothing out, so each box the flights start or land on is
     // given: seat s's bets at (100s, 10s), the pot line at (500, 300),
     // pot k's pill at (600 + 50k, 280), seat s's plate at (100s, 400),
-    // and the ring's flight layer at (50, 20).
+    // the board at (400, 200) and the ring's flight layer at (50, 20).
     vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(
       function (this: Element) {
         const seatOf = () =>
@@ -1401,9 +1401,11 @@ describe('LiveTable at a six-casual table', () => {
               ? rect(100 * seatOf(), 400, 80, 40)
               : this.classList.contains('six-pot')
                 ? rect(500, 300, 60, 20)
-                : pot !== null
-                  ? rect(600 + 50 * Number(pot), 280, 40, 16)
-                  : rect(0, 0, 0, 0)
+                : this.classList.contains('six-board')
+                  ? rect(400, 200, 200, 60)
+                  : pot !== null
+                    ? rect(600 + 50 * Number(pot), 280, 40, 16)
+                    : rect(0, 0, 0, 0)
       },
     )
     render(<LiveTable matchId={MATCH} identity={alice} />)
@@ -1435,6 +1437,19 @@ describe('LiveTable at a six-casual table', () => {
       '290px',
       '400px',
     ])
+
+    // Hand 2 has one pot, and dave's straight takes it. At the result the
+    // pot line is gone and no pots are listed, so the pot leaves the
+    // middle of the board, where the pot line was, for dave's plate.
+    let next = sixHand({
+      holes: { 0: '7c 2h', 2: 'As Kd', 3: 'Qs Qh', 5: 'Jd 8d' },
+    })
+    next.config = { ...next.config, handNo: 2 }
+    act(() => socket.emit(sixFrame('state', 5, 2, 2, next)))
+    next = playedOut(next)
+    act(() => socket.emit(sixFrame('state', 6, 2, 2, next)))
+    expect(screen.getByText(/^dave wins/)).toBeInTheDocument()
+    expect(path('pot', 'seat-5')).toEqual(['450px', '210px', '490px', '400px'])
   })
 
   it('no chips fly under reduced motion', async () => {
