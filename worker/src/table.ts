@@ -2205,7 +2205,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
       match.config.maxSeats ?? 6,
     )
     const tableId = match.id
-    void this.toLobbyList('lobby_report', (lobby) =>
+    void this.toLobbyList(tableId, 'lobby_report', (lobby) =>
       lobby.reportTable(tableId, report),
     ).then((sent) => {
       if (!sent && this.listing) this.listing.pending = true
@@ -2223,26 +2223,31 @@ export class TableDO extends DurableObject<WorkerEnv> {
 
   /** Six-casual: the table leaves the lobby's list (deleted, or halted). */
   private unlist(tableId: string) {
-    return this.toLobbyList('lobby_unlist', (lobby) =>
+    return this.toLobbyList(tableId, 'lobby_unlist', (lobby) =>
       lobby.removeTable(tableId),
     )
   }
 
   /**
-   * A call to the lobby's list, once every earlier one has landed. Never
-   * throws: it logs a failure and resolves false.
+   * A call about table `tableId` to the lobby's list, once every earlier
+   * one has landed. Never throws: it logs a failure and resolves false.
+   * The id is passed in, since the removal runs once the table is gone.
    */
   private toLobbyList(
+    tableId: string,
     reason: string,
     call: (lobby: ReturnType<typeof lobbyStub>) => Promise<unknown>,
   ): Promise<boolean> {
-    const matchId = this.match?.id
     const sent = this.listingCalls.then(async () => {
       try {
         await call(lobbyStub(this.env))
         return true
       } catch (error) {
-        logEvent('error', { matchId, reason, detail: describeError(error) })
+        logEvent('error', {
+          matchId: tableId,
+          reason,
+          detail: describeError(error),
+        })
         return false
       }
     })
@@ -2503,9 +2508,10 @@ export class TableDO extends DurableObject<WorkerEnv> {
       this.deadlines.push({ kind: 'idle', at: this.clock() + IDLE_MS })
       return false
     }
-    // A six table leaves the lobby's list before it goes. Awaited, since no
-    // hand is in play; if it is lost, the lobby drops the entry once stale.
-    if (match?.config.kind === 'six-casual') await this.unlist(match.id)
+    // From here to deleteAll only storage is awaited, which holds the
+    // input gate: no sit (or deal) lands between the decision and the
+    // deletion that would wipe it.
+    const listed = match?.config.kind === 'six-casual' ? match.id : null
     for (const ws of this.ctx.getWebSockets())
       try {
         ws.close(CLOSE_GONE, 'closed')
@@ -2522,6 +2528,15 @@ export class TableDO extends DurableObject<WorkerEnv> {
     this.seq = 0
     this.lastAck = {}
     this.listing = null
+    // A six table leaves the lobby's list once it is gone, not before: the
+    // removal is an RPC, which does not hold the input gate, so awaited
+    // first it let a sit (even a deal) in, to be wiped by deleteAll, and
+    // the sit's report, queued behind the removal, listed a table that no
+    // longer exists. Now nothing can report after it (match is null, so
+    // nothing is seatable), and listingCalls still lands it after every
+    // report sent before. If it is lost, the lobby drops the entry once
+    // stale.
+    if (listed) await this.unlist(listed)
     return true
   }
 

@@ -12,6 +12,7 @@ import {
 } from 'cloudflare:test'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { legalActions } from '../../src/engine/hand'
+import { CLOSE_GONE } from '../../src/shared/protocol'
 import type { HandState, PlayerAction } from '../../src/engine/types'
 import type { MatchConfig } from '../../src/shared/protocol'
 import { CashController } from '../src/controller'
@@ -79,6 +80,12 @@ const entryOf = (tableId: string) =>
 
 const listed = () =>
   runInDurableObject(lobbyStub(env), (instance: LobbyDO) => instance.tables())
+
+/** The table the lobby holds `userId` at, if any. */
+const lobbyHolds = (userId: string) =>
+  runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
+    state.storage.get<string>(`active:${userId}`),
+  )
 
 const fold = (): PlayerAction => ({ type: 'fold' })
 const passive = (hand: HandState): PlayerAction =>
@@ -260,6 +267,64 @@ describe('leaving the list', () => {
     await elapse(matchId, IDLE_MS)
     expect(await storageOf(matchId)).toEqual({ keys: [], alarm: null })
     expect(await entryOf(matchId)).toBeUndefined()
+  })
+
+  it('a sit sent while the table deletes itself is closed with it: nobody is seated and wiped, and no report lists it again', async () => {
+    // The lobby holds the removal until the test lets it go, so anything
+    // the table lets in while the removal is on its way gets in.
+    let letGo: () => void = () => {}
+    const held = new Promise<void>((resolve) => (letGo = resolve))
+    const remove = LobbyDO.prototype.removeTable
+    const removed = vi
+      .spyOn(LobbyDO.prototype, 'removeTable')
+      .mockImplementation(async function (this: LobbyDO, tableId: string) {
+        await held
+        return remove.call(this, tableId)
+      })
+    const matchId = await sixTable()
+    // A sat and stood (a held change), so the next sit reports at once.
+    await standUp(await sitDown(matchId, 'gap-a', 0))
+    const b = await connect(matchId, 'gap-b')
+    const c = await connect(matchId, 'gap-c')
+    await b.next((f) => f.t === 'welcome')
+    await c.next((f) => f.t === 'welcome')
+    // IDLE_MS with nobody seated: the idle check deletes the table. B and
+    // C ask for seats once its removal has reached the lobby (two seated
+    // would deal a hand), if their sockets are still open by then.
+    const alarm = elapse(matchId, IDLE_MS)
+    await eventually(async () =>
+      removed.mock.calls.some(([id]) => id === matchId),
+    )
+    for (const [client, seat] of [
+      [b, 1],
+      [c, 3],
+    ] as const)
+      if (client.ws.readyState === WebSocket.READY_STATE_OPEN)
+        client.send({ t: 'sit', seat })
+    const seats = (client: Client) =>
+      client.frames.flatMap((f) =>
+        f.t === 'welcome' && f.seat !== null ? [f.seat] : [],
+      )
+    const answered = (client: Client) =>
+      client.closed !== null || seats(client).length > 0
+    await eventually(async () => answered(b) && answered(c))
+    letGo()
+    await alarm
+    await settled(matchId)
+    await eventually(async () => b.closed !== null && c.closed !== null)
+    expect({
+      seated: [...seats(b), ...seats(c)],
+      claims: [await lobbyHolds('gap-b'), await lobbyHolds('gap-c')],
+      closed: [b.closed?.code, c.closed?.code],
+      table: await storageOf(matchId),
+      entry: await entryOf(matchId),
+    }).toEqual({
+      seated: [],
+      claims: [undefined, undefined],
+      closed: [CLOSE_GONE, CLOSE_GONE],
+      table: { keys: [], alarm: null },
+      entry: undefined,
+    })
   })
 
   it('a six table that halts leaves the list', async () => {
