@@ -1,6 +1,6 @@
 # 10x prompts for what is left
 
-Rewritten 2026-10-10 against `main` at `a3b9aed` (PR #26), refreshed the same day at `13fe865` (PR #39) and again at `a91da97` (PR #45) `0920e4a` (PR #51) and `c56cd5b` (PR #54). It replaces the 2026-10-09 version that lived only on the branch `claude/amazing-ride-4vip4x`. That version's Prompts 1–5 are done, its Prompt 6 was written for the same-deck duplicate format that Q1 = B dropped, and most of its Prompts 7 and 8 is built.
+Rewritten 2026-10-10 against `main` at `a3b9aed` (PR #26), refreshed the same day at `13fe865` (PR #39) and again at `a91da97` (PR #45) `0920e4a` (PR #51) `c56cd5b` (PR #54) and `a194c55` (PR #55). It replaces the 2026-10-09 version that lived only on the branch `claude/amazing-ride-4vip4x`. That version's Prompts 1–5 are done, its Prompt 6 was written for the same-deck duplicate format that Q1 = B dropped, and most of its Prompts 7 and 8 is built.
 
 Order: **finish Phase 0 → Phase 1 → Phase 2 → Later.** One prompt per fresh Claude Code session, top to bottom, except where "Runs after" allows two at once. Each prompt names the tickets it closes; the acceptance tests under those tickets in `.10x/tickets.md` are the definition of done.
 
@@ -18,7 +18,7 @@ Order: **finish Phase 0 → Phase 1 → Phase 2 → Later.** One prompt per fres
 | 9   | 1     | Metrics pack and ladder launch                 | P1-21, P1-22        | `/10x-Team:sre`                 | 1–8                              |
 | 10  | 2     | Multiway luck and pairwise results             | P2-12               | `/10x-Team:sde`                 | nothing; pure code, any time     |
 | 11  | 2     | ~~Sit-out and reconnect~~ (done, PRs #52, #53) | P2-04b, P2-04c      | —                               | —                                |
-| 12  | 2     | Chip motion and the table list                 | P2-06b, P2-08       | `/10x-Team:sde`                 | can start now                    |
+| 12  | 2     | The table list and quick-sit                   | P2-08               | `/10x-Team:sde`                 | can start now                    |
 | 13  | 2     | 6-max review, stats, bots, acceptance          | P2-07, P2-09–P2-11  | `/10x-Team:sde`                 | 12, and S7-05 (Prompt 2)         |
 | 14  | 2     | Arenas and the 6-max rating                    | P2-13, P2-14, P2-15 | `/10x-Team:principal-architect` | 13, and 1,000 human casual hands |
 | 15  | Later | Integrity v2 (only when triggered)             | —                   | `/10x-Team:security-engineer`   | a trigger                        |
@@ -303,7 +303,7 @@ DO NOT: seed fake data into production, run load against production, or claim on
 
 # PHASE 2: 6-max (`six-max-tables` casual, then rated arenas)
 
-Every Phase 2 prompt follows `.10x/decisions/engineering-manager/six-max-casual.md` (the PR plan, PR-01…PR-26) and the ADR's "Amendment 2026-10-10: Phase 2 casual 6-max" (the rules). Where they differ from the P2 tickets, they win. Done: PR-01, PR-02 (P2-01), PR-03 (the amendment), PR-04 (P2-02a), PR-05, PR-06 (P2-02b/c, PR #40), PR-07, PR-08 (frame allowlists), PR-09 to PR-14 (P2-03a–f: the archive migration, CashController, sit and play, stand up, the session lifecycle, rebuy; PRs #41, #43, #44, #46, #48, #50), PR-15 to PR-17 (P2-04a–c: the orbit bank, sit-out and removal, the 60 s reconnect; PRs #51–#53), PR-21 (P2-06a, side pots shown apart, PR #54), PR-18 (P2-05a, the six-seat ring, PR #45) and PR-19 (P2-05b, six-casual at the live table with Sit here and keys, PR #49).
+Every Phase 2 prompt follows `.10x/decisions/engineering-manager/six-max-casual.md` (the PR plan, PR-01…PR-26) and the ADR's "Amendment 2026-10-10: Phase 2 casual 6-max" (the rules). Where they differ from the P2 tickets, they win. Done: PR-01, PR-02 (P2-01), PR-03 (the amendment), PR-04 (P2-02a), PR-05, PR-06 (P2-02b/c, PR #40), PR-07, PR-08 (frame allowlists), PR-09 to PR-14 (P2-03a–f: the archive migration, CashController, sit and play, stand up, the session lifecycle, rebuy; PRs #41, #43, #44, #46, #48, #50), PR-15 to PR-17 (P2-04a–c: the orbit bank, sit-out and removal, the 60 s reconnect; PRs #51–#53), PR-21 and PR-22 (P2-06a/b: side pots shown apart, chip motion with a six-seat frame-time gate; PRs #54, #55), PR-18 (P2-05a, the six-seat ring, PR #45) and PR-19 (P2-05b, six-casual at the live table with Sit here and keys, PR #49).
 
 ## 10. Multiway luck and pairwise results (P2-12)
 
@@ -325,25 +325,25 @@ DO NOT: touch worker code, the UI, or the ratings tables.
 
 Merged as PRs #52 and #53 on 2026-10-11, after P2-03a–f and P2-04a. Casual 6-max tables now sit people out, remove them, and hold a dropped seat for 60 s. Nothing to paste.
 
-## 12. Chip motion and the table list (P2-06b, P2-08)
+## 12. The table list and quick-sit (P2-08)
 
 **Header:** `/10x-Team:sde`.
 
 ```
-MISSION. Six seats already play at the live table on the new ring, with side pots shown apart and paid in award order (PR-18, PR-19, PR-21). Two things are left before 6-max feels finished: chip motion that stays smooth through a 3-way all-in, and a lobby list that finds a table in one click.
+MISSION. Six seats already play at the live table on the new ring, with side pots shown apart and smooth chip motion (PR-18, PR-19, PR-21, PR-22). One thing is left before casual 6-max feels finished: a lobby list that finds a table in one click.
 
 PRE-CHECK: PR-13's session lifecycle (PR #48) and PR-19 (PR #49) are merged. Start from the newest main.
 
-READ: the PR plan's PR-20 to PR-25; the ADR amendment's rows on the table UI and on the table list and quick-sit; .10x/tickets.md P2-06 and P2-08; the six-max-tables PM file; src/components/table/* and the six-seat ring from PR #45; src/motion.ts; src/net/{LiveTable,Lobby}.tsx; worker/src/lobby.ts; e2e/{live,mobile,motion}.spec.ts.
+READ: the PR plan's PR-23 to PR-25; the ADR amendment's rows on the table UI and on the table list and quick-sit; .10x/tickets.md P2-08; the six-max-tables PM file; src/components/table/* and the six-seat ring from PR #45; src/motion.ts; src/net/{LiveTable,Lobby}.tsx; worker/src/lobby.ts; e2e/{live,mobile,motion}.spec.ts.
 
 BUILD, in the plan's order, red first:
-- Done: PR-21 (P2-06a) side-pot stacks (PR #54). Next: PR-22 (P2-06b) per-seat chip motion and the 3-way all-in frame gate. Run the existing frame-time test at six seats first.
+- Done: PR-21 and PR-22 (P2-06a/b), side pots and chip motion (PRs #54, #55).
 - PR-23 to PR-25 (P2-08) the table registry (counts only, at most every 30 s), quick-sit (fullest table with a free seat; on table_full or sit_cooldown try the next) and TableList.
 - PR-20 (moving heads-up onto the ring) stays optional; skip it unless it is free.
 
-QUALITY GATES: no long frames through a 3-way all-in runout; no serious axe violations in light and dark; no horizontal scroll at 320 px; heads-up tables look and behave as before, with their e2e green.
+QUALITY GATES: the six-seat frame-time gate from PR-22 stays green; no serious axe violations in light and dark; no horizontal scroll at 320 px; heads-up tables look and behave as before, with their e2e green.
 
-DONE WHEN: every PR's named tests pass; you played at a six-seat table in two real browsers against wrangler dev, including a side pot and a quick-sit, and say what you saw; gates green; each PR merged and verified.
+DONE WHEN: every PR's named tests pass; you played at a six-seat table in two real browsers against wrangler dev, including a quick-sit from the lobby into a running table, and say what you saw; gates green; each PR merged and verified.
 
 DO NOT: change the heads-up table's look or the entry bundle, or ship rated 6-max.
 ```
