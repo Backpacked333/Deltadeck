@@ -669,6 +669,7 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
         const active = await this.liveActive(userId)
         if (active) return { t: 'matched', matchId: active, resumed: true }
         await this.forgetClosed(tried)
+        await this.settleOrphans()
         return this.pickTable({ userId, username }, tried)
       })
     } catch (error) {
@@ -714,6 +715,39 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
         continue
       }
       if (state === 'over') await this.ctx.storage.delete(keys)
+    }
+  }
+
+  /**
+   * Opens whose /init never answered here: a record not ready and not in
+   * flight was left by an earlier instance of the lobby (reset during the
+   * call), or by an /init call that threw. Such a record held its account
+   * to one unseated table and counted against the cap until it expired.
+   * Its table says what it is: there ('open'), so the record is made ready
+   * and offered; or not ('over': never made, or gone), so the record goes,
+   * and nothing else is given back (the day's opening was spent). A table
+   * that cannot be asked keeps its record, for removeTable or the expiry.
+   */
+  private async settleOrphans() {
+    for (const [tableId, c] of await this.openedTables(this.clock())) {
+      if (c.ready || this.opening.has(tableId)) continue
+      let state: Liveness
+      try {
+        state = await tableStub(this.env, tableId).liveness()
+      } catch (error) {
+        logEvent('error', {
+          matchId: tableId,
+          reason: 'quick_sit_liveness',
+          detail: describeError(error),
+        })
+        continue
+      }
+      // The call let other events in: only the record just asked about.
+      const key = `created:${tableId}`
+      const now = await this.ctx.storage.get<Created>(key)
+      if (!now || now.ready || now.at !== c.at) continue
+      if (state === 'over') await this.ctx.storage.delete(key)
+      else await this.ctx.storage.put(key, { ...now, ready: true })
     }
   }
 
@@ -810,8 +844,10 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    * Opens a table for `who` at `t`: its `created:` record and the day's
    * count first (the caller has awaited only storage since its reads), and
    * only then the table's /init, which lets other events in. Its id, or
-   * null if the table did not open: the record goes and the day's count is
-   * given back.
+   * null if the table did not open. A table that refused its /init was not
+   * made: the record goes and the day's count is given back. A call that
+   * threw may have made it: both stay, for settleOrphans, removeTable or
+   * the expiry to settle.
    */
   private async open(who: Who, t: number) {
     const creates = await this.createsToday(who.userId)
@@ -828,11 +864,12 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
       })
       await this.forgetOldCreates(creates.today)
       // The place is taken; only now a call that lets other events in.
-      if (!(await this.openTable(tableId, who))) {
+      const init = await this.openTable(tableId, who)
+      if (init === 'refused') {
         await this.ctx.storage.delete(`created:${tableId}`)
         await this.ctx.storage.put(creates.key, creates.made)
-        return null
       }
+      if (init !== 'made') return null
       await this.ctx.storage.put(`created:${tableId}`, {
         ...record,
         ready: true,
@@ -864,29 +901,34 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
   /**
    * A new, empty six table: the internal /init pairing uses, with no
    * opponent and no start deadline. Nobody sits, and it deletes itself
-   * after IDLE_MS, removing itself from the count (removeTable).
+   * after IDLE_MS, removing itself from the count (removeTable). 'made',
+   * 'refused' (the table answered, not 2xx), or 'unknown' (the call threw).
    */
-  private async openTable(tableId: string, creator: Who) {
+  private async openTable(
+    tableId: string,
+    creator: Who,
+  ): Promise<'made' | 'refused' | 'unknown'> {
     const body: InitBody = { matchId: tableId, creator, kind: 'six-casual' }
     try {
       const created = await tableStub(this.env, tableId).fetch(
         'https://table/init',
         { method: 'POST', body: JSON.stringify(body) },
       )
-      if (created.ok) return true
+      if (created.ok) return 'made'
       logEvent('error', {
         matchId: tableId,
         reason: 'table_init',
         code: created.status,
       })
+      return 'refused'
     } catch (error) {
       logEvent('error', {
         matchId: tableId,
         reason: 'table_init',
         detail: describeError(error),
       })
+      return 'unknown'
     }
-    return false
   }
 
   /**

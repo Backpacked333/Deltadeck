@@ -6,7 +6,11 @@
 // the table closed), asks again naming the tables it tried. Tables run for
 // real behind the lobby where a test sits at them; elsewhere the list is
 // seeded with reports, as the lobby's own tests do.
-import { env, runInDurableObject } from 'cloudflare:test'
+import {
+  abortAllDurableObjects,
+  env,
+  runInDurableObject,
+} from 'cloudflare:test'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { PlayerAction } from '../../src/engine/types'
 import type {
@@ -193,6 +197,14 @@ function watchListReads() {
   const spy = vi.spyOn(LobbyDO.prototype, 'tables')
   return () => spy.mock.calls.length
 }
+
+/** The lobby's stored day count of tables `userId` made, if any. */
+const createsOf = (userId: string) =>
+  runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
+    state.storage.get<number>(
+      `creates:${new Date().toISOString().slice(0, 10)}:${userId}`,
+    ),
+  )
 
 describe('quick-sit picks a table', () => {
   it('quick-sit picks the fullest table with a free seat', async () => {
@@ -542,6 +554,106 @@ describe('quick-sit opens a table', () => {
   })
 })
 
+describe('an open the lobby never finished', () => {
+  // Review B2: a `created:` record that is not ready and not in flight was
+  // left by an earlier instance of the lobby (a reset during /init), or by
+  // an /init call that threw. Its table is asked what it is.
+  it('a lobby reset during an open leaves the account free to quick-sit', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    await fullTables(2)
+    const init = holdInit()
+    const q = await inLobby('reset-q')
+    q.send({ t: 'quick_sit' })
+    await until(
+      'the open is recorded',
+      async () => (await createdIds()).length === 1,
+    )
+    const [orphan] = await createdIds()
+    expect(await createdOf(orphan)).toMatchObject({ ready: false })
+    // The lobby restarts mid-open, then the table lets the init go.
+    await abortAllDurableObjects()
+    init.restore()
+    init.letGo()
+    const r = await inLobby('reset-q')
+    const answer = await quickSit(r)
+    expect(answer).toMatchObject({ t: 'sit_at' })
+    if (answer.t !== 'sit_at') return
+    // Whichever way the held init went, the record says so now: its
+    // table exists and is offered, or is gone and so is the record.
+    const record = await createdOf(orphan)
+    if (answer.tableId === orphan) expect(record).toMatchObject({ ready: true })
+    else expect(record).toBeUndefined()
+    for (const f of r.frames) checkLobbyFrame(f)
+  })
+
+  it('a record whose table is open is offered; one whose table is gone stops counting', async () => {
+    // Left by an earlier instance: an open whose table exists...
+    const alive = await sixTable()
+    // ...and one whose table was never made (or deleted itself).
+    const gone = crypto.randomUUID()
+    await runInDurableObject(
+      lobbyStub(env),
+      async (instance: LobbyDO, state) => {
+        await state.storage.put(`created:${alive}`, {
+          at: instance.clock(),
+          by: 'orphan-x',
+          ready: false,
+        })
+        await state.storage.put(`created:${gone}`, {
+          at: instance.clock(),
+          by: 'orphan-q',
+          ready: false,
+        })
+      },
+    )
+    // 48 full tables and the two records: the cap, as counted before.
+    await fullTables(SIX_TABLES_MAX - 2)
+    const q = await inLobby('orphan-q')
+    // The live one is offered (it is ready now); the dead one no longer
+    // holds orphan-q to one unseated table, nor a place under the cap.
+    expect(await sentTo(q)).toBe(alive)
+    expect(await createdOf(alive)).toMatchObject({ ready: true })
+    expect(await createdOf(gone)).toBeUndefined()
+    const opened = await sentTo(q, [alive])
+    expect([alive, gone]).not.toContain(opened)
+    expect(await createdOf(opened)).toMatchObject({
+      by: 'orphan-q',
+      ready: true,
+    })
+  })
+
+  it('an /init call that throws keeps its record and the day count until its table is asked', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const real = TableDO.prototype.fetch
+    const thrown = vi
+      .spyOn(TableDO.prototype, 'fetch')
+      .mockImplementationOnce(async () => {
+        throw new Error('connection reset')
+      })
+    const q = await inLobby('thrown-q')
+    expect(await quickSit(q)).toMatchObject({
+      t: 'error',
+      code: 'tables_full',
+    })
+    // The table may exist: the record and the opening stay.
+    const [kept] = await createdIds()
+    expect(await createdOf(kept)).toMatchObject({
+      by: 'thrown-q',
+      ready: false,
+    })
+    expect(await createsOf('thrown-q')).toBe(1)
+    thrown.mockImplementation(function (this: TableDO, request: Request) {
+      return real.call(this, request)
+    })
+    // The next quick-sit asks it: never made, so the record goes, and the
+    // account opens a table (the thrown one's opening is not given back).
+    const opened = await sentTo(q)
+    expect(opened).not.toBe(kept)
+    expect(await createdIds()).toEqual([opened])
+    expect(await createsOf('thrown-q')).toBe(2)
+  })
+})
+
 describe('the cap releases', () => {
   it('when a table quick-sit opened deletes itself, nobody having sat there', async () => {
     await fullTables(SIX_TABLES_MAX - 1)
@@ -588,7 +700,13 @@ describe('the cap releases', () => {
   it('and a record whose removal was lost stops counting 20 minutes after the table opened', async () => {
     await setLobbyClock(AT)
     // An opening the lobby never heard the end of: its init never
-    // answered, and no removal came. It counts, and is offered to nobody.
+    // answered, and no removal came. Its table cannot be asked either
+    // (review B2 asks a table that can: see "an open the lobby never
+    // finished"). It counts, and is offered to nobody.
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(TableDO.prototype, 'liveness').mockRejectedValue(
+      new Error('unreachable'),
+    )
     const lost = crypto.randomUUID()
     await runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
       state.storage.put(`created:${lost}`, {
