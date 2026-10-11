@@ -6,13 +6,30 @@
 // dead button, a dead small blind, players sitting down and players leaving
 // must neither stretch an orbit (someone posts the big blind twice in it)
 // nor shorten it (someone dealt in throughout never posts it).
+import { abortAllDurableObjects, runInDurableObject } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
+import { legalActions } from '../../src/engine/hand'
 import { nextBlinds } from '../../src/engine/positions'
 import type { Blinds } from '../../src/engine/positions'
 import { seededRandom } from '../../src/engine/testing'
 import { EngineError } from '../../src/engine/types'
-import type { SeatId } from '../../src/engine/types'
+import type { HandState, PlayerAction, SeatId } from '../../src/engine/types'
+import type { ServerMsg } from '../../src/shared/protocol'
 import { orbitDone } from '../src/deadlines'
+import { NEXT_HAND_MS } from '../src/table'
+import type { InitBody, TableDO } from '../src/table'
+import { checkFrames, FLOW_TYPES } from './frames'
+import {
+  connect,
+  createTable,
+  elapse,
+  freezeClock,
+  isState,
+  move,
+  peek,
+  stub,
+} from './helpers'
+import type { Client } from './helpers'
 
 /** The seats clockwise from `from` (excluded) to `to` (included). */
 function passed(from: SeatId, to: SeatId) {
@@ -334,5 +351,513 @@ describe('the orbit (orbitDone)', () => {
         EngineError,
       )
     expect(orbitDone(5, prev, next)).toEqual({ travel: 0, refill: true })
+  })
+})
+
+// ---- Over the wire, with a frozen clock that only `elapse` moves ----------
+
+const DECISION = 20_000
+const BANK = 30_000
+
+/** A six-casual table, made through the table's own /init like any table. */
+async function sixTable() {
+  const matchId = crypto.randomUUID()
+  const body: InitBody = {
+    matchId,
+    creator: { userId: 'host', username: 'host' },
+    kind: 'six-casual',
+  }
+  const response = await stub(matchId).fetch('https://table/init', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+  if (response.status !== 201) throw new Error(`init ${response.status}`)
+  await freezeClock(matchId)
+  return matchId
+}
+
+/** `user` connects and sits in `seat`. */
+async function sitDown(matchId: string, user: string, seat: SeatId) {
+  const client = await connect(matchId, user)
+  await client.next((f) => f.t === 'welcome')
+  const from = client.frames.length
+  client.send({ t: 'sit', seat })
+  await client.next((f) => f.t === 'welcome' && f.seat !== null, from)
+  return client
+}
+
+/**
+ * Three players at seats 0, 2 and 4, as `${prefix}-a`, `-b` and `-c`. The
+ * first two start hand 1 heads-up (seat 0 button and small blind, seat 2
+ * big blind: the first orbit starts there); seat 4 sits during it and is
+ * dealt in from hand 2. Hands 2, 3 and 4 then have their big blind on 4, 0
+ * and 2: the big blind has travelled 2 + 2 + 2 seats, so hand 4 starts the
+ * next orbit, and so does every third hand after it.
+ */
+async function threeSeats(prefix: string) {
+  const matchId = await sixTable()
+  const clients: Record<SeatId, Client> = {
+    0: await sitDown(matchId, `${prefix}-a`, 0),
+    2: await sitDown(matchId, `${prefix}-b`, 2),
+  }
+  await clients[0].next(isState(1))
+  clients[4] = await sitDown(matchId, `${prefix}-c`, 4)
+  return { matchId, clients }
+}
+
+const passive = (hand: HandState): PlayerAction =>
+  legalActions(hand).canCheck ? { type: 'check' } : { type: 'call' }
+const fold = (): PlayerAction => ({ type: 'fold' })
+
+/** Plays the hand on the table to its end, each move chosen by `choose`. */
+async function playOut(
+  matchId: string,
+  clients: Record<SeatId, Client>,
+  choose: (hand: HandState) => PlayerAction = passive,
+) {
+  for (let guard = 0; guard < 200; guard++) {
+    const { hand } = await peek(matchId)
+    if (!hand || hand.street === 'showdown') return hand!
+    await move(matchId, clients, choose)
+  }
+  throw new Error('the hand did not end')
+}
+
+/** Ends the hand on the table, then deals the next one. */
+async function nextHand(
+  matchId: string,
+  clients: Record<SeatId, Client>,
+  choose?: (hand: HandState) => PlayerAction,
+) {
+  const ended = await playOut(matchId, clients, choose)
+  const handNo = ended.config.handNo
+  const first = Object.values(clients)[0]
+  await first.next((f) => f.t === 'reveal' && f.handNo === handNo)
+  await elapse(matchId, NEXT_HAND_MS)
+  await first.next(isState(handNo + 1))
+  return (await peek(matchId)).hand!
+}
+
+/** The player to act thinks `ms`, then makes their move. */
+async function think(
+  matchId: string,
+  clients: Record<SeatId, Client>,
+  ms: number,
+  choose: (hand: HandState) => PlayerAction = passive,
+) {
+  await elapse(matchId, ms)
+  await move(matchId, clients, choose)
+}
+
+/** The table's clock now. */
+const clockOf = (matchId: string) =>
+  runInDurableObject(stub(matchId), (instance: TableDO) => instance.clock())
+
+/** Each seated account's bank, as the table stores it. */
+async function banks(matchId: string) {
+  const { match } = await peek(matchId)
+  const { players } = match as unknown as {
+    players: { userId: string; bankMs: number }[]
+  }
+  return Object.fromEntries(players.map((p) => [p.userId, p.bankMs]))
+}
+
+/** The table's stored orbit count. */
+async function travelOf(matchId: string) {
+  const { match } = await peek(matchId)
+  return (match as unknown as { orbitTravel?: number }).orbitTravel
+}
+
+/**
+ * The turn clock `client` was shown once hand `handNo` had `actions`
+ * moves: the deadline of the player to act and what is left of their bank.
+ */
+function clockAt(client: Client, handNo: number, actions: number) {
+  const f = client.frames.filter(isState(handNo, actions)).at(-1) as
+    | Extract<ServerMsg, { t: 'state' | 'welcome' }>
+    | undefined
+  if (!f?.view) throw new Error(`no view of hand ${handNo} at ${actions}`)
+  return { toAct: f.view.toAct, ...f.view.clock }
+}
+
+describe('the bank at a six table', () => {
+  it('the bank refills each orbit (30 s bank, 20 s decision)', async () => {
+    const { matchId, clients } = await threeSeats('refill')
+    const [a, b, c] = ['refill-a', 'refill-b', 'refill-c']
+    // Hand 1: seat 0 acts first, with 20 s to decide and the whole bank.
+    let t = await clockOf(matchId)
+    expect(clockAt(clients[0], 1, 0)).toEqual({
+      toAct: 0,
+      deadline: t + DECISION + BANK,
+      bankMs: BANK,
+    })
+    await think(matchId, clients, 32_000, fold)
+    expect(await banks(matchId)).toEqual({ [a]: 18_000, [b]: BANK, [c]: BANK })
+    // Hand 2 (big blind 4) and hand 3 (big blind 0): the same orbit.
+    let hand = await nextHand(matchId, clients)
+    expect(hand.config).toMatchObject({ button: 0, sb: 2, bb: 4 })
+    expect(await travelOf(matchId)).toBe(2)
+    hand = await nextHand(matchId, clients, fold)
+    expect(hand.config).toMatchObject({ button: 2, sb: 4, bb: 0 })
+    expect(await travelOf(matchId)).toBe(4)
+    // Seat 4 spends 8 s of bank in hand 3.
+    await move(matchId, clients, passive)
+    await think(matchId, clients, 28_000, passive)
+    expect(await banks(matchId)).toEqual({
+      [a]: 18_000,
+      [b]: BANK,
+      [c]: 22_000,
+    })
+
+    // Hand 4: the big blind is back on seat 2, round all six seats. Every
+    // bank is full before the first decision, and seat 4's clock says so.
+    hand = await nextHand(matchId, clients, fold)
+    expect(hand.config).toMatchObject({ button: 4, sb: 0, bb: 2 })
+    expect(await travelOf(matchId)).toBe(0)
+    expect(await banks(matchId)).toEqual({ [a]: BANK, [b]: BANK, [c]: BANK })
+    t = await clockOf(matchId)
+    expect(clockAt(clients[0], 4, 0)).toEqual({
+      toAct: 4,
+      deadline: t + DECISION + BANK,
+      bankMs: BANK,
+    })
+    // The table acts at that deadline, not a moment before.
+    await elapse(matchId, DECISION + BANK - 1)
+    expect((await peek(matchId)).hand!.actions).toHaveLength(0)
+    await elapse(matchId, 1)
+    expect((await peek(matchId)).hand!.actions[0]).toMatchObject({
+      seat: 4,
+      action: { type: 'fold' },
+    })
+    expect(await banks(matchId)).toEqual({ [a]: BANK, [b]: BANK, [c]: 0 })
+    // Seat 0 spent 12 s in the last orbit; it has the whole bank again.
+    t = await clockOf(matchId)
+    expect(clockAt(clients[0], 4, 1)).toEqual({
+      toAct: 0,
+      deadline: t + DECISION + BANK,
+      bankMs: BANK,
+    })
+
+    // Hands 5 and 6 are the second orbit: seat 4 decides on 20 s alone.
+    hand = await nextHand(matchId, clients, fold)
+    expect(hand.config).toMatchObject({ bb: 4 })
+    await move(matchId, clients, passive)
+    await move(matchId, clients, passive)
+    t = await clockOf(matchId)
+    expect(clockAt(clients[0], 5, 2)).toEqual({
+      toAct: 4,
+      deadline: t + DECISION,
+      bankMs: 0,
+    })
+    hand = await nextHand(matchId, clients, passive)
+    expect(hand.config).toMatchObject({ bb: 0 })
+    expect(await banks(matchId)).toEqual({ [a]: BANK, [b]: BANK, [c]: 0 })
+    // Hand 7 starts the third orbit: seat 4's bank is back.
+    hand = await nextHand(matchId, clients, fold)
+    expect(hand.config).toMatchObject({ button: 4, bb: 2 })
+    expect(await banks(matchId)).toEqual({ [a]: BANK, [b]: BANK, [c]: BANK })
+    t = await clockOf(matchId)
+    expect(clockAt(clients[0], 7, 0)).toEqual({
+      toAct: 4,
+      deadline: t + DECISION + BANK,
+      bankMs: BANK,
+    })
+    const frames = Object.values(clients).flatMap((x) => x.frames)
+    expect(checkFrames(frames, 'six-casual')).toEqual(new Set(FLOW_TYPES.six))
+  }, 30_000)
+
+  it('a bank spent in one orbit stays spent until the next orbit starts', async () => {
+    const { matchId, clients } = await threeSeats('spent')
+    const [a, b, c] = ['spent-a', 'spent-b', 'spent-c']
+    // Seat 0 spends 12 s of bank in hand 1 and 8 s more in hand 2.
+    await think(matchId, clients, 32_000, fold)
+    await nextHand(matchId, clients)
+    let t = await clockOf(matchId)
+    expect(clockAt(clients[0], 2, 0)).toEqual({
+      toAct: 0,
+      deadline: t + DECISION + 18_000,
+      bankMs: 18_000,
+    })
+    await think(matchId, clients, 28_000, passive)
+    expect(await banks(matchId)).toEqual({ [a]: 10_000, [b]: BANK, [c]: BANK })
+    // Hand 3, the same orbit: dealing gives nothing back.
+    const hand = await nextHand(matchId, clients)
+    expect(hand.config).toMatchObject({ button: 2, sb: 4, bb: 0 })
+    expect(await banks(matchId)).toEqual({ [a]: 10_000, [b]: BANK, [c]: BANK })
+    await move(matchId, clients, passive)
+    await move(matchId, clients, passive)
+    // Seat 0, the big blind, has 20 s and its last 10 s, and runs out.
+    t = await clockOf(matchId)
+    expect(clockAt(clients[0], 3, 2)).toEqual({
+      toAct: 0,
+      deadline: t + DECISION + 10_000,
+      bankMs: 10_000,
+    })
+    await elapse(matchId, DECISION + 10_000 - 1)
+    expect((await peek(matchId)).hand!.actions).toHaveLength(2)
+    await elapse(matchId, 1)
+    expect((await peek(matchId)).hand!.actions[2]).toMatchObject({
+      seat: 0,
+      action: { type: 'check' },
+    })
+    expect(await banks(matchId)).toEqual({ [a]: 0, [b]: BANK, [c]: BANK })
+    // On the flop seat 0 has the 20 s decision time alone.
+    await move(matchId, clients, passive)
+    t = await clockOf(matchId)
+    expect(clockAt(clients[0], 3, 4)).toEqual({
+      toAct: 0,
+      deadline: t + DECISION,
+      bankMs: 0,
+    })
+    // Hand 4 starts the next orbit: the bank is whole again.
+    await nextHand(matchId, clients)
+    expect(await banks(matchId)).toEqual({ [a]: BANK, [b]: BANK, [c]: BANK })
+  }, 30_000)
+
+  it('a player who sits mid-orbit starts with a full 30 s, and moves the orbit by no hand', async () => {
+    const { matchId, clients } = await threeSeats('join')
+    const [a, b, c, d] = ['join-a', 'join-b', 'join-c', 'join-d']
+    await think(matchId, clients, 32_000, fold)
+    await nextHand(matchId, clients)
+    // Hand 2, big blind on seat 4: it has passed seat 3, where d sits now.
+    clients[3] = await sitDown(matchId, d, 3)
+    expect(await banks(matchId)).toEqual({
+      [a]: 18_000,
+      [b]: BANK,
+      [d]: BANK,
+      [c]: BANK,
+    })
+    // Hand 3: d is dealt in without posting; seat 0 has the big blind.
+    let hand = await nextHand(matchId, clients, fold)
+    expect(hand.config).toMatchObject({ button: 2, sb: 4, bb: 0 })
+    expect(hand.config.seats.map((s) => s.seat)).toEqual([0, 2, 3, 4])
+    expect(await travelOf(matchId)).toBe(4)
+    await move(matchId, clients, passive)
+    // d's first decision has the whole bank; seat 0's stays spent.
+    let t = await clockOf(matchId)
+    expect(clockAt(clients[3], 3, 1)).toEqual({
+      toAct: 3,
+      deadline: t + DECISION + BANK,
+      bankMs: BANK,
+    })
+    await think(matchId, clients, 26_000, passive)
+    expect(await banks(matchId)).toEqual({
+      [a]: 18_000,
+      [b]: BANK,
+      [d]: 24_000,
+      [c]: BANK,
+    })
+    // Hand 4 still starts the next orbit (big blind back on seat 2): the
+    // joiner neither stretched the orbit nor ended it early, and was never
+    // its big blind.
+    hand = await nextHand(matchId, clients, fold)
+    expect(hand.config).toMatchObject({ button: 4, sb: 0, bb: 2 })
+    expect(await travelOf(matchId)).toBe(0)
+    expect(await banks(matchId)).toEqual({
+      [a]: BANK,
+      [b]: BANK,
+      [d]: BANK,
+      [c]: BANK,
+    })
+    t = await clockOf(matchId)
+    expect(clockAt(clients[3], 4, 0)).toEqual({
+      toAct: 3,
+      deadline: t + DECISION + BANK,
+      bankMs: BANK,
+    })
+    checkFrames(
+      Object.values(clients).flatMap((x) => x.frames),
+      'six-casual',
+    )
+  }, 30_000)
+
+  it("banks are keyed by account: a seat's next player starts with 30 s, not what the last one left", async () => {
+    const { matchId, clients } = await threeSeats('owner')
+    const [a, b, c, e] = ['owner-a', 'owner-b', 'owner-c', 'owner-e']
+    await think(matchId, clients, 32_000, fold)
+    await nextHand(matchId, clients)
+    // Hand 2: seat 0 calls, then seat 2 spends 5 s of bank and folds.
+    await move(matchId, clients, passive)
+    await think(matchId, clients, 25_000, fold)
+    expect(await banks(matchId)).toEqual({
+      [a]: 18_000,
+      [b]: 25_000,
+      [c]: BANK,
+    })
+    await playOut(matchId, clients, passive)
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 2)
+    // Between hands seat 2's player stands, and e takes the seat.
+    const from = clients[2].frames.length
+    clients[2].send({ t: 'stand' })
+    await clients[2].next((f) => f.t === 'welcome' && f.seat === null, from)
+    const owner = clients[2]
+    clients[2] = await sitDown(matchId, e, 2)
+    expect(await banks(matchId)).toEqual({ [a]: 18_000, [e]: BANK, [c]: BANK })
+    await elapse(matchId, NEXT_HAND_MS)
+    await clients[0].next(isState(3))
+    // Hand 3, the same orbit: e acts first on the button with all of it.
+    expect((await peek(matchId)).hand!.config).toMatchObject({
+      button: 2,
+      bb: 0,
+    })
+    const t = await clockOf(matchId)
+    expect(clockAt(clients[2], 3, 0)).toEqual({
+      toAct: 2,
+      deadline: t + DECISION + BANK,
+      bankMs: BANK,
+    })
+    expect(await banks(matchId)).toEqual({ [a]: 18_000, [e]: BANK, [c]: BANK })
+    checkFrames(
+      [...Object.values(clients), owner].flatMap((x) => x.frames),
+      'six-casual',
+    )
+  }, 30_000)
+
+  it('every seated player has the whole bank at an orbit start, one not dealt in too', async () => {
+    const { matchId, clients } = await threeSeats('bust')
+    const [a, b, c] = ['bust-a', 'bust-b', 'bust-c']
+    await think(matchId, clients, 32_000, fold)
+    await nextHand(matchId, clients)
+    // Hand 2: seat 4, the big blind, spends 8 s of bank.
+    await move(matchId, clients, passive)
+    await move(matchId, clients, passive)
+    await think(matchId, clients, 28_000, passive)
+    await nextHand(matchId, clients, fold)
+    await playOut(matchId, clients, passive)
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 3)
+    // Seat 4 loses every chip to seat 0 in hand 3 (as an all-in would; no
+    // rebuy yet): seated, but not dealt into hand 4.
+    await runInDurableObject(stub(matchId), (instance: TableDO) => {
+      const { hand } = instance as unknown as { hand: HandState }
+      const winner = hand.players.find((p) => p.seat === 0)!
+      const loser = hand.players.find((p) => p.seat === 4)!
+      winner.stack += loser.stack
+      loser.stack = 0
+    })
+    expect(await banks(matchId)).toEqual({
+      [a]: 18_000,
+      [b]: BANK,
+      [c]: 22_000,
+    })
+    await elapse(matchId, NEXT_HAND_MS)
+    await clients[0].next(isState(4))
+    // Hand 4, heads-up between seats 0 and 2, starts the next orbit (big
+    // blind 0 to 2): every seated player's bank is whole, seat 4's too.
+    const hand = (await peek(matchId)).hand!
+    expect(hand.config.seats.map((s) => s.seat)).toEqual([0, 2])
+    expect(hand.config).toMatchObject({ bb: 2 })
+    expect(await travelOf(matchId)).toBe(0)
+    expect(await banks(matchId)).toEqual({ [a]: BANK, [b]: BANK, [c]: BANK })
+  }, 30_000)
+
+  it('orbitTravel and banks survive a Durable Object restart', async () => {
+    const { matchId, clients } = await threeSeats('restart')
+    const [a, b, c] = ['restart-a', 'restart-b', 'restart-c']
+    await think(matchId, clients, 32_000, fold)
+    await nextHand(matchId, clients)
+    await move(matchId, clients, passive)
+    await think(matchId, clients, 25_000, passive)
+    await nextHand(matchId, clients, fold)
+    // Hand 3, the orbit's third: seat 2 (the button) to act first.
+    const t = await clockOf(matchId)
+    const before = { [a]: 18_000, [b]: 25_000, [c]: BANK }
+    expect(await travelOf(matchId)).toBe(4)
+    expect(await banks(matchId)).toEqual(before)
+
+    await abortAllDurableObjects()
+    await freezeClock(matchId, t)
+    expect(await travelOf(matchId)).toBe(4)
+    expect(await banks(matchId)).toEqual(before)
+    // Everyone reconnects; the clock is the one the turn had.
+    const back: Record<SeatId, Client> = {}
+    for (const [seat, user] of [
+      [0, a],
+      [2, b],
+      [4, c],
+    ] as const) {
+      back[seat] = await connect(matchId, user)
+      await back[seat].next(isState(3, 0))
+    }
+    expect(clockAt(back[2], 3, 0)).toEqual({
+      toAct: 2,
+      deadline: t + DECISION + 25_000,
+      bankMs: 25_000,
+    })
+    // The orbit goes on from where it was: hand 4 starts the next one.
+    const hand = await nextHand(matchId, back, fold)
+    expect(hand.config).toMatchObject({ bb: 2 })
+    expect(await travelOf(matchId)).toBe(0)
+    expect(await banks(matchId)).toEqual({ [a]: BANK, [b]: BANK, [c]: BANK })
+    checkFrames(
+      Object.values(back).flatMap((x) => x.frames),
+      'six-casual',
+    )
+  }, 30_000)
+
+  it('a session rotation mid-orbit keeps the orbit and the banks', async () => {
+    const { matchId, clients } = await threeSeats('rotate')
+    const [a, b, c] = ['rotate-a', 'rotate-b', 'rotate-c']
+    await think(matchId, clients, 32_000, fold)
+    await nextHand(matchId, clients)
+    await move(matchId, clients, passive)
+    await think(matchId, clients, 25_000, passive)
+    await playOut(matchId, clients, fold)
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 2)
+    // The session reaches its last hand: the next deal starts a new one.
+    // (Nothing here is archived: these accounts are not real users.)
+    await runInDurableObject(
+      stub(matchId),
+      async (instance: TableDO, state) => {
+        const { match } = instance as unknown as { match: { handNo: number } }
+        match.handNo = 1000
+        await state.storage.put('match', match)
+      },
+    )
+    const from = clients[0].frames.length
+    await elapse(matchId, NEXT_HAND_MS)
+    const start = (await clients[0].next(
+      (f) => f.t === 'hand_start',
+      from,
+    )) as Extract<ServerMsg, { t: 'hand_start' }>
+    expect(start.handNo).toBe(1)
+    expect(start.matchId).not.toBe(matchId)
+    // Hand 1 of the new session is the orbit's third hand: nothing refills.
+    expect(start).toMatchObject({ button: 2, sb: 4, bb: 0 })
+    expect(await travelOf(matchId)).toBe(4)
+    expect(await banks(matchId)).toEqual({
+      [a]: 18_000,
+      [b]: 25_000,
+      [c]: BANK,
+    })
+    // Its hand 2 has the big blind back on seat 2: the next orbit.
+    const hand = await nextHand(matchId, clients, fold)
+    expect(hand.config).toMatchObject({ handNo: 2, bb: 2 })
+    expect(await banks(matchId)).toEqual({ [a]: BANK, [b]: BANK, [c]: BANK })
+  }, 30_000)
+})
+
+describe('heads-up banks', () => {
+  it('a heads-up table stores no orbit: its match keeps the keys it had', async () => {
+    const matchId = await createTable('hu-a', 3)
+    await freezeClock(matchId)
+    const seats: Record<SeatId, Client> = {
+      0: await connect(matchId, 'hu-a'),
+      1: await connect(matchId, 'hu-b'),
+    }
+    await seats[0].next(isState(1))
+    await nextHand(matchId, seats, fold)
+    const { match } = await peek(matchId)
+    expect(Object.keys(match).sort()).toEqual(
+      ['config', 'handNo', 'id', 'net', 'players', 'status', 'v'].sort(),
+    )
+    const { config, players } = match as unknown as {
+      config: object
+      players: object[]
+    }
+    expect(config).not.toHaveProperty('bankRefill')
+    for (const p of players)
+      expect(Object.keys(p).sort()).toEqual(
+        ['bankMs', 'seat', 'timeouts', 'userId', 'username'].sort(),
+      )
   })
 })

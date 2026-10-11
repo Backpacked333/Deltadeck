@@ -52,10 +52,18 @@ export type MatchConfig = {
   decisionMs: number
   bankMs: number
   /**
-   * The bank refills to `bankMs` every this many hands (rated: 20, so each
-   * half of the match has its own). Absent: one bank for the whole match.
+   * Heads-up: the bank refills to `bankMs` every this many hands (rated:
+   * 20, so each half of the match has its own). Absent, and no
+   * `bankRefill`: one bank for the whole match.
    */
   bankRefillEvery?: number
+  /**
+   * Six tables: every seated player's bank is set to `bankMs` when a hand
+   * starts a new orbit, before its first decision (ADR amendment
+   * 2026-10-10, "Orbit and clock"). An orbit is the big blind's travel
+   * round all six seats, so departures shorten it in hands, never in seats.
+   */
+  bankRefill?: 'orbit'
 }
 
 /** A rated player's result: from the luck-adjusted total and the draw band. */
