@@ -159,12 +159,17 @@ type Player = {
   stack?: number
   status?: SeatStatus
   /**
-   * Six-casual, sitting out: orbit starts since they sat out (0 to 2). At
-   * SIT_OUT_ORBITS they are stood up. Kept by account with the match, so
-   * it survives a restart and a session rotation, as `orbitTravel` does.
+   * Six-casual: orbit starts (0 to 2) since they first sat out after the
+   * last hand they were dealt into. At SIT_OUT_ORBITS they are stood up.
+   * Kept by account with the match, so it survives a restart and a
+   * session rotation, as `orbitTravel` does. A sit_in keeps it: only a
+   * dealt hand clears it, or a sit_in and sit_out would start it again.
    */
   outOrbits?: number
-  /** Six-casual, sitting out: since when (the table's clock). */
+  /**
+   * Six-casual: when (the table's clock) they first sat out after the
+   * last hand they were dealt into. Kept and cleared as `outOrbits` is.
+   */
   outSince?: number
   /** Six-casual: sat down since the last deal (dealt in without posting). */
   justSat?: boolean
@@ -886,7 +891,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
       return this.send(ws, this.frame('welcome', userId))
     this.seq++
     await this.ctx.storage.put({ match, seq: this.seq })
-    // Their five minutes start now (syncSitOut).
+    // Their five minutes run (syncSitOut): from now, or from an earlier
+    // sit_out if no hand has dealt them in since.
     await this.armAlarm()
     this.send(ws, this.frame('welcome', userId))
     this.broadcast('state', { skip: ws, roster: true })
@@ -924,22 +930,26 @@ export class TableDO extends DurableObject<WorkerEnv> {
 
   /**
    * Six-casual: `player` sits out from the next hand. False when they
-   * already were.
+   * already were. Their removal clocks start now, unless they sat out
+   * before and no hand has dealt them in since: a sit_in that was never
+   * dealt does not restart them (ADR, clarifications from PR-16), or two
+   * clicks every few minutes would hold a seat for good.
    */
   private sitOut(player: Player) {
     if (player.status === 'sitting_out') return false
     player.status = 'sitting_out'
-    player.outOrbits = 0
-    player.outSince = this.clock()
+    player.outOrbits ??= 0
+    player.outSince ??= this.clock()
     return true
   }
 
-  /** Six-casual: `player` is dealt in from the next hand, with no misses. */
+  /**
+   * Six-casual: `player` is dealt in from the next hand, with no misses.
+   * Their removal clocks stay until that deal (startNextHandNow).
+   */
   private sitIn(player: Player) {
     player.status = 'playing'
     player.timeouts = 0
-    delete player.outOrbits
-    delete player.outSince
   }
 
   /**
@@ -1568,8 +1578,14 @@ export class TableDO extends DurableObject<WorkerEnv> {
         userId,
         username: match.players.find((p) => p.userId === userId)!.username,
       }))
+      // Dealt in: no longer new here, and any removal clock from a
+      // sit-out before this hand is spent.
       for (const p of match.players)
-        if (match.dealt.some((d) => d.userId === p.userId)) p.justSat = false
+        if (match.dealt.some((d) => d.userId === p.userId)) {
+          p.justSat = false
+          delete p.outOrbits
+          delete p.outSince
+        }
       match.sessionUsers = [
         ...new Set([
           ...(match.sessionUsers ?? []),

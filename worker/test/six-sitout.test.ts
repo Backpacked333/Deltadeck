@@ -171,6 +171,12 @@ async function timeOut(matchId: string) {
 const clockOf = (matchId: string) =>
   runInDurableObject(stub(matchId), (instance: TableDO) => instance.clock())
 
+/** The table's stored deadlines, as a restarted object reads them. */
+const storedDeadlines = (matchId: string) =>
+  runInDurableObject(stub(matchId), (_: TableDO, state) =>
+    state.storage.get<{ kind: string; at: number }[]>('deadlines'),
+  )
+
 /** `client` sends `msg`; resolves with the welcome or error that answers it. */
 async function answer(client: Client, msg: ClientMsg) {
   const from = client.frames.length
@@ -603,6 +609,139 @@ describe('standing up a player who sits out', () => {
       'six-casual',
     )
   })
+
+  it('a sit_in and sit_out with no dealt hand between keeps the five-minute clock', async () => {
+    const matchId = await sixTable()
+    const clients: Record<SeatId, Client> = {
+      0: await sitDown(matchId, 'tg-0', 0),
+      2: await sitDown(matchId, 'tg-2', 2),
+    }
+    await clients[0].next(isState(1))
+    await playOut(matchId, clients, fold)
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 1)
+    // Seat 2 sits out between hands and the table waits; a minute later
+    // seat 0 sits out too.
+    const t = await clockOf(matchId)
+    await sitOut(clients[2])
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).match.status).toBe('waiting')
+    await elapse(matchId, 60_000 - NEXT_HAND_MS)
+    await sitOut(clients[0])
+    // Seat 0 sits in and straight out again, twice, the second time after
+    // seat 2 has been stood up. No sit_in deals a hand (there is never a
+    // second player to deal in), so none restarts its five minutes: they
+    // run from its first sit_out, and the alarm stays there.
+    for (const at of [3 * 60_000, 5.5 * 60_000]) {
+      await elapse(matchId, t + at - (await clockOf(matchId)))
+      expect(statusOf(await sitIn(clients[0]), 0)).toBe('playing')
+      expect(statusOf(await sitOut(clients[0]), 0)).toBe('sitting_out')
+    }
+    expect((await seated(matchId)).map((p) => p.seat)).toEqual([0])
+    expect(await storedDeadlines(matchId)).toContainEqual({
+      kind: 'sitout',
+      at: t + 60_000 + FIVE_MINUTES,
+    })
+    await elapse(
+      matchId,
+      t + 60_000 + FIVE_MINUTES - 1 - (await clockOf(matchId)),
+    )
+    expect((await seated(matchId)).map((p) => p.seat)).toEqual([0])
+    await elapse(matchId, 1)
+    expect((await seated(matchId)).map((p) => p.seat)).toEqual([])
+    expect(last(clients[0].frames)).toMatchObject({ t: 'welcome', seat: null })
+    expect((await peek(matchId)).hand!.config.handNo).toBe(1)
+    checkFrames(
+      Object.values(clients).flatMap((c) => c.frames),
+      'six-casual',
+    )
+  })
+
+  it('a sit_in and sit_out with no dealt hand between keeps the orbit count', async () => {
+    const matchId = await sixTable()
+    const clients: Record<SeatId, Client> = {
+      0: await sitDown(matchId, 'tt-0', 0),
+      2: await sitDown(matchId, 'tt-2', 2),
+    }
+    await clients[0].next(isState(1))
+    // Seat 4 sits down during hand 1 and sits out before it is dealt any.
+    // Before every deal it sits in and straight out again, so it is never
+    // dealt in; once, with its chips gone, a rebuy is its way back in.
+    // Neither restarts its count: big blinds 2, 0, 2, 0, 2, 0, 2 between
+    // seats 0 and 2, so hands 3, 5 and 7 are its three orbit starts.
+    const toggler = await sitDown(matchId, 'tt-4', 4)
+    await sitOut(toggler)
+    let from = 0
+    for (let n = 1; n < 7; n++) {
+      expect((await seated(matchId)).map((p) => p.seat)).toEqual([0, 2, 4])
+      await playOut(matchId, clients, fold)
+      await clients[0].next((f) => f.t === 'reveal' && f.handNo === n)
+      if (n === 3) {
+        await setStack(matchId, 4, 0)
+        const topped = await answer(toggler, { t: 'rebuy' })
+        expect(rosterOf(topped, 4)).toMatchObject({ status: 'playing' })
+      } else expect(statusOf(await sitIn(toggler), 4)).toBe('playing')
+      expect(statusOf(await sitOut(toggler), 4)).toBe('sitting_out')
+      from = toggler.frames.length
+      await elapse(matchId, NEXT_HAND_MS)
+      await clients[0].next(isState(n + 1))
+      const { hand } = await peek(matchId)
+      expect(hand!.config.seats.map((s) => s.seat)).toEqual([0, 2])
+    }
+    expect((await peek(matchId)).hand!.config.handNo).toBe(7)
+    expect((await seated(matchId)).map((p) => p.seat)).toEqual([0, 2])
+    await toggler.next((f) => f.t === 'welcome' && f.seat === null, from)
+    await eventually(async () => !('tt-4' in (await claims())))
+    checkFrames(
+      [toggler, ...Object.values(clients)].flatMap((c) => c.frames),
+      'six-casual',
+    )
+  }, 30_000)
+
+  it('a dealt hand spends the removal clocks, so the next sit_out starts them again', async () => {
+    const matchId = await sixTable()
+    const clients: Record<SeatId, Client> = {
+      0: await sitDown(matchId, 'dc-0', 0),
+      2: await sitDown(matchId, 'dc-2', 2),
+    }
+    await clients[0].next(isState(1))
+    // Seat 4 sits out during hand 1, before it is dealt any. Hand 3 is
+    // its first orbit start since (big blinds 2, 0, 2).
+    clients[4] = await sitDown(matchId, 'dc-4', 4)
+    const since = await clockOf(matchId)
+    await sitOut(clients[4])
+    const players = { 0: clients[0], 2: clients[2] }
+    await nextHand(matchId, players, fold)
+    await nextHand(matchId, players, fold)
+    const four = () =>
+      seated(matchId).then((all) => all.find((p) => p.seat === 4)!)
+    expect(await four()).toMatchObject({ outOrbits: 1, outSince: since })
+    // It sits in during hand 3: playing, its clocks kept until a deal.
+    await sitIn(clients[4])
+    expect(await four()).toMatchObject({
+      status: 'playing',
+      outOrbits: 1,
+      outSince: since,
+    })
+    // Hand 4 deals it in: they are spent. Sitting out during hand 4, it
+    // starts both again, from 0 orbit starts and from now.
+    const hand = await nextHand(matchId, players, fold)
+    expect(hand.config.seats.map((s) => s.seat)).toEqual([0, 2, 4])
+    const dealt = await four()
+    expect(dealt).not.toHaveProperty('outOrbits')
+    expect(dealt).not.toHaveProperty('outSince')
+    const again = await clockOf(matchId)
+    expect(again).toBeGreaterThan(since)
+    await sitOut(clients[4])
+    expect(await four()).toMatchObject({
+      status: 'sitting_out',
+      outOrbits: 0,
+      outSince: again,
+    })
+    checkFrames(
+      Object.values(clients).flatMap((c) => c.frames),
+      'six-casual',
+    )
+  }, 30_000)
 })
 
 describe('heads-up timeouts', () => {
@@ -819,12 +958,6 @@ describe('a busted player at a six table', () => {
 })
 
 describe('sitting out across a restart', () => {
-  /** The table's stored deadlines, as a restarted object reads them. */
-  const storedDeadlines = (matchId: string) =>
-    runInDurableObject(stub(matchId), (_: TableDO, state) =>
-      state.storage.get<{ kind: string; at: number }[]>('deadlines'),
-    )
-
   it('statuses, orbit counts and the five-minute timer survive a Durable Object restart', async () => {
     // Orbits: seat 4 sits out during hand 1; hand 3 is the first orbit
     // start since (big blinds 2, 0, 2 between seats 0 and 2).
