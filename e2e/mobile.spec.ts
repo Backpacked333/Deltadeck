@@ -163,9 +163,9 @@ test('a six-seat table with two side pots fits 320 px, in the hand and at its re
   await expect(board.getByRole('img', { name: / of / })).toHaveCount(5)
   const pots = ring.getByRole('list', { name: 'Pots' })
   await expect(pots.getByRole('listitem')).toHaveText([
-    /^Main pot 5,640 /,
-    /^Side pot 1 2,800 /,
-    /^Side pot 2 800 /,
+    /^Main pot: 5,640 /,
+    /^Side pot 1: 2,800 /,
+    /^Side pot 2: 800 /,
   ])
   await expectNoOverflow(page)
   await expectRingFits(page, { board, pots })
@@ -175,9 +175,9 @@ test('a six-seat table with two side pots fits 320 px, in the hand and at its re
   await page.getByRole('button', { name: /^(Call|Check)/ }).click()
   const paid = ring.getByRole('list', { name: 'Pots paid' })
   await expect(paid.getByRole('listitem')).toHaveText([
-    /^Side pot 2 800 .*seraphina_lindqvist$/,
-    /^Side pot 1 2,800 .*seraphina_lindqvist$/,
-    /^Main pot 5,640 .*seraphina_lindqvist$/,
+    /^Side pot 2: 800 .*seraphina_lindqvist$/,
+    /^Side pot 1: 2,800 .*seraphina_lindqvist$/,
+    /^Main pot: 5,640 .*seraphina_lindqvist$/,
   ])
   await expectRingFits(page, { board, pots: paid })
 })
@@ -198,9 +198,9 @@ test('a six-seat table fits 320 px when its side pots are split between the long
   await page.getByRole('button', { name: /^(Call|Check)/ }).click()
   const paid = ring.getByRole('list', { name: 'Pots paid' })
   await expect(paid.getByRole('listitem')).toHaveText([
-    'Side pot 2 800 chips split: you 200, maximilian_okafor 200, seraphina_lindqvist 200, ozymandias_kings 200',
-    'Side pot 1 2,800 chips split: you 560, maximilian_okafor 560, seraphina_lindqvist 560, bartholomew_99 560, ozymandias_kings 560',
-    'Main pot 5,640 chips split: you 940, maximilian_okafor 940, seraphina_lindqvist 940, bartholomew_99 940, evangeline_marten 940, ozymandias_kings 940',
+    'Side pot 2: 800 chips, split: you 200, maximilian_okafor 200, seraphina_lindqvist 200, ozymandias_kings 200',
+    'Side pot 1: 2,800 chips, split: you 560, maximilian_okafor 560, seraphina_lindqvist 560, bartholomew_99 560, ozymandias_kings 560',
+    'Main pot: 5,640 chips, split: you 940, maximilian_okafor 940, seraphina_lindqvist 940, bartholomew_99 940, evangeline_marten 940, ozymandias_kings 940',
   ])
   await expectNoOverflow(page)
   await expectRingFits(page, { board, pots: paid })

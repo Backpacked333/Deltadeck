@@ -494,6 +494,8 @@ function Middle({
  * says who can still win it. At the result each says who took it, in the
  * order the chips are pushed: the last side pot first and the main pot
  * last (HandResult.awards), the order PR-22's chip flights will follow.
+ * Both lists spell out role="list": Safari drops the role of a list styled
+ * list-style: none, and its name with it.
  */
 function SidePots({
   view,
@@ -507,14 +509,15 @@ function SidePots({
   const label = (pot: number) => (pot === 0 ? 'Main pot' : `Side pot ${pot}`)
   const who = (seat: SeatId) => (seat === view.you ? 'you' : nameOf(seat))
   const result = view.result
+  // Always "between": a pot down to one seat ends the hand in the same act.
   if (!result)
     return (
-      <ul className="six-pots" aria-label="Pots">
+      <ul className="six-pots" role="list" aria-label="Pots">
         {layers.map((pot, i) => (
           <li key={i}>
-            {label(i)} <b>{chips(pot.amount)}</b>
+            {label(i)}: <b>{chips(pot.amount)}</b>
             <span className="sr-only">
-              {` chips ${pot.eligible.length === 1 ? 'for' : 'between'} ${listed(pot.eligible.map(who))}`}
+              {` chips between ${listed(pot.eligible.map(who))}`}
             </span>
           </li>
         ))}
@@ -524,18 +527,18 @@ function SidePots({
   // first award gives its place.
   const order = [...new Set(result.awards.map((a) => a.pot))]
   return (
-    <ol className="six-pots six-paid" aria-label="Pots paid">
+    <ol className="six-pots six-paid" role="list" aria-label="Pots paid">
       {order.map((pot) => {
-        // A tiny pot split many ways can leave a winner a share of nothing.
+        // Only seats that were paid chips are named, as in resultText.
         const paid = result.awards.filter((a) => a.pot === pot && a.amount > 0)
         const amount = paid.reduce((sum, a) => sum + a.amount, 0)
         return (
           <li key={pot}>
-            {label(pot)} <b>{chips(amount)}</b>
+            {label(pot)}: <b>{chips(amount)}</b>
             <span className="sr-only"> chips</span>
             {paid.length === 1
               ? ` to ${who(paid[0].seat)}`
-              : ` split: ${paid.map((a) => `${who(a.seat)} ${chips(a.amount)}`).join(', ')}`}
+              : `, split: ${paid.map((a) => `${who(a.seat)} ${chips(a.amount)}`).join(', ')}`}
           </li>
         )
       })}

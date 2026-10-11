@@ -1110,11 +1110,15 @@ describe('LiveTable at a six-casual table', () => {
     // in words who can still win it.
     const table = screen.getByRole('region', { name: 'Poker table' })
     expect(within(table).getByText(/^Pot/)).toHaveTextContent('Pot 3,500')
-    expect(items(within(table).getByRole('list', { name: 'Pots' }))).toEqual([
-      'Main pot 1,200 chips between bob, you, carol and dave',
-      'Side pot 1 1,500 chips between bob, you and dave',
-      'Side pot 2 800 chips between you and dave',
+    const pots = within(table).getByRole('list', { name: 'Pots' })
+    expect(items(pots)).toEqual([
+      'Main pot: 1,200 chips between bob, you, carol and dave',
+      'Side pot 1: 1,500 chips between bob, you and dave',
+      'Side pot 2: 800 chips between you and dave',
     ])
+    // Safari drops the list role of an unstyled list (list-style: none),
+    // and its name with it, unless the role is spelled out.
+    expect(pots).toHaveAttribute('role', 'list')
 
     // alice bets 200 on the turn. The bet sits on her plate and in the
     // total; the pots are the chips of finished streets, so none moves.
@@ -1123,9 +1127,9 @@ describe('LiveTable at a six-casual table', () => {
     expect(seat(2)).toHaveTextContent('Bet 200')
     expect(within(table).getByText(/^Pot/)).toHaveTextContent('Pot 3,700')
     expect(items(within(table).getByRole('list', { name: 'Pots' }))).toEqual([
-      'Main pot 1,200 chips between bob, you, carol and dave',
-      'Side pot 1 1,500 chips between bob, you and dave',
-      'Side pot 2 800 chips between you and dave',
+      'Main pot: 1,200 chips between bob, you, carol and dave',
+      'Side pot 1: 1,500 chips between bob, you and dave',
+      'Side pot 2: 800 chips between you and dave',
     ])
 
     // dave calls and it is checked down: carol's straight takes the main
@@ -1136,13 +1140,13 @@ describe('LiveTable at a six-casual table', () => {
     expect(hand.result!.awards.map((a) => a.pot)).toEqual([2, 1, 0])
     act(() => socket.emit(sixFrame('state', 3, 2, 2, hand)))
     expect(within(table).queryByRole('list', { name: 'Pots' })).toBeNull()
-    expect(
-      items(within(table).getByRole('list', { name: 'Pots paid' })),
-    ).toEqual([
-      'Side pot 2 1,200 chips to you',
-      'Side pot 1 1,500 chips to bob',
-      'Main pot 1,200 chips to carol',
+    const paid = within(table).getByRole('list', { name: 'Pots paid' })
+    expect(items(paid)).toEqual([
+      'Side pot 2: 1,200 chips to you',
+      'Side pot 1: 1,500 chips to bob',
+      'Main pot: 1,200 chips to carol',
     ])
+    expect(paid).toHaveAttribute('role', 'list')
   })
 
   it("a split side pot shows each winner's share", async () => {
@@ -1162,8 +1166,8 @@ describe('LiveTable at a six-casual table', () => {
     act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
 
     expect(items(screen.getByRole('list', { name: 'Pots paid' }))).toEqual([
-      'Side pot 1 1,000 chips split: you 500, dave 500',
-      'Main pot 900 chips to carol',
+      'Side pot 1: 1,000 chips, split: you 500, dave 500',
+      'Main pot: 900 chips to carol',
     ])
   })
 
@@ -1191,9 +1195,9 @@ describe('LiveTable at a six-casual table', () => {
     })
     expect(seat(0)).toHaveAccessibleName('Seat 1: erin')
     expect(items(screen.getByRole('list', { name: 'Pots paid' }))).toEqual([
-      'Side pot 2 800 chips to you',
-      'Side pot 1 1,500 chips to bob',
-      'Main pot 1,200 chips to carol',
+      'Side pot 2: 800 chips to you',
+      'Side pot 1: 1,500 chips to bob',
+      'Main pot: 1,200 chips to carol',
     ])
   })
 
@@ -1210,9 +1214,9 @@ describe('LiveTable at a six-casual table', () => {
       ),
     )
     expect(items(screen.getByRole('list', { name: 'Pots' }))).toEqual([
-      'Main pot 1,200 chips between bob, alice, carol and dave',
-      'Side pot 1 1,500 chips between bob, alice and dave',
-      'Side pot 2 800 chips between alice and dave',
+      'Main pot: 1,200 chips between bob, alice, carol and dave',
+      'Side pot 1: 1,500 chips between bob, alice and dave',
+      'Side pot 2: 800 chips between alice and dave',
     ])
 
     act(() =>
@@ -1223,9 +1227,9 @@ describe('LiveTable at a six-casual table', () => {
       ),
     )
     expect(items(screen.getByRole('list', { name: 'Pots paid' }))).toEqual([
-      'Side pot 2 800 chips to alice',
-      'Side pot 1 1,500 chips to bob',
-      'Main pot 1,200 chips to carol',
+      'Side pot 2: 800 chips to alice',
+      'Side pot 1: 1,500 chips to bob',
+      'Main pot: 1,200 chips to carol',
     ])
   })
 
