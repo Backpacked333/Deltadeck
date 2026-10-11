@@ -386,7 +386,11 @@ describe('Lobby: Play rated 1v1', () => {
     await userEvent.click(
       screen.getByRole('button', { name: 'Find a rated match' }),
     )
-    expect(sent(socket)).toEqual([{ t: 'queue', kind: 'hu-rated' }])
+    // The six-table list is asked for as the socket opens (PR-25).
+    expect(sent(socket)).toEqual([
+      { t: 'tables' },
+      { t: 'queue', kind: 'hu-rated' },
+    ])
     expect(screen.getAllByText('Looking for an opponent')).toHaveLength(1)
     expect(screen.getByRole('button', { name: 'Find a match' })).toBeDisabled()
     act(() => socket.emit(lobbyFrame({ t: 'matched', matchId: MATCH })))
@@ -447,7 +451,10 @@ describe('Lobby: Play 1v1', () => {
     act(() => socket.emit(lobbyFrame({ t: 'presence', online: 3, queued: 0 })))
     expect(screen.getByText('2 other players in the lobby.')).toBeVisible()
     await userEvent.click(screen.getByRole('button', { name: 'Find a match' }))
-    expect(sent(socket)).toEqual([{ t: 'queue', kind: 'hu-casual' }])
+    expect(sent(socket)).toEqual([
+      { t: 'tables' },
+      { t: 'queue', kind: 'hu-casual' },
+    ])
     expect(screen.getByText('Looking for an opponent')).toBeVisible()
     act(() => socket.emit(lobbyFrame({ t: 'matched', matchId: MATCH })))
     expect(window.location.hash).toBe(`#play/${MATCH}`)
@@ -495,7 +502,10 @@ describe('Lobby: Play 1v1', () => {
 
   it('starts looking at once when sent back to find another match', async () => {
     const socket = await lobbyPage({ autoFind: true })
-    expect(sent(socket)).toEqual([{ t: 'queue', kind: 'hu-casual' }])
+    expect(sent(socket)).toEqual([
+      { t: 'queue', kind: 'hu-casual' },
+      { t: 'tables' },
+    ])
   })
 
   it('points to the table already in play', async () => {
@@ -611,7 +621,10 @@ describe('LiveApp routes', () => {
     const lobbySocket = FakeSocket.last()
     expect(lobbySocket.url).toContain('/ws/lobby')
     act(() => lobbySocket.open())
-    expect(sent(lobbySocket)).toEqual([{ t: 'queue', kind: 'hu-casual' }])
+    expect(sent(lobbySocket)).toEqual([
+      { t: 'queue', kind: 'hu-casual' },
+      { t: 'tables' },
+    ])
     expect(window.location.hash).toBe('#lobby')
     sessionStorage.removeItem('qp.devToken')
   })

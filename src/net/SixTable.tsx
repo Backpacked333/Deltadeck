@@ -70,6 +70,7 @@ type Move = 'fold' | 'continue' | 'raise'
 export function SixTable({
   table,
   state,
+  taking = false,
   act,
   sit,
   rebuy,
@@ -79,6 +80,8 @@ export function SixTable({
 }: {
   table: MatchInfo
   state: TableState
+  /** A quick-sit's bare sit is on its way (LiveTable): no Sit here meanwhile. */
+  taking?: boolean
   act: (action: PlayerAction) => boolean
   sit: (seat: SeatId) => boolean
   rebuy: () => boolean
@@ -153,8 +156,27 @@ export function SixTable({
   // jump on every turn.
   const [dock, setDock] = useState(0)
 
+  // Arrived by quick-sit, the player pressed nothing: focus, on <body>
+  // after the route change, goes where it would after a Sit here.
+  const wasTaking = useRef(taking)
+  useLayoutEffect(() => {
+    const ended = wasTaking.current && !taking
+    wasTaking.current = taking
+    if (!ended) return
+    const active = document.activeElement
+    if (active && active !== document.body) return
+    root.current
+      ?.querySelector<HTMLElement>(
+        seat !== null ? '.six-seat[data-slot="0"]' : '.six-wait',
+      )
+      ?.focus()
+  }, [taking, seat])
+
   const canSit =
-    seat === null && state.status === 'open' && table.status !== 'finished'
+    seat === null &&
+    !taking &&
+    state.status === 'open' &&
+    table.status !== 'finished'
   const mine =
     seat === null ? undefined : table.players.find((p) => p.seat === seat)
   const controls = state.status === 'open' && table.status !== 'finished'
@@ -298,6 +320,7 @@ export function SixTable({
             table={table}
             view={view}
             state={state}
+            taking={taking}
             nameOf={nameOf}
             broke={broke}
             out={out}
@@ -671,6 +694,7 @@ function SixStatus({
   table,
   view,
   state,
+  taking,
   nameOf,
   broke,
   out,
@@ -679,6 +703,8 @@ function SixStatus({
   table: MatchInfo
   view: SeatView | null
   state: TableState
+  /** A quick-sit's sit is on its way. */
+  taking: boolean
   nameOf: (seat: SeatId) => string
   /** Seated with no chips: the seat controls say to rebuy (SixTable). */
   broke: boolean
@@ -707,11 +733,13 @@ function SixStatus({
       : result && view
         ? resultText(view, result, nameOf)
         : !seated
-          ? removed
-            ? 'You were stood up after sitting out.'
-            : table.players.length >= SEATS
-              ? 'Every seat is taken.'
-              : 'Pick an empty seat to play.'
+          ? taking
+            ? 'Taking a seat…'
+            : removed
+              ? 'You were stood up after sitting out.'
+              : table.players.length >= SEATS
+                ? 'Every seat is taken.'
+                : 'Pick an empty seat to play.'
           : !view
             ? table.players.length < 2
               ? 'Waiting for a second player to sit down.'
@@ -726,7 +754,8 @@ function SixStatus({
   const caption =
     table.status === 'finished' ? (
       <a href="#lobby">Back to the lobby</a>
-    ) : broke || out ? null : seated && view?.you === null ? (
+    ) : broke || out || (!seated && taking) ? null : seated &&
+      view?.you === null ? (
       'You are dealt in from the next hand.'
     ) : !seated && table.players.length < SEATS ? (
       'Take a seat to be dealt in from the next hand.'

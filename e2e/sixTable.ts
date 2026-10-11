@@ -12,8 +12,10 @@ import type {
 import type {
   ClientMsg,
   ErrorCode,
+  LobbyMsg,
   MatchInfo,
   ServerMsg,
+  TableRow,
 } from '../src/shared/protocol'
 
 export const SIX_TABLE = '66666666-6666-4666-8666-666666666666'
@@ -439,4 +441,107 @@ export async function devSignIn(page: Page, name: string) {
     )
     sessionStorage.setItem('qp.devToken', token)
   }, `dev.${name}.e2e-local-secret-0001`)
+}
+
+/** A lobby frame, numbered as it is sent. */
+type LobbyAnswer = LobbyMsg extends infer M
+  ? M extends { seq: number }
+    ? Omit<M, 'seq'>
+    : never
+  : never
+
+/**
+ * The lobby's socket, answered here: the six-table list, and each
+ * quick-sit by `answer` (given the tables it names as tried; null holds
+ * it). What every lobby socket received, one list per socket, in order.
+ */
+export async function fakeLobby(
+  page: Page,
+  {
+    tables = [],
+    answer,
+  }: {
+    tables?: TableRow[]
+    answer: (tried: string[]) => LobbyAnswer | null
+  },
+) {
+  const received: ClientMsg[][] = []
+  await page.routeWebSocket(/\/ws\/lobby$/, (ws) => {
+    const mine: ClientMsg[] = []
+    received.push(mine)
+    const send = (msg: LobbyAnswer) =>
+      ws.send(JSON.stringify({ seq: 1, ...msg }))
+    send({ t: 'presence', online: 1, queued: 0, rated: 0 })
+    ws.onMessage((data) => {
+      const msg = JSON.parse(String(data)) as ClientMsg
+      mine.push(msg)
+      if (msg.t === 'tables') send({ t: 'tables', tables })
+      if (msg.t === 'quick_sit') {
+        const reply = answer(msg.tried ?? [])
+        if (reply) send(reply)
+      }
+    })
+  })
+  return { received }
+}
+
+/**
+ * Six tables that a quick-sit is sent to: each welcomes the socket
+ * without a seat (two others sit there), then answers its sit as `plan`
+ * says, refusing it as full or seating the player at seat 1. What each
+ * table received, by id.
+ */
+export async function fakeSitTables(
+  page: Page,
+  plan: Record<string, 'full' | 'seat'>,
+) {
+  const received: Record<string, ClientMsg[]> = {}
+  await page.routeWebSocket(/\/ws\/table\//, (ws) => {
+    const id = ws.url().split('/').pop()!
+    const mine = (received[id] ??= [])
+    let seq = 0
+    const table = (seated: boolean): MatchInfo => ({
+      kind: 'six-casual',
+      status: 'playing',
+      players: [
+        { seat: 0, username: 'maximilian_okafor', stack: 2000 },
+        ...(seated ? [{ seat: 1, username: 'you', stack: 2000 }] : []),
+        { seat: 3, username: 'seraphina_lindqvist', stack: 2000 },
+      ].map((p) => ({
+        ...p,
+        connected: true,
+        consecutiveTimeouts: 0,
+        status: 'playing' as const,
+      })),
+    })
+    const welcome = (seat: number | null): ServerMsg => ({
+      t: 'welcome',
+      seq: ++seq,
+      matchId: id,
+      serverNow: Date.now(),
+      table: table(seat !== null),
+      view: null,
+      seat,
+    })
+    ws.send(JSON.stringify(welcome(null)))
+    ws.onMessage((data) => {
+      const msg = JSON.parse(String(data)) as ClientMsg
+      mine.push(msg)
+      if (msg.t !== 'sit') return
+      ws.send(
+        JSON.stringify(
+          plan[id] === 'seat'
+            ? welcome(1)
+            : {
+                t: 'error',
+                seq,
+                matchId: id,
+                code: 'table_full',
+                message: 'Every seat is taken',
+              },
+        ),
+      )
+    })
+  })
+  return { received }
 }

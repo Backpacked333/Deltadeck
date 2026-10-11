@@ -43,10 +43,10 @@ describe('src/net imports', () => {
     }
   })
 
-  // The six-seat ring is reached only through the lazy online chunk: an
-  // import from anywhere else could pull it into the entry bundle (ADR,
-  // "Table UI (P2-05)").
-  it('are the only ones to import the six-seat ring', () => {
+  // The six-seat ring and the table list are reached only through the
+  // lazy online chunk: an import from anywhere else could pull them into
+  // the entry bundle (ADR, "Table UI (P2-05)"; clarifications from PR-25).
+  it('are the only ones to import the six-seat ring and the table list', () => {
     const src = new URL('../', import.meta.url)
     const files = readdirSync(src, { recursive: true, encoding: 'utf8' })
       .map((f) => f.replaceAll('\\', '/'))
@@ -55,8 +55,10 @@ describe('src/net imports', () => {
     for (const file of files) {
       const source = readFileSync(new URL(file, src), 'utf8')
       expect(
-        source.match(/(from |import\()'[^']*\/(SixRing|SeatPlate)'/)?.[0],
-        `${file} imports the ring`,
+        source.match(
+          /(from |import\()'[^']*\/(SixRing|SeatPlate|TableList)'/,
+        )?.[0],
+        `${file} imports the ring or the list`,
       ).toBeUndefined()
     }
   })

@@ -166,7 +166,9 @@ describe('TableConnection', () => {
     other.open()
     other.emit(sixFrame('welcome', 1, null, null, null))
     expect(named.sit(4)).toBe(true)
-    expect(other.sent.map((m) => JSON.parse(m))).toEqual([{ t: 'sit', seat: 4 }])
+    expect(other.sent.map((m) => JSON.parse(m))).toEqual([
+      { t: 'sit', seat: 4 },
+    ])
   })
 
   it('resync() asks for a fresh welcome only on an open socket', async () => {

@@ -22,6 +22,7 @@ import { MatchReview } from './MatchReview'
 import { Profile } from './profile/Profile'
 import { loadOnline } from './supabase'
 import type { Online } from './supabase'
+import type { QuickSit } from './TableList'
 import './live.css'
 
 const PLAY = /^#play\/([0-9a-f-]{36})$/
@@ -83,6 +84,21 @@ export default function LiveApp() {
     if (dev && account) replaceRoute(takeAuthReturn() ?? HOME_ROUTE)
   }, [dev, account])
 
+  // A quick-sit on its way between the lobby and a table (ADR,
+  // clarifications from PR-25): the page that leaves sets it, the page that
+  // arrives takes it. This component navigates, once the quick-sit has
+  // committed: the hashchange render is synchronous, and could mount the
+  // next page before an update queued by the one leaving. The first table
+  // is a new history entry; every later hop replaces it, so Back from any
+  // table returns to the lobby, never to a table that refused.
+  const [quickSit, setQuickSit] = useState<QuickSit | null>(null)
+  useEffect(() => {
+    if (!quickSit) return
+    const to = quickSit.at ? `#play/${quickSit.at}` : '#lobby'
+    if (quickSit.tried.length) window.location.replace(to)
+    else window.location.hash = to
+  }, [quickSit])
+
   if (hash === '#signout')
     return (
       <div className="page live-page">
@@ -140,12 +156,20 @@ export default function LiveApp() {
     onboarding ? (
       <Onboarding identity={identity} client={online?.client ?? null} />
     ) : matchId ? (
-      <LiveTable key={matchId} matchId={matchId} identity={identity} />
+      <LiveTable
+        key={matchId}
+        matchId={matchId}
+        identity={identity}
+        quickSit={quickSit}
+        setQuickSit={setQuickSit}
+      />
     ) : (
       <Lobby
         identity={identity}
         autoFind={autoFind}
         client={online?.client ?? null}
+        quickSit={quickSit}
+        setQuickSit={setQuickSit}
       />
     )
 

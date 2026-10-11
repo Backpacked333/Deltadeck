@@ -1,7 +1,7 @@
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test } from '@playwright/test'
 import type { Browser, Page } from '@playwright/test'
-import { fakeSixTable, SIX_TABLE } from './sixTable'
+import { fakeLobby, fakeSitTables, fakeSixTable, SIX_TABLE } from './sixTable'
 
 type Frame = {
   t: string
@@ -293,6 +293,76 @@ test('a stand mid-hand at a six-seat table keeps the seat until the hand ends', 
   await expect(page.getByText('Pick an empty seat to play.')).toBeVisible()
   await expect(page.getByText('Leaving after this hand')).toHaveCount(0)
   await expect(seatControls).toHaveCount(0)
+  await me.close()
+})
+
+test('Quick sit seats a player at a six-seat table from the keyboard, and the lobby lists it', async ({
+  browser,
+}) => {
+  // The real lobby and tables. Local state persists between runs, so a
+  // quick-sit may land at a table an earlier run left: only that each
+  // player is seated is asserted, not that both share one table.
+  const ada = await player(browser, named('ada'))
+  await ada.page.goto('/#lobby')
+  const quick = ada.page.getByRole('button', { name: 'Quick sit' })
+  await expect(quick).toBeEnabled()
+  await quick.focus()
+  await ada.page.keyboard.press('Enter')
+  await expect(ada.page).toHaveURL(/#play\/[0-9a-f-]{36}$/)
+  const mine = ada.page.getByRole('group', { name: /\(you\)$/ })
+  await expect(mine).toBeVisible()
+  await expect(mine).toBeFocused()
+  await expect(ada.page.getByRole('button', { name: /^Sit here/ })).toHaveCount(
+    0,
+  )
+
+  const bo = await player(browser, named('bo'))
+  await bo.page.goto('/#lobby')
+  const list = bo.page.getByRole('table', { name: 'Six-max tables' })
+  await expect(list.getByRole('row').nth(1)).toBeVisible()
+  const results = await new AxeBuilder({ page: bo.page })
+    .include('.live-cards')
+    .analyze()
+  expect(
+    results.violations.filter(
+      (v) => v.impact === 'serious' || v.impact === 'critical',
+    ),
+  ).toEqual([])
+  await bo.page.getByRole('button', { name: 'Quick sit' }).click()
+  await expect(bo.page).toHaveURL(/#play\/[0-9a-f-]{36}$/)
+  await expect(bo.page.getByRole('group', { name: /\(you\)$/ })).toBeVisible()
+  for (const p of [ada, bo]) await p.close()
+})
+
+test('a quick-sit refused at one table sits at the next, across pages', async ({
+  browser,
+}) => {
+  // The lobby and both tables answered here: T1 is full, T2 seats us.
+  const T1 = '0b7c4a52-6f0e-4d7b-9b55-3c1f2a9e8d01'
+  const T2 = '1c8d5b63-7a1f-4e8c-8c66-4d2a3b0f9e12'
+  const me = await player(browser, named('hop'))
+  const { page } = me
+  const lobby = await fakeLobby(page, {
+    answer: (tried) => ({ t: 'sit_at', tableId: tried.length ? T2 : T1 }),
+  })
+  const tables = await fakeSitTables(page, { [T1]: 'full', [T2]: 'seat' })
+  await page.goto('/#lobby')
+  const quick = page.getByRole('button', { name: 'Quick sit' })
+  await expect(quick).toBeEnabled()
+  await quick.focus()
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(new RegExp(`#play/${T2}$`))
+  await expect(
+    page.getByRole('group', { name: 'Seat 2: you (you)' }),
+  ).toBeFocused()
+  expect(
+    lobby.received.map((frames) => frames.filter((m) => m.t === 'quick_sit')),
+  ).toEqual([[{ t: 'quick_sit' }], [{ t: 'quick_sit', tried: [T1] }]])
+  expect(tables.received[T1]).toEqual([{ t: 'sit' }])
+  expect(tables.received[T2]).toEqual([{ t: 'sit' }])
+  // The table that refused is no step of the history: Back is the lobby.
+  await page.goBack()
+  await expect(page).toHaveURL(/#lobby$/)
   await me.close()
 })
 
