@@ -160,7 +160,7 @@ export class SixRun {
   async run() {
     this.tableId = await this.quickSit(this.players[0].token)
     for (const p of this.players) {
-      this.connect(p, true)
+      this.connect(p)
       // Sit one at a time, so seats fill in order and the table starts.
       await wait(150)
     }
@@ -187,7 +187,7 @@ export class SixRun {
     return this.hands.get(handNo)!
   }
 
-  private connect(p: Player, sit: boolean) {
+  private connect(p: Player) {
     const ws = this.socket(`/ws/table/${this.tableId}`, p.token)
     p.ws = ws
     p.seq = 0
@@ -200,7 +200,7 @@ export class SixRun {
         this.fail(`player ${p.index}: closed ${e.code} ${e.reason}`)
     }
     ws.onmessage = (event) =>
-      void this.message(p, JSON.parse(String(event.data)) as ServerMsg, sit)
+      void this.message(p, JSON.parse(String(event.data)) as ServerMsg)
   }
 
   private send(p: Player, msg: object) {
@@ -208,7 +208,7 @@ export class SixRun {
     if (p.ws?.readyState === WebSocket.OPEN) p.ws.send(JSON.stringify(msg))
   }
 
-  private async message(p: Player, msg: ServerMsg, sit: boolean) {
+  private async message(p: Player, msg: ServerMsg) {
     if (msg.seq < p.seq)
       this.fail(`player ${p.index}: seq went back ${p.seq} → ${msg.seq}`)
     p.seq = Math.max(p.seq, msg.seq)
@@ -227,8 +227,11 @@ export class SixRun {
           `player ${p.index}: error ${msg.code} ${msg.message} (after ${p.last})`,
         )
       case 'welcome':
-        // The server welcomes again once seated: sit on the first only.
-        if (sit && !p.asked && p.away === null) {
+        // The welcome says whether the account has a seat: sit when it has
+        // none and is not standing on purpose (a first connection, or a
+        // reconnect after a sit that was lost with its socket). Asked once
+        // per connection: the server welcomes again once seated.
+        if (msg.seat === null && !p.asked && p.away === null) {
           p.asked = true
           this.send(p, { t: 'sit' })
         }
@@ -302,7 +305,8 @@ export class SixRun {
     for (const p of others)
       if (p.away !== null && --p.away <= 0) {
         p.away = null
-        this.send(p, { t: 'sit' })
+        // A socket that is down sits from its welcome when it is back.
+        if (p.ws) this.send(p, { t: 'sit' })
       }
     const pick = () => {
       const here = others.filter((p) => p.away === null && p.ws)
@@ -324,7 +328,7 @@ export class SixRun {
         p.ws.close(1000, 'smoke reconnect')
         p.ws = null
         // Back well inside the 60 s grace: the seat is still theirs.
-        setTimeout(() => !this.ended && this.connect(p, false), 2_000)
+        setTimeout(() => !this.ended && this.connect(p), 2_000)
       }
     }
     const every = Math.floor(this.result.target / (this.chaos.timeouts + 1))
