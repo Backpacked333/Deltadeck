@@ -4,7 +4,7 @@
 // in play finishes on the normal clock, and a player sitting out is not
 // dealt in. sit_in (or, at 0 chips, a rebuy) deals them in again from the
 // next hand. Heads-up is untouched: its third missed decision forfeits.
-import { runInDurableObject } from 'cloudflare:test'
+import { env, runInDurableObject } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
 import { legalActions } from '../../src/engine/hand'
 import { deckWith } from '../../src/engine/testing'
@@ -16,6 +16,8 @@ import type {
 } from '../../src/shared/protocol'
 import { CashController } from '../src/controller'
 import type { Roster, TableController } from '../src/controller'
+import { lobbyStub } from '../src/lobby'
+import type { LobbyDO } from '../src/lobby'
 import { NEXT_HAND_MS } from '../src/table'
 import type { InitBody, TableDO } from '../src/table'
 import { checkFrames } from './frames'
@@ -176,6 +178,9 @@ function rosterOf(f: ServerMsg, seat: SeatId) {
 }
 const statusOf = (f: ServerMsg, seat: SeatId) => rosterOf(f, seat).status
 
+/** The last frame a client received. */
+const last = (frames: ServerMsg[]) => frames.at(-1)!
+
 /** The views of hand `handNo` a client received. */
 const viewsOf = (frames: ServerMsg[], handNo: number) =>
   frames.flatMap((f) =>
@@ -183,6 +188,50 @@ const viewsOf = (frames: ServerMsg[], handNo: number) =>
       ? [f.view]
       : [],
   )
+
+/**
+ * The turn clock `client` was shown once hand `handNo` had `actions`
+ * moves: who was to act, their deadline and what was left of their bank.
+ */
+function clockAt(client: Client, handNo: number, actions: number) {
+  const f = client.frames.filter(isState(handNo, actions)).at(-1) as
+    | Extract<ServerMsg, { t: 'state' | 'welcome' }>
+    | undefined
+  if (!f?.view) throw new Error(`no view of hand ${handNo} at ${actions}`)
+  return { toAct: f.view.toAct, ...f.view.clock }
+}
+
+/** The lobby's one-table claims, account to table. */
+const claims = () =>
+  runInDurableObject(lobbyStub(env), async (_: LobbyDO, state) => {
+    const rows = await state.storage.list<string>({ prefix: 'active:' })
+    return Object.fromEntries(
+      [...rows].map(([key, matchId]) => [key.slice('active:'.length), matchId]),
+    )
+  })
+
+/** Waits for `test`; the lobby is told of a removal after its frames go out. */
+async function eventually(test: () => Promise<boolean>) {
+  for (let i = 0; i < 400; i++) {
+    if (await test()) return
+    await new Promise((r) => setTimeout(r, 5))
+  }
+  throw new Error('never happened')
+}
+
+/** `client` asks for `seat`; resolves with its seated welcome or the error. */
+async function trySit(client: Client, seat: SeatId) {
+  const from = client.frames.length
+  client.send({ t: 'sit', seat })
+  return client.next(
+    (f) => f.t === 'error' || (f.t === 'welcome' && f.seat !== null),
+    from,
+  )
+}
+
+/** Seats as `client` saw them last. */
+const seatsIn = (f: ServerMsg) =>
+  f.t === 'welcome' || f.t === 'state' ? f.table.players.map((p) => p.seat) : []
 
 type Stored = {
   seat: SeatId
@@ -350,6 +399,129 @@ describe('sitting out at a six table', () => {
     expect(match.status).toBe('playing')
     expect(hand!.config.seats.map((s) => s.seat)).toEqual([0, 2])
   })
+})
+
+describe('standing up a player who sits out', () => {
+  it('two timeouts sit a player out and three orbits out remove them', async () => {
+    const matchId = await sixTable()
+    const watcher = await connect(matchId, 'tr-w')
+    await watcher.next((f) => f.t === 'welcome')
+    const clients: Record<SeatId, Client> = {
+      0: await sitDown(matchId, 'tr-0', 0),
+      2: await sitDown(matchId, 'tr-2', 2),
+    }
+    await clients[0].next(isState(1))
+    clients[4] = await sitDown(matchId, 'tr-4', 4)
+    // Hand 2: button 0, small blind 2, big blind 4. The others call and
+    // seat 4 runs out of time twice: it checks its big blind, then the
+    // flop. Two in a row: it sits out from hand 3, and even a socket
+    // without a seat hears it at once.
+    let hand = await nextHand(matchId, clients, fold)
+    expect(hand.config).toMatchObject({ button: 0, sb: 2, bb: 4 })
+    await move(matchId, clients, passive)
+    await move(matchId, clients, passive)
+    await timeOut(matchId)
+    await move(matchId, clients, passive)
+    const seen = watcher.frames.length
+    await timeOut(matchId)
+    hand = (await peek(matchId)).hand!
+    expect(hand.actions.slice(-2)).toMatchObject([
+      { seat: 2, action: { type: 'check' } },
+      { seat: 4, action: { type: 'check' } },
+    ])
+    expect(hand.street).toBe('flop')
+    const told = await watcher.next(
+      (f) => f.t === 'state' && statusOf(f, 4) === 'sitting_out',
+      seen,
+    )
+    expect(told).toMatchObject({ view: null })
+    // The hand finishes on the normal clock: seat 4's next turn has its
+    // 20 s (its bank went on the first timeout), not an instant fold.
+    await move(matchId, clients, passive)
+    await move(matchId, clients, passive)
+    const t = await clockOf(matchId)
+    expect(clockAt(clients[0], 2, hand.actions.length + 2)).toEqual({
+      toAct: 4,
+      deadline: t + 20_000,
+      bankMs: 0,
+    })
+    await elapse(matchId, 20_000 - 1)
+    expect((await peek(matchId)).hand!.toAct).toBe(4)
+    await elapse(matchId, 1)
+    // A third in a row: a six table never forfeits anyone.
+    expect((await peek(matchId)).match.status).toBe('playing')
+    const players = { 0: clients[0], 2: clients[2] }
+    await playOut(matchId, { ...players, 4: clients[4] }, fold)
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 2)
+    await elapse(matchId, NEXT_HAND_MS)
+    await clients[0].next(isState(3))
+
+    // From hand 3 the big blind goes round seats 0 and 2 alone: hands 4,
+    // 6 and 8 start orbits (PR-15's orbitDone), the third of them the
+    // third orbit start since seat 4 sat out.
+    for (let n = 3; n < 8; n++) {
+      hand = (await peek(matchId)).hand!
+      expect(hand.config.handNo).toBe(n)
+      expect(hand.config.seats.map((s) => s.seat)).toEqual([0, 2])
+      expect(seatsIn(last(watcher.frames))).toEqual([0, 2, 4])
+      await nextHand(matchId, players, fold)
+    }
+    // Hand 8 is dealt without it, and its seat frees as it is dealt: it
+    // has no seat, everyone sees the seat empty, and the lobby lets the
+    // account go.
+    hand = (await peek(matchId)).hand!
+    expect(hand.config).toMatchObject({ handNo: 8, bb: 2 })
+    expect((await seated(matchId)).map((p) => p.seat)).toEqual([0, 2])
+    expect(last(clients[4].frames)).toMatchObject({
+      t: 'welcome',
+      seat: null,
+      view: null,
+    })
+    expect(
+      clients[4].frames.some((f) => f.t === 'hand_start' && f.handNo === 8),
+    ).toBe(false)
+    expect(seatsIn(last(watcher.frames))).toEqual([0, 2])
+    await eventually(async () => !('tr-4' in (await claims())))
+    expect(await claims()).toEqual({ 'tr-0': matchId, 'tr-2': matchId })
+    // Stood up, not standing: no cooldown, so it may sit again at once,
+    // and is dealt in from hand 9 like any newcomer.
+    expect(await trySit(clients[4], 4)).toMatchObject({
+      t: 'welcome',
+      seat: 4,
+    })
+    hand = await nextHand(matchId, players, fold)
+    expect(hand.config.seats.map((s) => s.seat)).toEqual([0, 2, 4])
+    checkFrames(
+      [watcher, ...Object.values(clients)].flatMap((c) => c.frames),
+      'six-casual',
+    )
+  }, 60_000)
+
+  it("a removed player's lobby claim is released", async () => {
+    const matchId = await sixTable()
+    const clients: Record<SeatId, Client> = {
+      0: await sitDown(matchId, 'rc-0', 0),
+      2: await sitDown(matchId, 'rc-2', 2),
+    }
+    await clients[0].next(isState(1))
+    // Seat 4 sits down during hand 1 and sits out before it is dealt any.
+    const out = await sitDown(matchId, 'rc-4', 4)
+    await sitOut(out)
+    expect(await claims()).toMatchObject({ 'rc-4': matchId })
+    // Big blinds 2, 0, 2, 0, 2, 0, 2: hands 3, 5 and 7 start orbits.
+    for (let n = 1; n < 7; n++) {
+      expect((await seated(matchId)).map((p) => p.seat)).toEqual([0, 2, 4])
+      await nextHand(matchId, clients, fold)
+    }
+    expect((await peek(matchId)).hand!.config.handNo).toBe(7)
+    expect((await seated(matchId)).map((p) => p.seat)).toEqual([0, 2])
+    await eventually(async () => !('rc-4' in (await claims())))
+    // Free for another table: it sits at one, and the lobby holds it there.
+    const other = await sixTable()
+    const there = await sitDown(other, 'rc-4', 3)
+    expect(last(there.frames)).toMatchObject({ t: 'welcome', seat: 3 })
+    expect(await claims()).toMatchObject({ 'rc-4': other })
+  }, 30_000)
 })
 
 describe('heads-up timeouts', () => {

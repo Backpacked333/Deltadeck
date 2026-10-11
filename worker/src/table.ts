@@ -104,6 +104,12 @@ export const NEXT_HAND_MS = 3000
 export const SIT_COOLDOWN_HANDS = 6
 export const SIT_COOLDOWN_MS = 120_000
 /**
+ * Six-casual (ADR amendment 2026-10-10, "Sitting out"): a player sitting
+ * out (a busted one too) is stood up at this many orbit starts since they
+ * sat out, so nobody holds a seat for good without playing.
+ */
+export const SIT_OUT_ORBITS = 3
+/**
  * Six-casual sessions (ADR amendment 2026-10-10, "Sessions in the
  * archive"): a session ends after this many hands, once its outbox is
  * empty, and the next deal starts a new one.
@@ -146,6 +152,12 @@ type Player = {
    */
   stack?: number
   status?: SeatStatus
+  /**
+   * Six-casual, sitting out: orbit starts since they sat out (0 to 2). At
+   * SIT_OUT_ORBITS they are stood up. Kept by account with the match, so
+   * it survives a restart and a session rotation, as `orbitTravel` does.
+   */
+  outOrbits?: number
   /** Six-casual: sat down since the last deal (dealt in without posting). */
   justSat?: boolean
   /**
@@ -905,6 +917,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
   private sitOut(player: Player) {
     if (player.status === 'sitting_out') return false
     player.status = 'sitting_out'
+    player.outOrbits = 0
     return true
   }
 
@@ -912,6 +925,24 @@ export class TableDO extends DurableObject<WorkerEnv> {
   private sitIn(player: Player) {
     player.status = 'playing'
     player.timeouts = 0
+    delete player.outOrbits
+  }
+
+  /**
+   * Six-casual, at a deal: the players sitting out whom it stands up (ADR
+   * "Sitting out"). `orbitStart`: this deal starts an orbit, the one place
+   * PR-15 defines (orbitDone's `refill`), so every player sitting out has
+   * one more orbit start since they sat out; at SIT_OUT_ORBITS they go.
+   * Nobody sitting out is in the deal, so it is dealt as it was planned.
+   */
+  private satOutTooLong(orbitStart: boolean) {
+    const due: Player[] = []
+    for (const p of this.match!.players) {
+      if (p.status !== 'sitting_out') continue
+      if (orbitStart) p.outOrbits = (p.outOrbits ?? 0) + 1
+      if ((p.outOrbits ?? 0) >= SIT_OUT_ORBITS) due.push(p)
+    }
+    return due
   }
 
   /**
@@ -931,11 +962,12 @@ export class TableDO extends DurableObject<WorkerEnv> {
 
   /**
    * Takes `gone` off the table, each with a cooldown before they may sit
-   * here again. It runs from now, when the seat frees, not from the stand:
-   * a player who stood mid-hand held the seat until that hand ended.
-   * Cooldowns already over are dropped, so the list stays short.
+   * here again (`cooldown`; a player stood up for sitting out gets none).
+   * It runs from now, when the seat frees, not from the stand: a player
+   * who stood mid-hand held the seat until that hand ended. Cooldowns
+   * already over are dropped, so the list stays short.
    */
-  private unseat(gone: Player[]) {
+  private unseat(gone: Player[], cooldown = true) {
     const match = this.match!
     match.players = match.players.filter((p) => !gone.includes(p))
     const cooldowns = Object.fromEntries(
@@ -943,12 +975,27 @@ export class TableDO extends DurableObject<WorkerEnv> {
         this.cooldownOf(userId),
       ),
     )
-    for (const p of gone)
-      cooldowns[p.userId] = {
-        hands: (match.tableHands ?? 0) + SIT_COOLDOWN_HANDS,
-        until: this.clock() + SIT_COOLDOWN_MS,
-      }
+    if (cooldown)
+      for (const p of gone)
+        cooldowns[p.userId] = {
+          hands: (match.tableHands ?? 0) + SIT_COOLDOWN_HANDS,
+          until: this.clock() + SIT_COOLDOWN_MS,
+        }
     match.cooldowns = cooldowns
+  }
+
+  /**
+   * Tells players stood up for sitting out that they have no seat, and
+   * frees their accounts in the lobby (releaseSeats), as a stand does.
+   */
+  private leave(gone: Player[]) {
+    if (!gone.length) return
+    for (const ws of this.openSockets()) {
+      const userId = this.userOf(ws)
+      if (gone.some((p) => p.userId === userId))
+        this.send(ws, this.frame('welcome', userId))
+    }
+    void this.releaseSeats(gone.map((p) => p.userId))
   }
 
   /**
@@ -1359,6 +1406,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const { commitment } = await commitDeck(plan.deck, plan.secret)
     const t = this.clock()
     match.handNo = plan.config.handNo
+    /** Six-casual: players sitting out whom this deal stands up. */
+    let leaving: Player[] = []
     if (six) {
       match.tableHands = (match.tableHands ?? 0) + 1
       match.blinds = plan.blinds!
@@ -1368,6 +1417,10 @@ export class TableDO extends DurableObject<WorkerEnv> {
       // set below, reads it).
       if (orbit!.refill && match.config.bankRefill === 'orbit')
         for (const p of match.players) p.bankMs = match.config.bankMs
+      // Those sitting out for SIT_OUT_ORBITS orbit starts leave as it is
+      // dealt, as a stand between hands would, with no cooldown.
+      leaving = this.satOutTooLong(orbit!.refill)
+      if (leaving.length) this.unseat(leaving, false)
       match.dealt = plan.users!.map(({ seat, userId }) => ({
         seat,
         userId,
@@ -1439,7 +1492,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
               }
             : {}),
         })
-    this.broadcast('state')
+    // A seat that freed changes the table for sockets without a seat too.
+    this.broadcast('state', { roster: leaving.length > 0 })
+    this.leave(leaving)
     if (match.handNo === 1)
       logEvent('match_start', {
         matchId: this.matchId(),
