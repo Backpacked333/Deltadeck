@@ -1,11 +1,36 @@
 # Project status
 
-Last updated: 2026-10-11 by SDE (casual 6-max: PR-01 to PR-19 live in #34 to #53, every PR the exposure gate waited on is in; six tables stay unreachable from outside until PR-23 to PR-25). Earlier: landing page phases 1 and 2 (#30); rating P1-12 to P1-16 live; hands of a live match closed to clients; S7-11 waits on U-4
+Last updated: 2026-10-11 by SDE (accounts first: #57 to #63 live, #64 waits on sign-up reaching strangers). Earlier the same day (casual 6-max: PR-01 to PR-19 live in #34 to #53, every PR the exposure gate waited on is in; six tables stay unreachable from outside until PR-23 to PR-25). Earlier: landing page phases 1 and 2 (#30); rating P1-12 to P1-16 live; hands of a live match closed to clients; S7-11 waits on U-4
 
 **Standing instructions from the user (2026-10-09):**
 
 - **Merge when green.** Open a PR for each finished piece and merge it to `main` once CI passes. A merge deploys to production, so verify the deploy after each one.
 - **Q1 is answered: B.** Rated heads-up uses fresh decks every hand, with the result luck-adjusted by settling all-in pots at equity.
+
+## Accounts first (2026-10-11)
+
+Accounts, the gate, and history on the account. Six of seven PRs are merged, each green, and each deploy was verified (`verify-deploy`):
+
+- **#57:** sign-up and sign-in with an email and password (confirmed with a 6-digit code), Google or Apple (shown only when enabled), and password reset by code. Sign-out is this browser only.
+- **#59:** `#signup` and `#signin` pages. A provider return (`?code`) is always finished, from any route.
+- **#60:** the account in the header on every page (Sign in / Create free account, or the player's menu) and `#signout`.
+- **#61:** `SessionKeeper` checks a stored session with the service. The account client sits in a lazy `accounts` chunk, and the bundle check guards it.
+- **#62:** migration `20261011100000_practice_history.sql` (`practice_hands`, `learning_state`). Production holds it, checked read-only: RLS on, no anon access, both guard triggers present.
+- **#63:** practice hands, settings and lessons sync to the account and follow the player between devices. Sign-out forgets them locally.
+- **#64 (this PR), not merged on purpose:** practice, lessons and progress need an account. Merge only once a stranger can sign up (below).
+
+**Yours before #64 (dashboard):**
+- **Strangers can't sign up yet.** Production has Google and Apple off. Supabase's built-in email only reaches team addresses, 2 an hour.
+- Buy a domain and add it to the Worker.
+- **Resend on `mail.<domain>`:** SPF, DKIM and DMARC records, and a sending-only key.
+- **Supabase → SMTP:** `smtp.resend.com:465`, user `resend`.
+- **Email templates:** "Confirm signup", "Reset password" and "Magic link" show `{{ .Token }}`. OTP length 6, expiry 3600 s.
+- Minimum password length 8; leaked-password protection on.
+- **URL configuration:** Site URL and redirect URLs for both production origins.
+- **Google OAuth client:** redirect `https://dbkfuxczfkawxqmaieii.supabase.co/auth/v1/callback`.
+- **Apple:** Developer Program, Services ID and key. The secret expires every 6 months. Register `mail.<domain>` for Apple's private relay.
+- **Worker secrets:** `RESEND_API_KEY` and `SCHOOL_EMAIL_FROM`, for school codes.
+- **Check before merging #64:** sign up on the live site from an address outside the Supabase team, and see the code arrive.
 
 ## Landing v2: cinematic 3D (2026-10-10)
 
