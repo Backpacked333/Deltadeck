@@ -29,6 +29,7 @@ import {
 } from '../src/registry'
 import type { Listing, TableEntry, TableReport } from '../src/registry'
 import { NEXT_HAND_MS, SIT_OUT_MS, TableDO } from '../src/table'
+import type { InitBody } from '../src/table'
 import { checkLobbyFrame } from './frames'
 import {
   connect,
@@ -461,6 +462,9 @@ describe('reporting to the lobby', () => {
     await playOut(matchId, seats, fold)
     await dealNext(matchId, a, 2)
     await playOut(matchId, seats, passive)
+    // Mid-match, two hands ended: the table keeps nothing for the list
+    // (its storage is wiped at the end, which would hide a stray key).
+    expect((await storageOf(matchId)).keys).not.toContain('listing')
     // A heads-up match ends at the deal after its last hand.
     await elapse(matchId, NEXT_HAND_MS)
     await a.next((f) => f.t === 'match_end')
@@ -469,6 +473,34 @@ describe('reporting to the lobby', () => {
     expect(await storageOf(matchId)).toEqual({ keys: [], alarm: null })
     expect(sent(matchId)).toEqual([])
     expect(removed.mock.calls.filter(([id]) => id === matchId)).toEqual([])
+    expect(await entryOf(matchId)).toBeUndefined()
+  })
+
+  it('a rated heads-up table keeps nothing for the list either', async () => {
+    const sent = watchReports()
+    const matchId = crypto.randomUUID()
+    const body: InitBody = {
+      matchId,
+      creator: { userId: 'hr-reg-a', username: 'hr-reg-a' },
+      opponent: { userId: 'hr-reg-b', username: 'hr-reg-b' },
+      kind: 'hu-rated',
+    }
+    const made = await stub(matchId).fetch('https://table/init', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+    expect(made.status).toBe(201)
+    await freezeClock(matchId)
+    const a = await connect(matchId, 'hr-reg-a')
+    const b = await connect(matchId, 'hr-reg-b')
+    await a.next(isState(1))
+    const seats = { 0: a, 1: b }
+    await playOut(matchId, seats, fold)
+    await dealNext(matchId, a, 2)
+    await playOut(matchId, seats, passive)
+    expect((await storageOf(matchId)).keys).not.toContain('listing')
+    await settled(matchId)
+    expect(sent(matchId)).toEqual([])
     expect(await entryOf(matchId)).toBeUndefined()
   })
 })
