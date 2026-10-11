@@ -243,6 +243,9 @@ export function SixTable({
   const onSitIn = () => {
     if (sitIn()) setAsked(`in:${askKey}`)
   }
+  // The plates, also for the chip flights: a payout lands only on the
+  // plate of the winner it left for.
+  const ring = plates(table, view, nameOf, seat !== null)
   return (
     <div
       className="play-column live-table six-table"
@@ -267,7 +270,7 @@ export function SixTable({
         )}
       </div>
       <SixRing
-        players={plates(table, view, nameOf, seat !== null)}
+        players={ring}
         you={seat}
         button={view?.button ?? null}
         sb={view?.sb ?? null}
@@ -276,7 +279,7 @@ export function SixTable({
         clock={live && live.toAct !== null ? live.clock : null}
         clockOffset={state.clockOffset}
         onSit={canSit ? (s) => void sit(s) : undefined}
-        overlay={<SixFlights view={view} seat={seat} />}
+        overlay={<SixFlights view={view} seat={seat} players={ring} />}
       >
         <Middle view={view} nameOf={nameOf} />
       </SixRing>

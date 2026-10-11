@@ -1350,6 +1350,34 @@ describe('LiveTable at a six-casual table', () => {
     ])
   })
 
+  it("a pot in the air for a winner whose seat is taken lands on nobody's plate", async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    const hand = sidePotsAtTheTurn()
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    const done = playedOut(hand)
+    act(() => socket.emit(sixFrame('state', 2, 2, 2, done)))
+    expect(paid()).toEqual([
+      ['pot-2', 'seat-2'],
+      ['pot-1', 'seat-0'],
+      ['pot-0', 'seat-3'],
+    ])
+    // bob, who took side pot 1, is unseated as the hand ends and erin sits
+    // in his seat before his pot leaves (950 ms): the ring shows her plate
+    // there now, so his chips must not fly onto it. The others still fly.
+    const erin = SIX_ROSTER.map((p) =>
+      p.seat === 0 ? { seat: 0 as const, username: 'erin', stack: 2000 } : p,
+    )
+    act(() =>
+      socket.emit(sixFrame('state', 3, 2, 2, done, { table: sixInfo(erin) })),
+    )
+    expect(seat(0)).toHaveAccessibleName('Seat 1: erin')
+    expect(paid()).toEqual([
+      ['pot-2', 'seat-2'],
+      ['pot-0', 'seat-3'],
+    ])
+  })
+
   it('a split pot sends a flight to each winner at once, after the last bets are gathered', async () => {
     render(<LiveTable matchId={MATCH} identity={alice} />)
     const socket = await opened()

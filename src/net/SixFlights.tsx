@@ -14,6 +14,7 @@ import { useReducedMotionConfig } from 'motion/react'
 import { ChipPile } from '../components/table/ChipPile'
 import type { SeatId } from '../engine/types'
 import type { SeatView } from '../shared/protocol'
+import type { PlateSeat } from './SeatPlate'
 
 /**
  * One flight, as long as the trainer's (styles.css `.flight`) and as
@@ -39,6 +40,12 @@ type Flight = {
   delay: number
   start: Point
   end: Point
+  /**
+   * A payout's winner as the ring showed them at their seat when it left:
+   * if someone else's plate is there by the time it would land (the winner
+   * stood as the hand ended and the seat was taken), it lands on nobody's.
+   */
+  winner?: { seat: SeatId; username: string | undefined }
 }
 
 /**
@@ -80,10 +87,13 @@ function locate(layer: HTMLElement) {
 export function SixFlights({
   view,
   seat,
+  players,
 }: {
   view: SeatView | null
   /** The viewer's seat, which SixRing puts at the bottom (its `you`). */
   seat: SeatId | null
+  /** Who the ring shows at each seat, as SixRing draws them. */
+  players: PlateSeat[]
 }) {
   const reduced = useReducedMotionConfig()
   const layer = useRef<HTMLDivElement>(null)
@@ -91,6 +101,7 @@ export function SixFlights({
   const nextId = useRef(0)
   const timers = useRef<number[]>([])
   const [flights, setFlights] = useState<Flight[]>([])
+  const at = (id: SeatId) => players.find((p) => p.seat === id)?.username
   useEffect(() => () => timers.current.forEach(window.clearTimeout), [])
 
   // A layout effect: the frame's new boxes are laid out but not painted,
@@ -122,7 +133,7 @@ export function SixFlights({
       (!!view.result && !before.result)
     // Measured only when chips fly, which is when a street closes.
     if (reduced || !closed || !layer.current) return
-    const at = locate(layer.current)
+    const spot = locate(layer.current)
     const next: Flight[] = []
     const add = (
       from: string,
@@ -131,9 +142,21 @@ export function SixFlights({
       delay: number,
       start: Point | null,
       end: Point | null,
+      winner?: SeatId,
     ) => {
       if (amount > 0 && start && end)
-        next.push({ id: ++nextId.current, from, to, amount, delay, start, end })
+        next.push({
+          id: ++nextId.current,
+          from,
+          to,
+          amount,
+          delay,
+          start,
+          end,
+          ...(winner !== undefined && {
+            winner: { seat: winner, username: at(winner) },
+          }),
+        })
     }
     for (const p of view.players) {
       const was = before.players.find((b) => b.seat === p.seat)
@@ -144,7 +167,7 @@ export function SixFlights({
       // later street that a reconnect's welcome skipped to, which is
       // still drawn on the plate.
       const gathered = p.invested - p.bet - (was.invested - was.bet)
-      add(`seat-${p.seat}`, 'pot', gathered, 0, at.bet(p.seat), at.pot())
+      add(`seat-${p.seat}`, 'pot', gathered, 0, spot.bet(p.seat), spot.pot())
     }
     if (view.result && !before.result) {
       const side = view.pot.layers.length >= 2
@@ -157,8 +180,9 @@ export function SixFlights({
           `seat-${award.seat}`,
           award.amount,
           PAY_MS + order.indexOf(award.pot) * NEXT_POT_MS,
-          side ? at.sidePot(award.pot) : at.pot(),
-          at.plate(award.seat),
+          side ? spot.sidePot(award.pot) : spot.pot(),
+          spot.plate(award.seat),
+          award.seat,
         )
     }
     if (!next.length) return
@@ -170,30 +194,35 @@ export function SixFlights({
       setFlights((list) => list.filter((f) => !ids.has(f.id)))
     }, done)
     timers.current.push(timer)
+    // `players` only names the winners when the pots leave: it changes the
+    // flights in the air (below), not which ones launch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, seat, reduced])
 
   return (
     <div className="six-flights" ref={layer} aria-hidden="true">
       {!reduced &&
-        flights.map((f) => (
-          <span
-            key={f.id}
-            className="six-flight"
-            data-from={f.from}
-            data-to={f.to}
-            style={
-              {
-                '--fx': `${f.start.x}px`,
-                '--fy': `${f.start.y}px`,
-                '--tx': `${f.end.x}px`,
-                '--ty': `${f.end.y}px`,
-                animationDelay: `${f.delay}ms`,
-              } as CSSProperties
-            }
-          >
-            <ChipPile amount={f.amount} maxStacks={2} />
-          </span>
-        ))}
+        flights
+          .filter((f) => !f.winner || at(f.winner.seat) === f.winner.username)
+          .map((f) => (
+            <span
+              key={f.id}
+              className="six-flight"
+              data-from={f.from}
+              data-to={f.to}
+              style={
+                {
+                  '--fx': `${f.start.x}px`,
+                  '--fy': `${f.start.y}px`,
+                  '--tx': `${f.end.x}px`,
+                  '--ty': `${f.end.y}px`,
+                  animationDelay: `${f.delay}ms`,
+                } as CSSProperties
+              }
+            >
+              <ChipPile amount={f.amount} maxStacks={2} />
+            </span>
+          ))}
     </div>
   )
 }
