@@ -5,7 +5,8 @@
 // hand), seated but not dealt into the hand on the table (that hand as
 // nobody's seat sees it), or dealt in (their own cards, and the action bar
 // while it is their move). Every card drawn here is one the frame carried.
-// A seated viewer also has their seat's controls: Rebuy and Stand up.
+// A seated viewer also has their seat's controls: Rebuy, Sit out or Sit
+// in, and Stand up.
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { ActionBar } from '../components/table/ActionBar'
@@ -49,6 +50,11 @@ const keepStood = (key: string) => {
   }
 }
 const chips = (n: number) => Math.round(n).toLocaleString('en-US')
+/** "bob", "bob and carol", "bob, carol and dave". */
+const listed = (names: string[]) =>
+  names.length === 1
+    ? names[0]
+    : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
 const NO_GUESS = {
   show: false,
   value: 0.5,
@@ -67,6 +73,8 @@ export function SixTable({
   sit,
   rebuy,
   stand,
+  sitOut,
+  sitIn,
 }: {
   table: MatchInfo
   state: TableState
@@ -74,6 +82,8 @@ export function SixTable({
   sit: (seat: SeatId) => boolean
   rebuy: () => boolean
   stand: () => boolean
+  sitOut: () => boolean
+  sitIn: () => boolean
 }) {
   const { view, seat } = state
   const dealt = view && isSeated(view) ? view : null
@@ -147,15 +157,16 @@ export function SixTable({
   const mine =
     seat === null ? undefined : table.players.find((p) => p.seat === seat)
   const controls = state.status === 'open' && table.status !== 'finished'
-  // A Rebuy, or a Stand up between hands, sent and not yet answered. The
-  // answer is a welcome (the new stack; no seat) or an error, and the
-  // button stays away until then: a double press would send the frame
-  // twice, and the second one's refusal (not_below, not_seated) would
-  // flash just after the first worked. Keyed by the hand and our stack,
-  // which the answer changes. A dropped socket may have lost the frame,
-  // and a new seat has asked nothing, so either forgets it.
+  // A Rebuy, a Sit out or Sit in, or a Stand up between hands, sent and
+  // not yet answered. The answer is a welcome (the new stack or status;
+  // no seat) or an error, and the button stays away until then: a double
+  // press would send the frame twice, and the second one's refusal
+  // (not_below, not_seated) would flash just after the first worked.
+  // Keyed by the hand, our stack and our status, which the answer
+  // changes. A dropped socket may have lost the frame, and a new seat has
+  // asked nothing, so either forgets it.
   const [asked, setAsked] = useState<string | null>(null)
-  const askKey = `${handKey}:${mine?.stack}`
+  const askKey = `${handKey}:${mine?.stack}:${mine?.status}`
   useEffect(() => setAsked(null), [state.status, seat])
   // The roster's stack is what the next hand deals us (after the last
   // hand, or a rebuy); the server decides, this only offers.
@@ -169,15 +180,67 @@ export function SixTable({
   // Seated without chips and out of any hand being played: no hand deals
   // us in until we rebuy (the server deals only funded players).
   const broke = !playing && mine?.stack === 0
+  // Sitting out (ADR "Sitting out"): from the next hand if we are dealt
+  // into the one being played. A player with no chips sits out too, and
+  // is offered Rebuy instead of Sit in: a rebuy at 0 deals them in.
+  const out = mine?.status === 'sitting_out'
+  const canSitOut =
+    controls && !!mine && !out && !leaving && asked !== `out:${askKey}`
+  const canSitIn =
+    controls &&
+    out &&
+    !leaving &&
+    (mine?.stack ?? 0) > 0 &&
+    asked !== `in:${askKey}`
+  // What the live line under our seat says of our status. Back in after
+  // sitting out, it says so until a hand deals us in. Stood up by the
+  // table after sitting out (not by our own Stand up), the status below
+  // the ring says why the seat is gone.
+  const status = mine?.status ?? null
+  const lastStatus = useRef<string | null>(null)
+  // A stand of our own is still to free the seat: pressed here, or the
+  // hand this tab remembers standing from (`leaving`), which a reload
+  // keeps where a press alone would be forgotten. A hand that deals us
+  // in otherwise means none is: a stand that never reached the table
+  // (the socket dropped) must not hide a later removal.
+  const stoodUp = useRef(false)
+  useEffect(() => {
+    if (leaving) stoodUp.current = true
+    else if (standKey !== null) stoodUp.current = false
+  }, [leaving, standKey])
+  const [backAt, setBackAt] = useState<string | null>(null)
+  const [removed, setRemoved] = useState(false)
+  useEffect(() => {
+    if (seat !== null) {
+      if (status === null) return
+      if (lastStatus.current === 'sitting_out' && status === 'playing')
+        setBackAt(handKey ?? '')
+      lastStatus.current = status
+      setRemoved(false)
+      return
+    }
+    if (lastStatus.current === 'sitting_out' && !stoodUp.current)
+      setRemoved(true)
+    lastStatus.current = null
+    stoodUp.current = false
+  }, [seat, status, handKey])
+  const back = !out && !playing && backAt === (handKey ?? '')
   const onRebuy = () => {
     if (rebuy()) setAsked(`rebuy:${askKey}`)
   }
   const onStand = () => {
     if (!stand()) return
+    stoodUp.current = true
     if (standKey) {
       setStoodFrom(standKey)
       keepStood(standKey)
     } else setAsked(`stand:${askKey}`)
+  }
+  const onSitOut = () => {
+    if (sitOut()) setAsked(`out:${askKey}`)
+  }
+  const onSitIn = () => {
+    if (sitIn()) setAsked(`in:${askKey}`)
   }
   return (
     <div
@@ -203,7 +266,7 @@ export function SixTable({
         )}
       </div>
       <SixRing
-        players={plates(table, view, nameOf)}
+        players={plates(table, view, nameOf, seat !== null)}
         you={seat}
         button={view?.button ?? null}
         sb={view?.sb ?? null}
@@ -213,7 +276,7 @@ export function SixTable({
         clockOffset={state.clockOffset}
         onSit={canSit ? (s) => void sit(s) : undefined}
       >
-        <Middle view={view} />
+        <Middle view={view} nameOf={nameOf} />
       </SixRing>
       <div
         className="six-dock"
@@ -232,16 +295,33 @@ export function SixTable({
             state={state}
             nameOf={nameOf}
             broke={broke}
+            out={out}
+            removed={removed}
           />
         )}
       </div>
       {seat !== null && (
         <SeatControls
           canRebuy={canRebuy}
+          canSitOut={canSitOut}
+          canSitIn={canSitIn}
           canStand={canStand}
-          leaving={leaving}
-          broke={broke}
+          line={
+            leaving
+              ? 'Leaving after this hand'
+              : broke
+                ? 'No chips left: rebuy to be dealt in.'
+                : out
+                  ? playing
+                    ? 'Sitting out from the next hand.'
+                    : 'Sitting out: sit in to be dealt in.'
+                  : back
+                    ? 'Back in from the next hand.'
+                    : ''
+          }
           onRebuy={onRebuy}
+          onSitOut={onSitOut}
+          onSitIn={onSitIn}
           onStand={onStand}
         />
       )}
@@ -260,27 +340,36 @@ export function SixTable({
  * and every seat once the hand is over, shows the stack the roster gives:
  * what the next hand deals them (after the last hand, or a rebuy). A seat
  * whose player left as the hand ended may have a new one by then.
+ *
+ * Who has dropped shows only to a viewer with a seat (`seated`): the table
+ * tells a socket without one about a seat only when someone sits, stands,
+ * rebuys or changes status (ADR "Sockets without a seat"), not when a
+ * player drops or comes back, so its `connected` may be stale either way.
  */
 function plates(
   table: MatchInfo,
   view: SeatView | null,
   nameOf: (seat: SeatId) => string,
+  seated: boolean,
 ): PlateSeat[] {
   const live = view && !view.result ? view : null
-  const seated: PlateSeat[] = table.players.map((p) => {
+  const plated: PlateSeat[] = table.players.map((p) => {
     const inHand = live?.players.find((h) => h.seat === p.seat)
     return {
       seat: p.seat,
       username: p.username,
       stack: inHand?.stack ?? p.stack ?? 0,
       bet: inHand?.bet ?? 0,
-      status: p.status ?? 'playing',
+      // Sitting out takes effect from the next hand: a player who sat out
+      // during this one still plays it, and shows as playing until it ends.
+      status: inHand ? 'playing' : (p.status ?? 'playing'),
+      connected: seated ? p.connected : undefined,
     }
   })
   // A player who stood during the hand leaves the roster as it ends. While
   // its result shows and the next hand is coming, their seat still shows
   // them with what they had there, unless someone has sat in it since.
-  if (!view?.result || table.status !== 'playing') return seated
+  if (!view?.result || table.status !== 'playing') return plated
   const left: PlateSeat[] = view.players
     .filter((h) => !table.players.some((p) => p.seat === h.seat))
     .map((h) => ({
@@ -291,30 +380,39 @@ function plates(
       status: 'sitting_out',
       left: true,
     }))
-  return [...seated, ...left]
+  return [...plated, ...left]
 }
 
 /**
  * The viewer's own seat. Rebuy is offered below 100 bb out of the hand
- * being played; Stand up to anyone seated, until they have stood from the
- * hand they are dealt into. The line under them says when a stand waits
- * for the hand to end, or that a player with no chips must rebuy to be
- * dealt in. It is a live region mounted with the controls, so its change
- * is announced, as the hand's result is: a player who busts hears both.
+ * being played; Sit out to a player who is playing (it takes effect from
+ * the next hand), Sit in to one sitting out with chips; Stand up to anyone
+ * seated, until they have stood from the hand they are dealt into. The
+ * line under them says when a stand waits for the hand to end, that a
+ * player with no chips must rebuy to be dealt in, or how they stand on
+ * sitting out. It is a live region mounted with the controls, so its
+ * change is announced, as the hand's result is: a player who busts hears
+ * both.
  */
 function SeatControls({
   canRebuy,
+  canSitOut,
+  canSitIn,
   canStand,
-  leaving,
-  broke,
+  line,
   onRebuy,
+  onSitOut,
+  onSitIn,
   onStand,
 }: {
   canRebuy: boolean
+  canSitOut: boolean
+  canSitIn: boolean
   canStand: boolean
-  leaving: boolean
-  broke: boolean
+  line: string
   onRebuy: () => void
+  onSitOut: () => void
+  onSitIn: () => void
   onStand: () => void
 }) {
   return (
@@ -324,24 +422,36 @@ function SeatControls({
           Rebuy<span className="sr-only"> to {chips(TOP_UP)} chips</span>
         </button>
       )}
+      {canSitIn && (
+        <button type="button" className="btn btn-outline" onClick={onSitIn}>
+          Sit in
+        </button>
+      )}
+      {canSitOut && (
+        <button type="button" className="btn btn-quiet" onClick={onSitOut}>
+          Sit out
+        </button>
+      )}
       {canStand && (
         <button type="button" className="btn btn-quiet" onClick={onStand}>
           Stand up
         </button>
       )}
       <p className="six-seat-status" role="status">
-        {leaving
-          ? 'Leaving after this hand'
-          : broke
-            ? 'No chips left: rebuy to be dealt in.'
-            : ''}
+        {line}
       </p>
     </div>
   )
 }
 
 /** The middle of the felt: the pot, the board, and the viewer's own cards. */
-function Middle({ view }: { view: SeatView | null }) {
+function Middle({
+  view,
+  nameOf,
+}: {
+  view: SeatView | null
+  nameOf: (seat: SeatId) => string
+}) {
   const mine =
     view && view.you !== null
       ? view.players.find((p) => p.seat === view.you)
@@ -353,6 +463,7 @@ function Middle({ view }: { view: SeatView | null }) {
           Pot <b>{chips(view.pot.total)}</b>
         </p>
       )}
+      {view && <SidePots view={view} nameOf={nameOf} />}
       <div className="six-board" role="group" aria-label="Community cards">
         {Array.from({ length: 5 }, (_, i) =>
           view && view.board[i] !== undefined ? (
@@ -373,6 +484,65 @@ function Middle({ view }: { view: SeatView | null }) {
         </div>
       )}
     </>
+  )
+}
+
+/**
+ * The pots apart once there is a side pot; a single pot keeps the one line
+ * above. During the hand they are the chips gathered on finished streets
+ * (this street's bets are still on the plates, and in the total), and each
+ * says who can still win it. At the result each says who took it, in the
+ * order the chips are pushed: the last side pot first and the main pot
+ * last (HandResult.awards), the order PR-22's chip flights will follow.
+ * Both lists spell out role="list": Safari drops the role of a list styled
+ * list-style: none, and its name with it.
+ */
+function SidePots({
+  view,
+  nameOf,
+}: {
+  view: SeatView
+  nameOf: (seat: SeatId) => string
+}) {
+  const { layers } = view.pot
+  if (layers.length < 2) return null
+  const label = (pot: number) => (pot === 0 ? 'Main pot' : `Side pot ${pot}`)
+  const who = (seat: SeatId) => (seat === view.you ? 'you' : nameOf(seat))
+  const result = view.result
+  // Always "between": a pot down to one seat ends the hand in the same act.
+  if (!result)
+    return (
+      <ul className="six-pots" role="list" aria-label="Pots">
+        {layers.map((pot, i) => (
+          <li key={i}>
+            {label(i)}: <b>{chips(pot.amount)}</b>
+            <span className="sr-only">
+              {` chips between ${listed(pot.eligible.map(who))}`}
+            </span>
+          </li>
+        ))}
+      </ul>
+    )
+  // The awards go pot by pot, a split pot's side by side, so each pot's
+  // first award gives its place.
+  const order = [...new Set(result.awards.map((a) => a.pot))]
+  return (
+    <ol className="six-pots six-paid" role="list" aria-label="Pots paid">
+      {order.map((pot) => {
+        // Only seats that were paid chips are named, as in resultText.
+        const paid = result.awards.filter((a) => a.pot === pot && a.amount > 0)
+        const amount = paid.reduce((sum, a) => sum + a.amount, 0)
+        return (
+          <li key={pot}>
+            {label(pot)}: <b>{chips(amount)}</b>
+            <span className="sr-only"> chips</span>
+            {paid.length === 1
+              ? ` to ${who(paid[0].seat)}`
+              : `, split: ${paid.map((a) => `${who(a.seat)} ${chips(a.amount)}`).join(', ')}`}
+          </li>
+        )
+      })}
+    </ol>
   )
 }
 
@@ -497,6 +667,8 @@ function SixStatus({
   state,
   nameOf,
   broke,
+  out,
+  removed,
 }: {
   table: MatchInfo
   view: SeatView | null
@@ -504,6 +676,10 @@ function SixStatus({
   nameOf: (seat: SeatId) => string
   /** Seated with no chips: the seat controls say to rebuy (SixTable). */
   broke: boolean
+  /** Sitting out: the seat controls say how to sit in (SixTable). */
+  out: boolean
+  /** Our seat was taken from us for sitting out too long. */
+  removed: boolean
 }) {
   const seated = state.seat !== null
   const result = view?.result ?? null
@@ -525,9 +701,11 @@ function SixStatus({
       : result && view
         ? resultText(view, result, nameOf)
         : !seated
-          ? table.players.length >= SEATS
-            ? 'Every seat is taken.'
-            : 'Pick an empty seat to play.'
+          ? removed
+            ? 'You were stood up after sitting out.'
+            : table.players.length >= SEATS
+              ? 'Every seat is taken.'
+              : 'Pick an empty seat to play.'
           : !view
             ? table.players.length < 2
               ? 'Waiting for a second player to sit down.'
@@ -542,7 +720,7 @@ function SixStatus({
   const caption =
     table.status === 'finished' ? (
       <a href="#lobby">Back to the lobby</a>
-    ) : broke ? null : seated && view?.you === null ? (
+    ) : broke || out ? null : seated && view?.you === null ? (
       'You are dealt in from the next hand.'
     ) : !seated && table.players.length < SEATS ? (
       'Take a seat to be dealt in from the next hand.'
@@ -602,11 +780,7 @@ function resultText(
   if (winners.every((s) => (result.netBySeat[s] ?? 0) === 0)) return 'Split pot'
   const phrase = (seats: SeatId[]) => {
     const names = seats.map((s) => (s === view.you ? 'You' : nameOf(s)))
-    const who =
-      names.length === 1
-        ? names[0]
-        : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
-    return `${who} ${names.length === 1 && seats[0] !== view.you ? 'wins' : 'win'}`
+    return `${listed(names)} ${names.length === 1 && seats[0] !== view.you ? 'wins' : 'win'}`
   }
   if (!result.showdown) return phrase(winners)
   // Every award to a seat carries that seat's own hand.

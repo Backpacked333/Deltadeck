@@ -26,11 +26,20 @@ export type Deadline =
   | { kind: 'idle'; at: number }
   /**
    * Rated: a seat whose socket closed. If it is not back by `at`, its turns
-   * are played for it at once (GRACE_MS in rated.ts).
+   * are played for it at once (GRACE_MS in rated.ts). Six-casual: a player
+   * who is playing and has no socket open; not back by `at`, they sit out.
+   * There the grace belongs to the account (`userId`), since seats change
+   * hands; `seat` is only where they sat when it began. Heads-up graces
+   * carry no `userId`, so they are stored as they always were.
    */
-  | { kind: 'grace'; at: number; seat: SeatId }
+  | { kind: 'grace'; at: number; seat: SeatId; userId?: string }
   /** Rated, finished: a lone Rematch press expires at `at` (REMATCH_MS). */
   | { kind: 'rematch'; at: number }
+  /**
+   * Six-casual: the first player sitting out whose time runs out at `at`
+   * (SIT_OUT_MS in table.ts) is stood up then. One entry, for the earliest.
+   */
+  | { kind: 'sitout'; at: number }
 
 /** A finished table keeps its storage this long for late arrivals. */
 export const IDLE_MS = 600_000
@@ -39,6 +48,12 @@ export const INVITE_TTL_MS = 24 * 3600_000
 
 /** Consecutive missed decisions that end the match as a forfeit. */
 export const FORFEIT_TIMEOUTS = 3
+/**
+ * Six-casual: consecutive missed decisions that sit a player out from the
+ * next hand (ADR amendment 2026-10-10, "Sitting out"). A six table never
+ * ends for one player's timeouts; heads-up keeps FORFEIT_TIMEOUTS.
+ */
+export const SIT_OUT_TIMEOUTS = 2
 
 /** When the player to act runs out: their decision time, then their bank. */
 export function turnDeadline(

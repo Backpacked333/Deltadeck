@@ -53,6 +53,7 @@ import {
   isCurrentTurn,
   orbitDone,
   outboxBackoff,
+  SIT_OUT_TIMEOUTS,
   timeoutAction,
   turnDeadline,
 } from './deadlines'
@@ -103,6 +104,18 @@ export const NEXT_HAND_MS = 3000
 export const SIT_COOLDOWN_HANDS = 6
 export const SIT_COOLDOWN_MS = 120_000
 /**
+ * Six-casual (ADR amendment 2026-10-10, "Sitting out"): a player sitting
+ * out (a busted one too) is stood up at this many orbit starts since they
+ * sat out, so nobody holds a seat for good without playing.
+ */
+export const SIT_OUT_ORBITS = 3
+/**
+ * ...or once this long has passed since they sat out, whichever comes
+ * first: no orbit passes while fewer than two can be dealt in, and the
+ * seat must still free then (ADR "Sitting out").
+ */
+export const SIT_OUT_MS = 300_000
+/**
  * Six-casual sessions (ADR amendment 2026-10-10, "Sessions in the
  * archive"): a session ends after this many hands, once its outbox is
  * empty, and the next deal starts a new one.
@@ -145,6 +158,19 @@ type Player = {
    */
   stack?: number
   status?: SeatStatus
+  /**
+   * Six-casual: orbit starts (0 to 2) since they first sat out after the
+   * last hand they were dealt into. At SIT_OUT_ORBITS they are stood up.
+   * Kept by account with the match, so it survives a restart and a
+   * session rotation, as `orbitTravel` does. A sit_in keeps it: only a
+   * dealt hand clears it, or a sit_in and sit_out would start it again.
+   */
+  outOrbits?: number
+  /**
+   * Six-casual: when (the table's clock) they first sat out after the
+   * last hand they were dealt into. Kept and cleared as `outOrbits` is.
+   */
+  outSince?: number
   /** Six-casual: sat down since the last deal (dealt in without posting). */
   justSat?: boolean
   /**
@@ -517,6 +543,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const [client, server] = [pair[0], pair[1]]
     this.ctx.acceptWebSocket(server, [userId])
     server.serializeAttachment({ userId, username } satisfies Attachment)
+    // Six-casual: after a restart the first socket back starts the grace
+    // of every player still away (the restart closed their sockets unseen),
+    // rather than leaving it to the next alarm, which at a waiting table
+    // can be the idle check. Run once this socket counts as connected.
+    if (six && this.graceForAbsent()) await this.armAlarm()
     this.send(server, this.frame('welcome', userId))
     this.sendEnded(server)
     this.sendMatchEnd(server)
@@ -589,6 +620,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
     if (msg.t === 'sit') return this.sit(ws, msg.seat)
     if (msg.t === 'stand') return this.stand(ws)
     if (msg.t === 'rebuy') return this.rebuy(ws)
+    if (msg.t === 'sit_out') return this.sitOutMsg(ws)
+    if (msg.t === 'sit_in') return this.sitInMsg(ws)
     if (msg.t !== 'act') return this.illegal(ws, userId, 'Not a table message')
     // Nobody without a seat acts, and the reply carries no hand.
     if (!this.atTable(userId))
@@ -679,8 +712,17 @@ export class TableDO extends DurableObject<WorkerEnv> {
     if (this.match !== match || !this.seatable()) return
     if (this.atTable(userId))
       return this.send(ws, this.frame('welcome', userId))
+    // Its socket closed while the lobby answered: nobody is here to sit.
+    // No seat, so no grace and no five minutes sitting out holding the
+    // account here; the claim goes back at once, unless another sit of
+    // this account is still claiming (it keeps the claim, or releases it).
+    if (ws.readyState !== OPEN)
+      return this.claiming.has(userId) ? undefined : this.releaseSeats([userId])
     const seat = this.seatFor(ws, userId, wanted)
-    if (seat === null) return this.releaseSeats([userId])
+    // The seat went meanwhile; the claim goes back too, unless another sit
+    // of this account is still claiming (one page may ask for two seats).
+    if (seat === null)
+      return this.claiming.has(userId) ? undefined : this.releaseSeats([userId])
     const player: Player = {
       ...this.newPlayer(seat, { userId, username }),
       // The buy-in is the server's: the frame carries no amount.
@@ -830,8 +872,12 @@ export class TableDO extends DurableObject<WorkerEnv> {
     // hand's final one; the deal finds them settled and leaves them.
     this.settleStacks()
     player.stack = stack + topUp.amount
+    // At 0 chips they sat out; the rebuy deals them in from the next hand
+    // without a sit_in (ADR "Stacks and rebuy").
+    if (stack === 0) this.sitIn(player)
     this.seq++
     await this.ctx.storage.put({ match, seq: this.seq })
+    if (stack === 0) await this.armAlarm()
     this.send(ws, this.frame('welcome', userId))
     this.broadcast('state', { skip: ws, roster: true })
     // A table waiting for funded players deals once two are here.
@@ -842,25 +888,290 @@ export class TableDO extends DurableObject<WorkerEnv> {
   }
 
   /**
-   * Takes `gone` off the table, each with a cooldown before they may sit
-   * here again. It runs from now, when the seat frees, not from the stand:
-   * a player who stood mid-hand held the seat until that hand ended.
-   * Cooldowns already over are dropped, so the list stays short.
+   * A six-table player sits out from the next hand (ADR amendment
+   * 2026-10-10, "Sitting out"), between hands or during one. Dealt into
+   * the hand being played, they play it out as usual: only the next deal
+   * leaves them out. The answer is a welcome, and everyone sees the status.
+   * Sitting out again changes nothing.
    */
-  private unseat(gone: Player[]) {
+  private async sitOutMsg(ws: WebSocket) {
+    const match = this.match!
+    const { userId } = ws.deserializeAttachment() as Attachment
+    if (!this.seatable())
+      return this.illegal(ws, userId, 'There is no seat to sit out from here')
+    const player = match.players.find((p) => p.userId === userId)
+    if (!player) return this.reject(ws, 'not_seated', 'You have no seat here')
+    if (!this.sitOut(player))
+      return this.send(ws, this.frame('welcome', userId))
+    this.seq++
+    await this.ctx.storage.put({ match, seq: this.seq })
+    // Their five minutes run (syncSitOut): from now, or from an earlier
+    // sit_out if no hand has dealt them in since.
+    await this.armAlarm()
+    this.send(ws, this.frame('welcome', userId))
+    this.broadcast('state', { skip: ws, roster: true })
+  }
+
+  /**
+   * A six-table player sitting out is dealt in again from the next hand,
+   * their missed decisions back at 0 (ADR "Sitting out"). A player who is
+   * playing already changes nothing. With two players to deal in at a
+   * waiting table, the next hand deals now.
+   */
+  private async sitInMsg(ws: WebSocket) {
+    const match = this.match!
+    const { userId } = ws.deserializeAttachment() as Attachment
+    if (!this.seatable())
+      return this.illegal(ws, userId, 'There is no seat to sit in at here')
+    const player = match.players.find((p) => p.userId === userId)
+    if (!player) return this.reject(ws, 'not_seated', 'You have no seat here')
+    if (player.status !== 'sitting_out')
+      return this.send(ws, this.frame('welcome', userId))
+    // Nothing to be dealt in with: a rebuy deals them in instead.
+    if (this.stackOf(player) === 0)
+      return this.reject(ws, 'no_chips', 'Rebuy to be dealt in')
+    this.sitIn(player)
+    this.seq++
+    await this.ctx.storage.put({ match, seq: this.seq })
+    await this.armAlarm()
+    this.send(ws, this.frame('welcome', userId))
+    this.broadcast('state', { skip: ws, roster: true })
+    if (match.status === 'waiting' && this.funded().length >= 2) {
+      match.status = 'playing'
+      await this.startNextHand()
+    }
+  }
+
+  /**
+   * Six-casual: `player` sits out from the next hand. False when they
+   * already were. Their removal clocks start now, unless they sat out
+   * before and no hand has dealt them in since: a sit_in that was never
+   * dealt does not restart them (ADR, clarifications from PR-16), or two
+   * clicks every few minutes would hold a seat for good.
+   */
+  private sitOut(player: Player) {
+    if (player.status === 'sitting_out') return false
+    player.status = 'sitting_out'
+    player.outOrbits ??= 0
+    player.outSince ??= this.clock()
+    return true
+  }
+
+  /**
+   * Six-casual: `player` is dealt in from the next hand, with no misses.
+   * Their removal clocks stay until that deal (startNextHandNow).
+   */
+  private sitIn(player: Player) {
+    player.status = 'playing'
+    player.timeouts = 0
+  }
+
+  /**
+   * The players sitting out whom the table stands up now (ADR "Sitting
+   * out"): SIT_OUT_ORBITS orbit starts, or SIT_OUT_MS, since they sat out,
+   * whichever comes first. `orbitStart`: a deal that starts an orbit, the
+   * one place PR-15 defines (orbitDone's `refill`), so each of them has
+   * one more orbit start since they sat out. Nobody sitting out is in a
+   * deal, so it is dealt as it was planned. One still dealt into the hand
+   * being played is left alone until it ends (leavable).
+   */
+  private satOutTooLong(orbitStart: boolean, writes: Record<string, unknown>) {
+    const t = this.clock()
+    const due: Player[] = []
+    let repaired = false
+    for (const p of this.match!.players) {
+      if (!this.leavable(p)) continue
+      if (this.repairOut(p, writes)) repaired = true
+      if (orbitStart) p.outOrbits! += 1
+      if (p.outOrbits! >= SIT_OUT_ORBITS || t >= p.outSince! + SIT_OUT_MS)
+        due.push(p)
+    }
+    return { due, repaired }
+  }
+
+  /**
+   * Six-casual: a stored sit-out count or time that cannot be right (not
+   * 0 to SIT_OUT_ORBITS - 1 orbit starts, or not a time up to now:
+   * outSinceOk) is set back to 0, or to now, logged, and recorded as an
+   * incident with what was stored (only the service role reads
+   * incidents). One player's bad count must not halt the table for
+   * everyone else, as a corrupt `orbitTravel` does (ADR, clarifications
+   * from PR-15): the most it costs is that player's later removal, which
+   * SIT_OUT_MS still bounds. True when it repaired.
+   */
+  private repairOut(p: Player, writes: Record<string, unknown>) {
+    const orbitsOk =
+      Number.isInteger(p.outOrbits) &&
+      p.outOrbits! >= 0 &&
+      p.outOrbits! < SIT_OUT_ORBITS
+    const sinceOk = this.outSinceOk(p)
+    if (orbitsOk && sinceOk) return false
+    const match = this.match!
+    const stored = {
+      outOrbits: p.outOrbits ?? null,
+      outSince: p.outSince ?? null,
+    }
+    if (!orbitsOk) p.outOrbits = 0
+    if (!sinceOk) p.outSince = this.clock()
+    logEvent('error', {
+      matchId: this.matchId(),
+      handNo: match.handNo,
+      userId: p.userId,
+      reason: 'sitout_count',
+    })
+    // One per account and hand: incidents_once is unique on (match_id,
+    // hand_no, kind), and the kind names the account.
+    if (this.recordable())
+      writes[this.outboxKey(match.handNo, `sitout:${p.userId}`)] = {
+        rpc: 'record_incident',
+        attempts: 0,
+        body: {
+          matchId: this.matchId(),
+          handNo: match.handNo,
+          kind: `sitout_count:${p.userId}`,
+          detail: { userId: p.userId, ...stored },
+        },
+      } satisfies Outbox
+    return true
+  }
+
+  /**
+   * Six-casual: whether `p`'s stored sit-out time can be one the table's
+   * clock (Date.now()) gave: a number from 1970 to now. One later than
+   * now would put their removal off until then, which at a table that
+   * deals nothing is never; one far enough back makes setAlarm throw
+   * ("dates before 1687"), as NaN did, on every write that arms it.
+   */
+  private outSinceOk(p: Player) {
+    const since = p.outSince
+    return Number.isFinite(since) && since! >= 0 && since! <= this.clock()
+  }
+
+  /**
+   * Six-casual: whether `p` sits out and may be stood up now: never during
+   * a hand they are dealt into (its moves read their seat's account from
+   * the table), nor while they leave it already (standing).
+   */
+  private leavable(p: Player) {
+    if (p.status !== 'sitting_out' || p.standing) return false
+    const hand = this.hand
+    return !hand || isOver(hand) || this.handSeat(p.userId) === null
+  }
+
+  /**
+   * Six-casual: the alarm for the first player sitting out whose
+   * SIT_OUT_MS run out, one `sitout` deadline at the earliest. A player
+   * dealt into the hand being played has none until it ends, when the end
+   * arms it again. Run by armAlarm, so every write that arms the alarm
+   * keeps it right.
+   */
+  private syncSitOut() {
+    const match = this.match
+    if (match?.config.kind !== 'six-casual') return
+    const due = this.seatable()
+      ? match.players
+          .filter((p) => this.leavable(p))
+          // A time that cannot be right is due now, so the alarm
+          // repairs it (repairOut).
+          .map((p) =>
+            this.outSinceOk(p) ? p.outSince! + SIT_OUT_MS : this.clock(),
+          )
+      : []
+    this.deadlines = [
+      ...this.deadlines.filter((d) => d.kind !== 'sitout'),
+      ...(due.length
+        ? [{ kind: 'sitout' as const, at: Math.min(...due) }]
+        : []),
+    ]
+  }
+
+  /**
+   * The `sitout` alarm: players sitting out whose time ran out leave, as a
+   * stand between hands would, with no cooldown. A bad stored count or
+   * time found on the way is repaired (repairOut).
+   */
+  private async sitOutTimeUp() {
+    const match = this.match
+    if (!match || !this.seatable()) return
+    const writes: Record<string, unknown> = { match }
+    const { due: gone, repaired } = this.satOutTooLong(false, writes)
+    if (!gone.length && !repaired) return
+    if (gone.length) {
+      this.unseat(gone, false)
+      // As at the last stand: an open session still ends IDLE_MS after
+      // its last hand started; with none open, the table goes IDLE_MS
+      // from now.
+      if (!match.players.length && match.status === 'waiting')
+        this.setGameDeadline(this.idleDeadline())
+      this.seq++
+      writes.seq = this.seq
+    }
+    writes.deadlines = this.deadlines
+    this.expectArchive(writes)
+    await this.ctx.storage.put(writes)
+    await this.armAlarm()
+    if (gone.length) {
+      this.broadcast('state', { roster: true })
+      this.leave(gone)
+    }
+    if (repaired) void this.flushOutbox()
+  }
+
+  /**
+   * Six-casual: the players `hand`, just over, left with no chips sit out
+   * until they rebuy (ADR "Stacks and rebuy"). A player who stood from it
+   * has left already. True when any status changed.
+   */
+  private bustOut(hand: HandState) {
+    let changed = false
+    for (const p of hand.players) {
+      if (p.stack > 0) continue
+      const player = this.playerIn(p.seat)
+      if (player && this.sitOut(player)) changed = true
+    }
+    return changed
+  }
+
+  /**
+   * Takes `gone` off the table, each with a cooldown before they may sit
+   * here again (`cooldown`; a player stood up for sitting out gets none).
+   * It runs from now, when the seat frees, not from the stand: a player
+   * who stood mid-hand held the seat until that hand ended. Cooldowns
+   * already over are dropped, so the list stays short.
+   */
+  private unseat(gone: Player[], cooldown = true) {
     const match = this.match!
     match.players = match.players.filter((p) => !gone.includes(p))
+    // A grace of theirs has nothing left to do.
+    this.deadlines = this.deadlines.filter(
+      (d) => !(d.kind === 'grace' && gone.some((p) => p.userId === d.userId)),
+    )
     const cooldowns = Object.fromEntries(
       Object.entries(match.cooldowns ?? {}).filter(([userId]) =>
         this.cooldownOf(userId),
       ),
     )
-    for (const p of gone)
-      cooldowns[p.userId] = {
-        hands: (match.tableHands ?? 0) + SIT_COOLDOWN_HANDS,
-        until: this.clock() + SIT_COOLDOWN_MS,
-      }
+    if (cooldown)
+      for (const p of gone)
+        cooldowns[p.userId] = {
+          hands: (match.tableHands ?? 0) + SIT_COOLDOWN_HANDS,
+          until: this.clock() + SIT_COOLDOWN_MS,
+        }
     match.cooldowns = cooldowns
+  }
+
+  /**
+   * Tells players stood up for sitting out that they have no seat, and
+   * frees their accounts in the lobby (releaseSeats), as a stand does.
+   */
+  private leave(gone: Player[]) {
+    if (!gone.length) return
+    for (const ws of this.openSockets()) {
+      const userId = this.userOf(ws)
+      if (gone.some((p) => p.userId === userId))
+        this.send(ws, this.frame('welcome', userId))
+    }
+    void this.releaseSeats(gone.map((p) => p.userId))
   }
 
   /**
@@ -949,11 +1260,16 @@ export class TableDO extends DurableObject<WorkerEnv> {
 
   /**
    * A socket is closing: the others see the seat offline, and a rated
-   * seat with no other socket open starts its grace.
+   * seat, or a six-table player who is playing, with no other socket open
+   * starts its grace.
    */
   private async socketGone(ws: WebSocket) {
     this.broadcast('state', { gone: ws })
     const match = this.match
+    if (match?.config.kind === 'six-casual') {
+      if (this.graceForAbsent(ws)) await this.armAlarm()
+      return
+    }
     if (!match?.adjusted || match.status !== 'playing') return
     const { userId } = ws.deserializeAttachment() as Attachment
     const player = match.players.find((p) => p.userId === userId)
@@ -966,9 +1282,27 @@ export class TableDO extends DurableObject<WorkerEnv> {
     await this.armAlarm()
   }
 
-  /** A rated seat that (re)connects ends its grace, or its time away. */
+  /**
+   * A rated seat that (re)connects ends its grace, or its time away. A
+   * six-table player back within the grace ends it; one who sat out
+   * meanwhile (the grace ran out, or two timeouts) stays out until sit_in.
+   * A grace that ran out before its alarm ran (a late alarm) sits them
+   * out now, as the alarm would have: being back after it ends undoes
+   * nothing. Run before the new socket is accepted, so they are still
+   * away for sixGraceOver.
+   */
   private async back(player: Player) {
     const match = this.match!
+    if (match.config.kind === 'six-casual') {
+      const mine = this.deadlines.filter(
+        (d) => d.kind === 'grace' && d.userId === player.userId,
+      )
+      if (!mine.length) return
+      this.deadlines = this.deadlines.filter((d) => !mine.includes(d))
+      if (mine.some((d) => d.at <= this.clock()))
+        await this.sixGraceOver([player.userId])
+      return this.armAlarm()
+    }
     if (!match.adjusted) return
     const grace = (d: Deadline) => d.kind === 'grace' && d.seat === player.seat
     const away = player.awaySince !== undefined
@@ -992,11 +1326,15 @@ export class TableDO extends DurableObject<WorkerEnv> {
   }
 
   /**
-   * Seats whose grace ran out are away: a turn of theirs is played at once.
-   * Both away: the match is abandoned, void.
+   * Graces that ran out. Rated: those seats are away, and a turn of theirs
+   * is played at once; both away, the match is abandoned, void. Six-casual
+   * (sixGraceOver): those players sit out.
    */
-  private async graceOver(seats: SeatId[]) {
+  private async graceOver(graces: Extract<Deadline, { kind: 'grace' }>[]) {
     const match = this.match
+    if (match?.config.kind === 'six-casual')
+      return this.sixGraceOver(graces.flatMap((d) => d.userId ?? []))
+    const seats = graces.map((d) => d.seat)
     if (match?.status !== 'playing') return
     const leaving = match.players.filter(
       (p) =>
@@ -1025,6 +1363,66 @@ export class TableDO extends DurableObject<WorkerEnv> {
   }
 
   /**
+   * Six-casual (ADR amendment 2026-10-10, "Reconnect"): the players whose
+   * grace ran out without a socket open sit out from the next hand, and
+   * their removal clocks start (sitOut). Nothing else: a hand they are
+   * dealt into goes on with their turns on the normal clock, nobody is
+   * forfeited and the table never ends for it. With fewer than two left
+   * to deal in (funded), the next deal waits until a second is back.
+   */
+  private async sixGraceOver(userIds: string[]) {
+    const match = this.match
+    if (!match || !this.seatable()) return
+    let changed = false
+    for (const p of match.players)
+      if (
+        userIds.includes(p.userId) &&
+        !p.standing &&
+        !this.connected(p.userId) &&
+        this.sitOut(p)
+      )
+        changed = true
+    if (!changed) return
+    this.seq++
+    await this.ctx.storage.put({ match, seq: this.seq })
+    this.broadcast('state', { roster: true })
+  }
+
+  /**
+   * Six-casual: every seated player who is playing, has no socket open
+   * (other than `exclude`, which is closing) and no grace running yet
+   * gets the 60 s grace from now (ADR "Reconnect"). A player sitting out
+   * needs none: being back changes nothing for them until sit_in. Run as
+   * a socket closes, and also as a socket joins and as the table's alarm
+   * runs, since a restart drops every socket without the restarted object
+   * hearing a close; then the grace starts at the first join or alarm
+   * after it. True when it started any; the caller stores the deadlines
+   * (armAlarm).
+   */
+  private graceForAbsent(exclude?: WebSocket) {
+    const match = this.match
+    if (match?.config.kind !== 'six-casual' || match.status === 'finished')
+      return false
+    let started = false
+    for (const p of match.players) {
+      if (p.status !== 'playing' || p.standing) continue
+      if (this.connected(p.userId, exclude)) continue
+      if (
+        this.deadlines.some((d) => d.kind === 'grace' && d.userId === p.userId)
+      )
+        continue
+      this.deadlines.push({
+        kind: 'grace',
+        at: this.clock() + GRACE_MS,
+        seat: p.seat,
+        userId: p.userId,
+      })
+      started = true
+    }
+    return started
+  }
+
+  /**
    * Runs every deadline that is due. Each one is checked against the table
    * first, so a late or repeated alarm does nothing. Never throws: a throw
    * would spend the platform's retry budget on a bug.
@@ -1032,10 +1430,14 @@ export class TableDO extends DurableObject<WorkerEnv> {
   async alarm() {
     try {
       const t = this.clock()
+      // Six-casual: players whose sockets a restart closed unseen.
+      this.graceForAbsent()
       const due = this.deadlines.filter((d) => d.at <= t)
       this.deadlines = this.deadlines.filter((d) => d.at > t)
       // All graces first, so two seats gone together void the match.
-      const graces = due.flatMap((d) => (d.kind === 'grace' ? [d.seat] : []))
+      const graces = due.filter(
+        (d): d is Extract<Deadline, { kind: 'grace' }> => d.kind === 'grace',
+      )
       if (graces.length) await this.graceOver(graces)
       for (const d of due) {
         if (d.kind === 'grace') continue
@@ -1054,6 +1456,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
         }
         if (d.kind === 'rematch') {
           await this.rematchExpired()
+          continue
+        }
+        // Waiting tables too: that is when no orbit passes.
+        if (d.kind === 'sitout') {
+          await this.sitOutTimeUp()
           continue
         }
         if (this.match?.status !== 'playing') continue
@@ -1146,18 +1553,22 @@ export class TableDO extends DurableObject<WorkerEnv> {
       seq: this.seq,
       lastAck: this.lastAck,
     }
-    // A six table never ends for one player's timeouts; sitting them out
-    // after two is P2-04's (PR-16).
-    const forfeit =
-      match.config.kind !== 'six-casual' && player.timeouts >= FORFEIT_TIMEOUTS
+    const six = match.config.kind === 'six-casual'
+    // A six table never ends for one player's timeouts: two in a row sit
+    // them out from the next hand, and this one goes on on the normal clock.
+    const forfeit = !six && player.timeouts >= FORFEIT_TIMEOUTS
+    const satOut =
+      six && player.timeouts >= SIT_OUT_TIMEOUTS && this.sitOut(player)
     // Six-casual: players who stood during this hand leave as it ends.
     const stood = isOver(next) ? match.players.filter((p) => p.standing) : []
+    let busted = false
     if (isOver(next)) {
       this.addNet(next)
       this.logHandEnd(next, t - current.startedAt)
       this.ended = await this.endOfHand(next, current, writes)
       writes.ended = this.ended
       if (stood.length) this.unseat(stood)
+      busted = six && this.bustOut(next)
       this.setGameDeadline(
         forfeit
           ? null
@@ -1169,8 +1580,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
     await this.ctx.storage.put(writes)
     await this.armAlarm()
     if (isOver(next)) await this.dropDeckIfUnqueued(writes)
-    // A seat that freed changes the table for sockets without a seat too.
-    this.broadcast('state', { roster: stood.length > 0 })
+    // A seat that freed, or a status that changed, changes the table for
+    // sockets without a seat too.
+    this.broadcast('state', { roster: stood.length > 0 || satOut || busted })
     if (isOver(next)) for (const ws of this.openSockets()) this.sendEnded(ws)
     for (const ws of this.openSockets()) {
       const userId = this.userOf(ws)
@@ -1216,9 +1628,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
       else if (!match.sessionOver && match.handNo >= SESSION_DEAL_LIMIT)
         return this.holdDealing()
     }
-    // A six table deals only to people who are there: with fewer than two
-    // funded, connected players it waits, and a reconnect or a sit deals
-    // again (the 60 s grace and sitting out come with PR-16/17).
+    // A six table deals only while two players are active (funded): with
+    // fewer it waits, and a reconnect, a sit, a sit_in or a rebuy deals
+    // again. A player in their grace is dealt in when it deals.
     if (six && this.funded().length < 2) return this.waitForPlayers()
     const handNo = six && match.sessionOver ? 1 : match.handNo + 1
     const plan = six
@@ -1266,6 +1678,10 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const { commitment } = await commitDeck(plan.deck, plan.secret)
     const t = this.clock()
     match.handNo = plan.config.handNo
+    /** Six-casual: players sitting out whom this deal stands up. */
+    let leaving: Player[] = []
+    /** Six-casual: incidents for bad stored sit-out counts (repairOut). */
+    const repairs: Record<string, unknown> = {}
     if (six) {
       match.tableHands = (match.tableHands ?? 0) + 1
       match.blinds = plan.blinds!
@@ -1275,13 +1691,23 @@ export class TableDO extends DurableObject<WorkerEnv> {
       // set below, reads it).
       if (orbit!.refill && match.config.bankRefill === 'orbit')
         for (const p of match.players) p.bankMs = match.config.bankMs
+      // Those sitting out for SIT_OUT_ORBITS orbit starts leave as it is
+      // dealt, as a stand between hands would, with no cooldown.
+      leaving = this.satOutTooLong(orbit!.refill, repairs).due
+      if (leaving.length) this.unseat(leaving, false)
       match.dealt = plan.users!.map(({ seat, userId }) => ({
         seat,
         userId,
         username: match.players.find((p) => p.userId === userId)!.username,
       }))
+      // Dealt in: no longer new here, and any removal clock from a
+      // sit-out before this hand is spent.
       for (const p of match.players)
-        if (match.dealt.some((d) => d.userId === p.userId)) p.justSat = false
+        if (match.dealt.some((d) => d.userId === p.userId)) {
+          p.justSat = false
+          delete p.outOrbits
+          delete p.outSince
+        }
       match.sessionUsers = [
         ...new Set([
           ...(match.sessionUsers ?? []),
@@ -1311,6 +1737,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
       deadlines: this.deadlines,
       seq: this.seq,
       ...(fresh ? { lastAck: this.lastAck } : {}),
+      ...repairs,
       // Kept for the match: the reveal opens it, Phase 1 replays decks.
       [this.deckKey(match.handNo)]: {
         deck: plan.deck,
@@ -1346,7 +1773,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
               }
             : {}),
         })
-    this.broadcast('state')
+    // A seat that freed changes the table for sockets without a seat too.
+    this.broadcast('state', { roster: leaving.length > 0 })
+    this.leave(leaving)
     if (match.handNo === 1)
       logEvent('match_start', {
         matchId: this.matchId(),
@@ -1354,7 +1783,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
       })
     // A hand that is over at the deal (blinds all in) still needs its end.
     if (isOver(hand)) await this.applyEndAtDeal(hand)
-    else if (match.handNo === 1) void this.flushOutbox()
+    else if (match.handNo === 1 || Object.keys(repairs).length)
+      void this.flushOutbox()
   }
 
   /** Settles a hand the blinds alone finished, through the normal end path. */
@@ -1365,6 +1795,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const writes: Record<string, unknown> = { match }
     this.ended = await this.endOfHand(hand, this.current!, writes)
     writes.ended = this.ended
+    const busted = match.config.kind === 'six-casual' && this.bustOut(hand)
     this.setGameDeadline({
       kind: 'nextHand',
       at: this.clock() + NEXT_HAND_MS,
@@ -1375,6 +1806,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
     await this.ctx.storage.put(writes)
     await this.armAlarm()
     await this.dropDeckIfUnqueued(writes)
+    // The deal's own state went to the seats; a status is everyone's news.
+    if (busted) this.broadcast('state', { roster: true })
     for (const ws of this.openSockets()) this.sendEnded(ws)
     void this.flushOutbox()
   }
@@ -1618,7 +2051,14 @@ export class TableDO extends DurableObject<WorkerEnv> {
     return player.stack!
   }
 
-  /** Six-casual: the players a hand could deal in now. */
+  /**
+   * Six-casual: the active players, whom a hand could deal in now: playing,
+   * with chips and with a socket open. Fewer than two, and the table waits
+   * (ADR "Reconnect": the heads-up "every player away" rule, as "fewer than
+   * two active, then pause"). A player in their 60 s grace is not active,
+   * so does not make the table deal, but is dealt in when it does: their
+   * turns run on the normal clock until the grace ends and they sit out.
+   */
   private funded() {
     return this.match!.players.filter(
       (p) => p.stack! > 0 && p.status === 'playing' && this.connected(p.userId),
@@ -1825,18 +2265,25 @@ export class TableDO extends DurableObject<WorkerEnv> {
     writes.deadlines = this.deadlines
   }
 
-  /** Replaces the turn/next-hand deadline; archive retries and graces stay. */
+  /**
+   * Replaces the turn/next-hand/idle deadline; archive retries, graces,
+   * the rematch and the sit-out alarm stay.
+   */
   private setGameDeadline(deadline: Deadline | null) {
     this.deadlines = [
       ...this.deadlines.filter(
         (d) =>
-          d.kind === 'outbox' || d.kind === 'grace' || d.kind === 'rematch',
+          d.kind === 'outbox' ||
+          d.kind === 'grace' ||
+          d.kind === 'rematch' ||
+          d.kind === 'sitout',
       ),
       ...(deadline ? [deadline] : []),
     ]
   }
 
   private async armAlarm() {
+    this.syncSitOut()
     await this.ctx.storage.put('deadlines', this.deadlines)
     const at = earliest(this.deadlines)
     if (at === null) await this.ctx.storage.deleteAlarm()
