@@ -100,8 +100,22 @@ export type ClientMsg =
    * choose it (ADR amendment 2026-10-10, "Stacks and rebuy").
    */
   | { t: 'rebuy' }
+  /**
+   * At a six table: sit out from the next hand, keeping the seat. During a
+   * hand the player is dealt into, they play it out as usual (ADR amendment
+   * 2026-10-10, "Sitting out"). Bare: the seat is the socket account's own.
+   */
+  | { t: 'sit_out' }
+  /**
+   * At a six table, sitting out: be dealt in again from the next hand, with
+   * the missed-decision count back at 0. Bare, as `sit_out`.
+   */
+  | { t: 'sit_in' }
 
-/** A seated six-casual player: dealt in, or sitting out (P2-04). */
+/**
+ * A seated six-casual player: dealt in from the next hand, or sitting out
+ * (P2-04). A player with no chips sits out until they rebuy.
+ */
 export type SeatStatus = 'playing' | 'sitting_out'
 
 export type ErrorCode =
@@ -436,6 +450,8 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case 'rematch':
     case 'stand':
     case 'rebuy':
+    case 'sit_out':
+    case 'sit_in':
       return onlyKeys(v, ['t']) ? { t: v.t } : null
     case 'sit':
       if (!onlyKeys(v, ['t', 'seat'])) return null

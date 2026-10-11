@@ -42,6 +42,10 @@ describe('parseClientMsg', () => {
     expect(parseClientMsg(frame({ t: 'stand' }))).toEqual({ t: 'stand' })
     // A rebuy names nothing: the server computes the amount from the stack.
     expect(parseClientMsg(frame({ t: 'rebuy' }))).toEqual({ t: 'rebuy' })
+    // Sitting out and back in name nothing either: the seat is the
+    // socket account's own (ADR amendment 2026-10-10, "Sitting out").
+    expect(parseClientMsg(frame({ t: 'sit_out' }))).toEqual({ t: 'sit_out' })
+    expect(parseClientMsg(frame({ t: 'sit_in' }))).toEqual({ t: 'sit_in' })
   })
 
   it('rejects malformed messages', () => {
@@ -90,6 +94,19 @@ describe('parseClientMsg', () => {
       frame({ t: 'rebuy', userId: 'u1' }),
       frame({ t: 'rebuy', x: 1 }),
       frame({ t: 'rebuy', amount: null }),
+      // Sit out and sit in name no seat, account, stack or time: they are
+      // the socket account's own, from the next hand.
+      frame({ t: 'sit_out', seat: 2 }),
+      frame({ t: 'sit_out', userId: 'u1' }),
+      frame({ t: 'sit_out', hands: 3 }),
+      frame({ t: 'sit_out', x: 1 }),
+      frame({ t: 'sit_in', seat: 2 }),
+      frame({ t: 'sit_in', userId: 'u1' }),
+      frame({ t: 'sit_in', stack: 2000 }),
+      frame({ t: 'sit_in', timeouts: 0 }),
+      frame({ t: 'sit_in', x: 1 }),
+      frame({ t: 'sitout' }),
+      frame({ t: 'sit-in' }),
       frame({ t: 'hello' }),
       frame({ ...act, reqId: 'a'.repeat(MAX_FRAME) }),
     ])
@@ -123,6 +140,8 @@ describe('parseClientMsg', () => {
           'sit',
           'stand',
           'rebuy',
+          'sit_in',
+          'sit_out',
           'r1',
           5,
           6,
@@ -163,6 +182,8 @@ describe('parseClientMsg', () => {
           'sit',
           'stand',
           'rebuy',
+          'sit_in',
+          'sit_out',
         ]).toContain(msg.t)
     }
   })
@@ -249,5 +270,35 @@ describe('parseClientMsg', () => {
       if (msg) bare++
     }
     expect(bare).toBeGreaterThan(500)
+  })
+
+  it('accepts a sit_in or sit_out only bare, whatever else it carries', () => {
+    const random = lcg(12)
+    const pick = <T>(xs: T[]) => xs[Math.floor(random() * xs.length)]
+    const values = [0, 1, 2, 5, -1, '', 'k0', null, true, [], {}]
+    const bare = { sit_in: 0, sit_out: 0 }
+    for (let i = 0; i < 5000; i++) {
+      const t = pick(['sit_in', 'sit_out'] as const)
+      const extra = [
+        'seat',
+        'userId',
+        'username',
+        'stack',
+        'timeouts',
+        'status',
+        'x',
+      ].filter(() => random() < 0.25)
+      const sent = {
+        t,
+        ...Object.fromEntries(extra.map((k) => [k, pick(values)])),
+      }
+      const msg = parseClientMsg(frame(sent))
+      // Anything beyond the type is refused, never ignored: no frame
+      // chooses whose seat, or what status, or how many timeouts.
+      expect(msg, JSON.stringify(sent)).toEqual(extra.length ? null : { t })
+      if (msg) bare[t]++
+    }
+    expect(bare.sit_in).toBeGreaterThan(300)
+    expect(bare.sit_out).toBeGreaterThan(300)
   })
 })
