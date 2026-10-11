@@ -2,10 +2,33 @@ import { expect } from '@playwright/test'
 import type { Page } from '@playwright/test'
 
 /**
- * Fresh visitor straight to the table (the bare URL is the landing page on
- * a first visit): welcome, choose a mode, skip the tour.
+ * A signed-in visitor, as far as the page can tell: a stored session of the
+ * shape supabase-js writes, under the key the fake account service's host
+ * would use. Practice, lessons and progress need one. Without an account
+ * service (Vite preview) nothing checks it with a server.
+ */
+export async function signedInVisitor(page: Page, username = 'tester') {
+  await page.addInitScript((name) => {
+    localStorage.setItem(
+      'sb-accounts-auth-token',
+      JSON.stringify({
+        access_token: 'e2e-access-token',
+        refresh_token: 'e2e-refresh-token',
+        expires_at: 4102444800,
+        token_type: 'bearer',
+        user: { id: '11111111-1111-4111-8111-111111111111' },
+      }),
+    )
+    localStorage.setItem('qp.username', name)
+  }, username)
+}
+
+/**
+ * A signed-in visitor straight to the table, new to it: welcome, choose a
+ * mode, skip the tour.
  */
 export async function onboard(page: Page, mode: 'new' | 'rules' = 'new') {
+  await signedInVisitor(page)
   await page.goto('/#table')
   await page
     .getByRole('button', {

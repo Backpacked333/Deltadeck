@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 permissions: {}
 env:
-  SITE: https://quantpoker.bbcroysalman.workers.dev
+  SITE: https://deltadeck.net
 jobs:
   production-serves-main:
     runs-on: ubuntu-latest

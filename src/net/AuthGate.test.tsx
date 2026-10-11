@@ -93,12 +93,12 @@ describe('loadProviders', () => {
 })
 
 describe('AuthGate', () => {
-  it('explains when online play is not configured', () => {
+  it('explains when accounts are not configured', () => {
     renderGate(null)
     expect(screen.getByText(/not set up on this site/)).toBeInTheDocument()
     expect(
-      screen.getByRole('link', { name: 'Practice vs Atlas' }),
-    ).toHaveAttribute('href', '#table')
+      screen.getByRole('link', { name: 'Back to the home page' }),
+    ).toHaveAttribute('href', '/')
   })
 
   it('asks for a sign-in first, with a way to create an account', async () => {

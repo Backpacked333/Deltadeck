@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import InfoPage from './InfoPages'
 
@@ -55,5 +55,41 @@ describe('Terms', () => {
       /your folded cards are never published/i,
     ])
       expect(page).toHaveTextContent(term)
+  })
+})
+
+describe('Privacy', () => {
+  it('says what is kept, where, who sees it, and how to have it deleted', () => {
+    render(<InfoPage page="privacy" />)
+    expect(
+      screen.getByRole('heading', { level: 1, name: 'Privacy' }),
+    ).toBeInTheDocument()
+    const kept = screen.getByRole('region', { name: 'What we keep' })
+    for (const item of [/email address/i, /username/i, /practice/i, /school/i])
+      expect(kept).toHaveTextContent(item)
+    const where = screen.getByRole('region', { name: 'Where it is kept' })
+    for (const service of [/Supabase/, /Cloudflare/, /Resend/, /Google/])
+      expect(where).toHaveTextContent(service)
+    expect(
+      screen.getByRole('region', { name: 'Who can see it' }),
+    ).toHaveTextContent(/only you can see your email address/i)
+    const deletion = screen.getByRole('region', {
+      name: 'Deleting your account',
+    })
+    expect(
+      within(deletion).getByRole('link', { name: 'support@deltadeck.net' }),
+    ).toHaveAttribute('href', 'mailto:support@deltadeck.net')
+  })
+})
+
+describe('reporting', () => {
+  it('gives the support address on Fair play', () => {
+    render(<InfoPage page="fair-play" />)
+    expect(
+      within(screen.getByRole('region', { name: 'How to report' })).getByRole(
+        'link',
+        { name: 'support@deltadeck.net' },
+      ),
+    ).toHaveAttribute('href', 'mailto:support@deltadeck.net')
   })
 })

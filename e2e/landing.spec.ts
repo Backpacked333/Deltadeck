@@ -1,6 +1,7 @@
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
+import { signedInVisitor } from './helpers'
 
 // The landing page (L-1, L-2, L-11): the bare URL is the home page. A visit
 // plays a graded challenge hand by keyboard, with no account, and reaches the
@@ -50,18 +51,30 @@ for (const colorScheme of ['light', 'dark'] as const)
     await axe(page)
   })
 
-test('skipping goes to free practice; the bare URL stays home', async ({
+test('the hero offers an account; practice needs one; the bare URL stays home', async ({
   page,
 }) => {
   await page.goto('/')
-  await page.getByRole('link', { name: /Skip to free practice/ }).click()
-  await expect(page).toHaveURL(/#table$/)
-  await expect(page.getByRole('dialog')).toBeVisible()
+  const hero = page.locator('.landing-links-row')
+  await expect(hero.getByRole('link', { name: 'Sign in' })).toHaveAttribute(
+    'href',
+    '#signin',
+  )
+  await hero.getByRole('button', { name: /Create free account/ }).click()
+  await expect(page).toHaveURL(/#signup$/)
+  await expect(
+    page.getByRole('heading', { level: 1, name: 'Join DeltaDeck' }),
+  ).toBeVisible()
+  // The practice table sends a signed-out visitor to sign up too.
+  await page.goto('/#table')
+  await expect(page).toHaveURL(/#signup$/)
+  await expect(page.locator('.table')).toHaveCount(0)
   await page.goto('/')
   await expect(page.getByRole('heading', { name: /misprice/ })).toBeVisible()
 })
 
 test('the logo leads home from the trainer', async ({ page }) => {
+  await signedInVisitor(page)
   await page.addInitScript(() =>
     localStorage.setItem(
       'quantpoker.progress.v2',
@@ -70,7 +83,7 @@ test('the logo leads home from the trainer', async ({ page }) => {
   )
   await page.goto('/#table')
   await expect(page.locator('.table')).toBeVisible()
-  await page.getByRole('link', { name: 'QuantPoker home' }).click()
+  await page.getByRole('link', { name: 'DeltaDeck home' }).click()
   await expect(page.getByRole('heading', { name: /misprice/ })).toBeVisible()
   expect(new URL(page.url()).hash).toBe('')
 })

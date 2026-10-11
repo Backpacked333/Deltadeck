@@ -26,7 +26,7 @@ const CARD = `<!doctype html>
   .chip b { display: block; font-size: 38px; white-space: nowrap; }
   .chip small { display: block; margin-top: 6px; font-size: 20px; color: #a9c6b6; white-space: nowrap; }
 </style></head><body>
-  <div class="brand">Quant<span>Poker</span></div>
+  <div class="brand">Delta<span>Deck</span></div>
   <h1>Rated heads-up poker, measured honestly.</h1>
   <div class="row">
     <div class="chip"><b>Rating ± RD</b><small>Glicko-2, uncertainty always shown</small></div>
@@ -60,7 +60,7 @@ const CHALLENGE = `<!doctype html>
   .row { display: flex; gap: 18px; }
   .grade { padding: 12px 22px; border-radius: 999px; font-size: 26px; font-weight: 800; color: #0d1714; }
 </style></head><body>
-  <div class="brand">Quant<span>Poker</span></div>
+  <div class="brand">Delta<span>Deck</span></div>
   <div>
     <div class="kicker">One hand · graded like chess · play money</div>
     <h1>Most people misprice this hand. <em>Beat my score.</em></h1>

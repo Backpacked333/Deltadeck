@@ -1,7 +1,7 @@
 // The landing page (L-1, L-2, L-9; landing v2). The hero is a cinematic 3D
 // table (ADR-001) where the visitor plays one graded hand; the 2D trainer
 // table stands in without WebGL or with reduced motion. Below it the page
-// says what QuantPoker is, how the grading and the ladder work, and what a
+// says what DeltaDeck is, how the grading and the ladder work, and what a
 // free account gives you, with a way to create one on every screen (or, for
 // a signed-in visitor, a way to play online). Lazy-loaded: it is the home
 // page at the bare URL.
@@ -165,7 +165,7 @@ export default function Landing({ signedIn = false }: { signedIn?: boolean }) {
             Most people misprice this hand. <em>Do you?</em>
           </h1>
           <p className="landing-lede">
-            QuantPoker is a rated ladder for poker <b>decisions</b>. Every move
+            DeltaDeck is a rated ladder for poker <b>decisions</b>. Every move
             is graded against the math, the luck is taken out, and you see where
             you rank. Play this hand against Atlas now; no account needed.
           </p>
@@ -180,11 +180,23 @@ export default function Landing({ signedIn = false }: { signedIn?: boolean }) {
             </p>
           )}
           <p className="landing-links-row">
+            {signedIn ? (
+              <>
+                <a className="btn btn-accent" href="#table">
+                  Open your table <ArrowRight size={14} />
+                </a>
+                <a href="#lobby">Play online</a>
+              </>
+            ) : (
+              <>
+                <button className="btn btn-accent" onClick={createAccount}>
+                  Create free account <ArrowRight size={14} />
+                </button>
+                <a href="#signin">Sign in</a>
+              </>
+            )}
             <a href="#how" onClick={toHow}>
               How it works
-            </a>
-            <a href="#table">
-              Skip to free practice <ArrowRight size={14} />
             </a>
           </p>
         </div>
@@ -199,7 +211,12 @@ export default function Landing({ signedIn = false }: { signedIn?: boolean }) {
               rival={against}
               signedIn={signedIn}
               onSave={signedIn ? saveScore : signUpToSave}
-              onAgain={again}
+              onAgain={signedIn ? again : signUpToSave}
+              againLabel={
+                signedIn
+                  ? 'Play another hand'
+                  : 'Create a free account to keep playing'
+              }
             />
           ) : (
             <ChallengeHand
@@ -241,6 +258,7 @@ export default function Landing({ signedIn = false }: { signedIn?: boolean }) {
             </a>
             <a href="#method">How ratings work</a>
             <a href="#terms">Terms</a>
+            <a href="#privacy">Privacy</a>
           </p>
         </div>
       </Reveal>
@@ -323,11 +341,11 @@ function HowItWorks({ onPlay }: { onPlay: () => void }) {
   return (
     <section className="landing-how" id="how" aria-labelledby="how-title">
       <Reveal as="div" className="landing-how-head">
-        <h2 id="how-title">How QuantPoker works</h2>
+        <h2 id="how-title">How DeltaDeck works</h2>
         <p>
           Poker is a fast loop for the instincts trading desks test: pricing
-          risk, sizing a bet, staying calibrated under pressure. QuantPoker
-          turns each hand into feedback.
+          risk, sizing a bet, staying calibrated under pressure. DeltaDeck turns
+          each hand into feedback.
         </p>
       </Reveal>
       <div className="landing-steps">
@@ -471,7 +489,8 @@ function YourAccount({
       <Reveal as="div" className="landing-account-head">
         <h2 id="account-title">Your free account</h2>
         <p>
-          Playing a hand needs nothing. An account is where it starts to count.
+          Your first hand needs nothing. An account is where it starts to count,
+          and what you play with after it.
         </p>
         <ul className="landing-account-facts">
           <li>

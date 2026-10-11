@@ -19,7 +19,7 @@ type Found = {
 }
 
 const GENERIC = {
-  title: 'QuantPoker',
+  title: 'DeltaDeck',
   description:
     'Rated heads-up poker with the luck taken out: ratings shown with their uncertainty, accuracy, and every hand reviewable.',
 }
@@ -47,12 +47,12 @@ async function lookUp(env: WorkerEnv, name: string): Promise<Found | null> {
 export function describePlayer(name: string, found: Found): string {
   const r = found.ratings[0]
   if (!r || r.matches === 0)
-    return `${name} plays rated heads-up poker on QuantPoker.`
+    return `${name} plays rated heads-up poker on DeltaDeck.`
   const rating = `${Math.round(r.rating)} ± ${Math.round(r.rd)}`
   const played = `${r.matches} rated heads-up ${r.matches === 1 ? 'match' : 'matches'}`
   return isProvisional(r)
-    ? `Provisional rating ${rating} after ${played} on QuantPoker.`
-    : `Rating ${rating} over ${played} on QuantPoker.`
+    ? `Provisional rating ${rating} after ${played} on DeltaDeck.`
+    : `Rating ${rating} over ${played} on DeltaDeck.`
 }
 
 async function preview(env: WorkerEnv, name: string | undefined) {
@@ -62,7 +62,7 @@ async function preview(env: WorkerEnv, name: string | undefined) {
     if (!found) return { status: 404, ...GENERIC }
     return {
       status: 200,
-      title: `${name} · QuantPoker`,
+      title: `${name} · DeltaDeck`,
       description: describePlayer(name, found),
     }
   } catch (error) {

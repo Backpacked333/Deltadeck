@@ -96,8 +96,8 @@ export async function sendCode(
       body: JSON.stringify({
         from: env.SCHOOL_EMAIL_FROM,
         to: [to],
-        subject: `${code} is your QuantPoker school code`,
-        text: `Your code to verify ${school} on QuantPoker is ${code}. It works for 15 minutes.\n\nIf you did not ask for it, ignore this email.`,
+        subject: `${code} is your DeltaDeck school code`,
+        text: `Your code to verify ${school} on DeltaDeck is ${code}. It works for 15 minutes.\n\nIf you did not ask for it, ignore this email.`,
       }),
     })
     if (!response.ok) {

@@ -1,5 +1,6 @@
 // The Worker in front of everything. Static files come from ./dist without
-// reaching this code; only /api/*, /ws/* and /u/* do (see wrangler.jsonc).
+// reaching this code; only the page itself (/), /api/*, /ws/*, /u/* and /c/*
+// do (see wrangler.jsonc).
 import { PROTOCOL } from '../../src/shared/protocol'
 import {
   bearerToken,
@@ -7,6 +8,7 @@ import {
   ratedEligibility,
   readSubprotocols,
 } from './auth'
+import { canonicalRedirect } from './canonical'
 import type { WorkerEnv } from './env'
 import { lobbyStub, tableStub } from './lobby'
 import { describeError, logEvent } from './log'
@@ -33,6 +35,9 @@ const LIMITED =
 export default {
   async fetch(request: Request, env: WorkerEnv): Promise<Response> {
     const { pathname } = new URL(request.url)
+
+    const moved = canonicalRedirect(request, env.CANONICAL_ORIGIN)
+    if (moved) return moved
 
     if (pathname === '/api/health')
       return json({ ok: true, protocol: PROTOCOL })

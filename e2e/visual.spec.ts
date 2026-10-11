@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
+import { signedInVisitor } from './helpers'
 
 // Opt-in screenshot comparisons (see playwright.config.ts). Seeded deals and
 // `motion=off` make every state reproducible.
@@ -26,6 +27,8 @@ const snap = async (page: Page, name: string) => {
 for (const colorScheme of ['light', 'dark'] as const)
   test.describe(colorScheme, () => {
     test.use({ colorScheme })
+    // Every page here needs an account.
+    test.beforeEach(({ page }) => signedInVisitor(page))
 
     test('welcome', async ({ page }) => {
       await page.goto(`${URL}#table`)
