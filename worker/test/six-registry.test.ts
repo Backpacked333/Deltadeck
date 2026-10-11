@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 // The lobby's list of six tables (P2-08a; ADR amendment 2026-10-10, "Table
 // list and quick-sit", and its clarifications from PR-23). A six table
 // tells the lobby its seats, average pot and players per hour, counts only,
@@ -14,7 +15,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { legalActions } from '../../src/engine/hand'
 import { CLOSE_GONE } from '../../src/shared/protocol'
 import type { HandState, PlayerAction } from '../../src/engine/types'
-import type { MatchConfig } from '../../src/shared/protocol'
+import type {
+  ClientMsg,
+  MatchConfig,
+  ServerMsg,
+} from '../../src/shared/protocol'
 import { CashController } from '../src/controller'
 import type { Roster } from '../src/controller'
 import { IDLE_MS } from '../src/deadlines'
@@ -30,7 +35,8 @@ import {
 import type { Listing, TableEntry, TableReport } from '../src/registry'
 import { NEXT_HAND_MS, SIT_OUT_MS, TableDO } from '../src/table'
 import type { InitBody } from '../src/table'
-import { checkLobbyFrame } from './frames'
+import { forgetUsernames } from '../src/auth'
+import { checkFrame, checkLobbyFrame } from './frames'
 import {
   connect,
   createMatch,
@@ -54,6 +60,13 @@ import {
 import type { Client } from './helpers'
 
 afterEach(() => vi.restoreAllMocks())
+
+/** The Worker's own sources, for the exposure gate's routes. */
+const workerSources = import.meta.glob<string>('../src/*.ts', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
+})
 
 /** Every report the lobby receives from now on, by table. */
 function watchReports() {
@@ -397,6 +410,38 @@ describe('reporting to the lobby', () => {
     expect((await seated(matchId)).map((p) => p.seat)).toEqual([0])
     await settled(matchId)
     expect(sent(matchId).at(-1)).toEqual(counts(1, 20, 2))
+  })
+
+  it('a change held at a waiting table goes out when its window passes, not at the idle check', async () => {
+    // Quick-sit skips a table listed as full and ranks by the list, so a
+    // waiting table may not keep a stale count until its idle check (ADR,
+    // clarifications from PR-24, decision 6).
+    const sent = watchReports()
+    const matchId = await sixTable()
+    const t0 = await clockOf(matchId)
+    const a = await sitDown(matchId, 'held-a', 0)
+    await settled(matchId)
+    expect(sent(matchId)).toEqual([counts(1, null, 0)])
+    // A stands at once: held, with the table waiting and empty. Its alarm
+    // is the report's, 30 s after the last one, before the idle check.
+    expect(await standUp(a)).toMatchObject({ seat: null })
+    expect((await storageOf(matchId)).alarm).toBe(t0 + REPORT_MS)
+    await elapse(matchId, REPORT_MS)
+    await settled(matchId)
+    expect(sent(matchId)).toEqual([counts(1, null, 0), counts(0, null, 0)])
+    // A sit at the empty waiting table inside the next window is held
+    // too, and arms the report itself.
+    await setClock(matchId, t0 + REPORT_MS + 10_000)
+    await sitDown(matchId, 'held-c', 2)
+    await settled(matchId)
+    expect(sent(matchId)).toHaveLength(2)
+    expect((await storageOf(matchId)).alarm).toBe(t0 + 2 * REPORT_MS)
+    await elapse(matchId, REPORT_MS - 10_000)
+    await settled(matchId)
+    expect(sent(matchId).at(-1)).toEqual(counts(1, null, 0))
+    // Nothing held: the next alarm is the idle check, as before.
+    expect(await listingOf(matchId)).toMatchObject({ pending: false })
+    expect((await storageOf(matchId)).alarm).toBe(t0 + IDLE_MS)
   })
 
   it('seated counts a player who stood during a hand, until it ends', async () => {
@@ -803,6 +848,16 @@ describe('when the lobby fails', () => {
     // lobby refuses it. A quiet table like this one is soon evicted from
     // memory, so the retry must be in its storage, not only in memory.
     const matchId = await sixTable()
+    // Its clock at its init, as in production: the idle check init armed
+    // (by the real clock, before sixTable froze it) stays later than the
+    // report's deadline below.
+    const [idle] = (await runInDurableObject(
+      stub(matchId),
+      (_: TableDO, state) =>
+        state.storage.get<{ kind: string; at: number }[]>('deadlines'),
+    ))!
+    expect(idle.kind).toBe('idle')
+    await setClock(matchId, idle.at - IDLE_MS)
     await sitDown(matchId, 'evict-a', 0)
     await settled(matchId)
     expect(refuse).toHaveBeenCalledTimes(1)
@@ -810,6 +865,14 @@ describe('when the lobby fails', () => {
     const t = (await runInDurableObject(stub(matchId), (i: TableDO) =>
       i.clock(),
     )) as number
+    // The failure arms the report's own deadline: the waiting table has no
+    // other alarm before its idle check (review B5).
+    const { reportedAt } = (await listingOf(matchId))!
+    expect(reportedAt).toBe(t)
+    await until(
+      'the refused report arms its deadline',
+      async () => (await storageOf(matchId)).alarm === reportedAt + REPORT_MS,
+    )
     await abortAllDurableObjects()
     await freezeClock(matchId, t)
     // The lobby is back: the first alarm after the window sends the table
@@ -960,32 +1023,68 @@ describe('restarts and sessions', () => {
 })
 
 describe('the exposure gate', () => {
-  it('no client path lists or creates six tables yet', async () => {
+  // PR-24 opens it, through the lobby socket only: quick-sit, and the list
+  // (ADR, clarifications from PR-24). Everything else stays shut.
+  it('quick-sit and the tables frame are the only client paths to six tables', async () => {
     // A six table is on the list...
     const matchId = await sixTable()
     await sitDown(matchId, 'gate-a', 0)
     await eventually(async () => (await entryOf(matchId)) !== undefined)
-    // ...but no route lists it (PR-24 adds GET /api/tables or a frame)...
+    const client = await lobby('gate-b')
+    await client.next((f) => f.t === 'presence')
+    // ...which no lobby frame names until the list is asked for...
+    expect(JSON.stringify(client.frames)).not.toContain(matchId)
+    // ...and then as its id and four counts, to that socket alone.
+    client.send({ t: 'tables' })
+    expect(await client.next((f) => f.t === 'tables')).toEqual({
+      t: 'tables',
+      seq: expect.any(Number),
+      tables: [
+        {
+          tableId: matchId,
+          seated: 1,
+          maxSeats: 6,
+          avgPot: null,
+          playersPerHour: 0,
+        },
+      ],
+    })
+    // Quick-sit sends a player to it, and opens a six table only when no
+    // listed table has a seat for them: an empty six-casual table.
+    let from = client.frames.length
+    client.send({ t: 'quick_sit' })
+    expect(await client.next((f) => f.t === 'sit_at', from)).toMatchObject({
+      tableId: matchId,
+    })
+    from = client.frames.length
+    client.send({ t: 'quick_sit', tried: [matchId] })
+    const opened = await client.next((f) => f.t === 'sit_at', from)
+    if (opened.t !== 'sit_at') throw new Error('no table opened')
+    expect(opened.tableId).not.toBe(matchId)
+    const { match } = await peek(opened.tableId)
+    expect(match).toMatchObject({
+      config: { kind: 'six-casual' },
+      players: [],
+      status: 'waiting',
+    })
+    for (const f of client.frames) checkLobbyFrame(f)
+  })
+
+  it('every other path to a six table stays shut', async () => {
+    // No route lists six tables: the list is a lobby frame.
     const route = await SELF.fetch(`${ORIGIN}/api/tables`, {
       headers: { Authorization: `Bearer ${token('gate-b')}` },
     })
     expect(route.status).toBe(404)
-    // ...no lobby message asks for the list or queues for a six table...
+    // The heads-up queue still refuses six-casual.
     const client = await lobby('gate-b')
     await client.next((f) => f.t === 'presence')
-    client.ws.send(JSON.stringify({ t: 'tables' }))
+    client.ws.send(JSON.stringify({ t: 'queue', kind: 'six-casual' }))
     expect(await client.next((f) => f.t === 'error')).toMatchObject({
       code: 'illegal',
     })
-    const from = client.frames.length
-    client.ws.send(JSON.stringify({ t: 'queue', kind: 'six-casual' }))
-    expect(await client.next((f) => f.t === 'error', from)).toMatchObject({
-      code: 'illegal',
-    })
-    // ...no lobby frame carries a table or its figures...
-    expect(JSON.stringify(client.frames)).not.toContain(matchId)
     for (const f of client.frames) checkLobbyFrame(f)
-    // ...and the invite route still makes heads-up tables only.
+    // The invite route still makes heads-up tables only...
     const made = await createMatch('gate-c')
     expect(made.status).toBe(201)
     const { matchId: invite } = (await made.json()) as { matchId: string }
@@ -993,6 +1092,171 @@ describe('the exposure gate', () => {
     expect((match as unknown as { config: { kind: string } }).config.kind).toBe(
       'hu-casual',
     )
+    // ...and no route of the Worker names a six table: only the lobby and
+    // the invite route call a table's /init, and the routes never with
+    // that kind. The lobby's pairing and rematch take heads-up kinds only
+    // (HeadsUpKind), so its one six-casual /init is quick-sit's.
+    const callers = Object.entries(workerSources)
+      .filter(([, src]) => src.includes('https://table/init'))
+      .map(([path]) => path)
+    expect(callers.sort()).toEqual(['../src/index.ts', '../src/lobby.ts'])
+    expect(workerSources['../src/index.ts']).not.toContain('six-casual')
+    // The table's own init still refuses a six table with an opponent or
+    // a start deadline, the shape a pairing would give it.
+    for (const extra of [
+      { opponent: { userId: 'gate-d', username: 'gate-d' } },
+      { startWithinMs: 30_000 },
+    ]) {
+      const matchId = crypto.randomUUID()
+      const body: InitBody = {
+        matchId,
+        creator: { userId: 'gate-c', username: 'gate-c' },
+        kind: 'six-casual',
+        ...extra,
+      }
+      const refused = await stub(matchId).fetch('https://table/init', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })
+      expect(refused.status).toBe(400)
+      expect(await storageOf(matchId)).toEqual({ keys: [], alarm: null })
+    }
+  })
+
+  it('the invite route takes no kind from the client', async () => {
+    // Neither the query string nor a JSON body makes an invite a six table.
+    const asks = [
+      { query: '?kind=six-casual', body: undefined },
+      { query: '', body: JSON.stringify({ kind: 'six-casual' }) },
+    ]
+    for (const { query, body } of asks) {
+      const made = await SELF.fetch(`${ORIGIN}/api/matches${query}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token('kind-c')}`,
+          'Content-Type': 'application/json',
+        },
+        body,
+      })
+      expect(made.status).toBe(201)
+      const { matchId } = (await made.json()) as { matchId: string }
+      const { match } = await peek(matchId)
+      expect(
+        (match as unknown as { config: { kind: string } }).config.kind,
+      ).toBe('hu-casual')
+      // One table per account: free it for the next ask.
+      await runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
+        state.storage.delete('active:kind-c'),
+      )
+    }
+  })
+
+  it('a table socket refuses quick_sit and tables', async () => {
+    // They are lobby messages: a table answers each with illegal, and
+    // nothing is opened or listed.
+    const six = await sixTable()
+    const headsUp = await createTable('lobbyish-h')
+    const tried = crypto.randomUUID()
+    for (const [matchId, kind] of [
+      [six, 'six-casual'],
+      [headsUp, 'hu-casual'],
+    ] as const) {
+      const client = await connect(matchId, 'lobbyish-h')
+      await client.next((f) => f.t === 'welcome')
+      const lobbyOnly: ClientMsg[] = [
+        { t: 'quick_sit' },
+        { t: 'quick_sit', tried: [tried] },
+        { t: 'tables' },
+      ]
+      for (const msg of lobbyOnly) {
+        const from = client.frames.length
+        client.send(msg)
+        expect(await client.next((f) => f.t === 'error', from)).toMatchObject({
+          code: 'illegal',
+        })
+      }
+      for (const f of client.frames) checkFrame(f, kind)
+      expect(client.closed).toBeNull()
+    }
+    expect(await listed()).toEqual([])
+    expect(
+      await runInDurableObject(lobbyStub(env), async (_: LobbyDO, state) => [
+        ...(await state.storage.list({ prefix: 'created:' })).keys(),
+      ]),
+    ).toEqual([])
+    expect((await storageOf(tried)).keys).toEqual([])
+  })
+
+  it('a socket opened on a listed table without sitting gets the roster, never a card or an account id', async () => {
+    // ADR, clarifications from PR-24, decision 7 (D1): a listed table's
+    // roster is public to signed-in accounts; nothing of a hand is, and
+    // no account id. Real (uuid) accounts with names, so an id is not
+    // also a username.
+    const ids = [0, 1, 2, 3].map(() => crypto.randomUUID())
+    const names = ['d1-ann', 'd1-ben', 'd1-cat', 'd1-dan']
+    const realFetch = globalThis.fetch
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(
+          input instanceof Request ? input.url : String(input),
+        )
+        if (url.origin !== new URL(env.SUPABASE_URL).origin)
+          return realFetch(input, init)
+        if (url.pathname === '/rest/v1/players') {
+          const id = url.searchParams.get('user_id')!.slice(3)
+          return Response.json([{ username: names[ids.indexOf(id)] }])
+        }
+        if (url.pathname.endsWith('/audit_hand'))
+          return Response.json({ verified: true })
+        return new Response(null, { status: 204 })
+      },
+    )
+    forgetUsernames()
+    try {
+      const matchId = await sixTable()
+      const a = await sitDown(matchId, ids[0], 0)
+      const b = await sitDown(matchId, ids[1], 2)
+      await a.next(isState(1))
+      await settled(matchId)
+      // The watcher finds the table in the list, and opens it, not sitting.
+      const lobbySocket = await lobby(ids[2])
+      lobbySocket.send({ t: 'tables' })
+      const list = await lobbySocket.next((f) => f.t === 'tables')
+      if (list.t !== 'tables') throw new Error('no tables frame')
+      expect(list.tables.map((r) => r.tableId)).toEqual([matchId])
+      const watcher = await connect(list.tables[0].tableId, ids[2])
+      const welcome = await watcher.next((f) => f.t === 'welcome')
+      expect(welcome).toMatchObject({ seat: null, view: null })
+      // The roster, by username: the accepted exposure.
+      expect(
+        (welcome as Extract<ServerMsg, { t: 'welcome' }>).table.players.map(
+          (p) => p.username,
+        ),
+      ).toEqual(['d1-ann', 'd1-ben'])
+      // The hand plays out, the next is dealt, and someone sits down.
+      await playOut(matchId, { 0: a, 2: b }, fold)
+      await dealNext(matchId, a, 2)
+      await sitDown(matchId, ids[3], 4)
+      await watcher.next(
+        (f) =>
+          f.t === 'state' &&
+          f.table.players.some((p) => p.username === 'd1-dan'),
+      )
+      // Through all of it: a summary and roster changes, never a view,
+      // and no account's id anywhere.
+      expect(watcher.frames.length).toBeGreaterThanOrEqual(2)
+      for (const f of watcher.frames) {
+        expect(['welcome', 'state']).toContain(f.t)
+        checkFrame(f, 'six-casual')
+        expect((f as { view?: unknown }).view).toBeNull()
+      }
+      const seen = JSON.stringify(watcher.frames)
+      for (const id of ids) expect(seen).not.toContain(id)
+    } finally {
+      vi.unstubAllGlobals()
+      forgetUsernames()
+    }
   })
 })
 

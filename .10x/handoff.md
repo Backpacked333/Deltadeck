@@ -1,6 +1,42 @@
 # Handoff
 
-## Current handoff: SDE → SDE (casual 6-max, PR-21 onward)
+## Current handoff: SDE → SDE (casual 6-max, PR-24 onward)
+
+Date: 2026-10-11 · Status: **#34 to #58 merged and verified live (PR-01 to PR-23, PR-20 optional and not built). Six tables are still unreachable from outside; PR-24 and PR-25 open them.**
+
+- **Read first:**
+  - the plan: `.10x/decisions/engineering-manager/six-max-casual.md`, above all "Left by PR-23 for PR-24";
+  - the ADR amendment in `.10x/decisions/architect/multiplayer-platform.md`, with its clarifications from PR-12 to PR-23;
+  - `.10x/status.md` §Casual 6-max.
+- **Order:**
+  1. PR-24 quick-sit (opens the gate): reads the list through `LobbyDO.tables()` only, treats `table_full`, `sit_cooldown` and `closed` alike, counts the 50-table cap itself, and revisits the waiting-table lag.
+  2. PR-25 `TableList` (shows the list).
+  3. PR-26 smoke evidence.
+- **Constraints:**
+  - heads-up stays byte-identical;
+  - every new message or frame field gets a redaction/allowlist test (`FRAME_KEYS`, `LOBBY_FRAME_KEYS`);
+  - the entry chunk stays under 150 kB (143.5 kB now, after the sign-in PRs #56, #57 and #59);
+  - the registry holds counts only.
+- **Recorded decisions to keep:**
+  - removal sets no sit cooldown;
+  - "active" means connected;
+  - flapping is accepted for play money;
+  - a player who sits in at a waiting table keeps the seat;
+  - a grace ends by the clock;
+  - a payout lands only on the plate of the winner it left for;
+  - the registry's removal goes out after `deleteAll`;
+  - a refused report is held in storage;
+  - the waiting-table lag is accepted until PR-24.
+- **Open:**
+  - Devin's security threads on #44 and #46, fixed but left for the owner to resolve;
+  - the declined #52 finding, for the user to confirm;
+  - the meaning of "players/hour" (PM).
+
+---
+
+## Handoff history
+
+### 2026-10-11 — SDE → SDE (casual 6-max, PR-21 onward)
 
 Date: 2026-10-11 · Status: **#34 to #53 merged and verified live. Every PR the exposure gate waited on is in (PR-12, PR-14, PR-16, PR-17); six tables are still unreachable from outside.**
 
@@ -26,10 +62,6 @@ Date: 2026-10-11 · Status: **#34 to #53 merged and verified live. Every PR the 
 - **Open:**
   - Devin's security threads on #44 and #46, fixed but left for the owner to resolve;
   - the declined #52 finding, for the user to confirm.
-
----
-
-## Handoff history
 
 ### 2026-10-11 — SDE → SDE (casual 6-max, PR-14 onward)
 

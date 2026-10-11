@@ -6,9 +6,15 @@
 //   queue:<userId>          { userId, username, since, kind, rating? }  (connected + asked)
 //   active:<userId>         matchId                      (one table each)
 //   pairs:<day>:<a>:<b>     times paired that UTC day    (limit 2)
-//   creates:<day>:<userId>  invite tables made that day  (limit 30)
+//   creates:<day>:<userId>  tables made that day: invites and quick-sit's
+//                           openings                     (limit 30)
 //   table:<tableId>         { seated, maxSeats, avgPot, playersPerHour, updatedAt }
 //                           (six tables; counts only, never an account)
+//   created:<tableId>       { at, by, ready }  a six table quick-sit opened,
+//                           counted against the cap for CREATED_MS (never
+//                           sent to a client)
+//   quicksit:<day>:<userId> { tokens, at }  the account's quick-sit budget
+//                           (the day before's carries over; older go)
 import { DurableObject } from 'cloudflare:workers'
 import {
   CLOSE_ABUSE,
@@ -16,15 +22,23 @@ import {
   MAX_FRAME,
   parseClientMsg,
   PROTOCOL,
+  QUICK_SIT_TABLES,
 } from '../../src/shared/protocol'
 import type { ErrorCode, LobbyMsg, MatchKind } from '../../src/shared/protocol'
 import type { RatedEligibility } from './auth'
 import { now } from './clock'
 import type { WorkerEnv } from './env'
-import { FrameBudget, MATCH_CREATES_PER_DAY } from './limits'
-import { logEvent } from './log'
+import {
+  FrameBudget,
+  MATCH_CREATES_PER_DAY,
+  QUICK_SIT_WINDOW_MS,
+  QUICK_SITS,
+  spendToken,
+} from './limits'
+import type { Bucket } from './limits'
+import { describeError, logEvent } from './log'
 import { ratingWindow, REPAIR_MS } from './pairing'
-import { isStale, listTables } from './registry'
+import { isStale, listTables, REGISTRY_STALE_MS, tableRow } from './registry'
 import type { ListedTable, TableEntry, TableReport } from './registry'
 import type { InitBody, Liveness } from './table'
 
@@ -40,12 +54,29 @@ export { RATING_WINDOW, ratingWindow, REPAIR_MS } from './pairing'
 /** A player with no rated match yet queues at the default rating. */
 const UNRATED = 1500
 
+/**
+ * Six tables open at once, at most (ADR, "One table per account"): the
+ * listed ones, and those quick-sit opened that nobody has sat at yet.
+ */
+export const SIX_TABLES_MAX = 50
+/**
+ * A table quick-sit opened counts through its `created:` record for this
+ * long, and after that only through its own entry in the list. A table
+ * nobody sits at deletes itself IDLE_MS after it opens; one missed idle
+ * check is slack, as for the list (REGISTRY_STALE_MS), so a lost removal
+ * holds a place for at most this long.
+ */
+export const CREATED_MS = REGISTRY_STALE_MS
+
+/** The queue and pairing are heads-up only: a six table is sat at. */
+type HeadsUpKind = Exclude<MatchKind, 'six-casual'>
+
 /** `kind` is absent on rows queued before rated play existed: casual. */
 type Waiting = {
   userId: string
   username: string
   since: number
-  kind?: MatchKind
+  kind?: HeadsUpKind
   /** Rated: the player's rating when they queued. */
   rating?: number
 }
@@ -56,8 +87,15 @@ type Attachment = {
   /** Checked by the Worker at connect (ratedEligibility). */
   rated?: RatedEligibility
 }
-const kindOf = (w: Waiting): MatchKind => w.kind ?? 'hu-casual'
+const kindOf = (w: Waiting): HeadsUpKind => w.kind ?? 'hu-casual'
 type Who = { userId: string; username: string }
+/**
+ * A six table quick-sit opened: when, for which account (never sent to a
+ * client), and whether its /init has answered (only then is it offered).
+ */
+type Created = { at: number; by: string; ready: boolean }
+/** What the lobby sends: a frame without its sequence number. */
+type Answer = DistributiveOmit<LobbyMsg, 'seq'>
 /** The lobby's answer to a rematch: the new table, or why not. */
 export type RematchAnswer = { matchId: string } | { refused: 'limit' | 'busy' }
 
@@ -86,7 +124,11 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
   /** A player's current rating; tests replace it. */
   ratingOf: (userId: string) => Promise<number> = (userId) =>
     currentRating(this.env, userId)
-  /** Every player shares this object: each account gets a frame budget. */
+  /**
+   * Every player shares this object: each account gets a frame budget. And
+   * a budget for quick-sits, which cost more than a frame, kept in storage
+   * (spendQuickSit).
+   */
   private budget = new FrameBudget(() => this.clock())
   /**
    * Each player's latest queue request. A request awaits lookups (the
@@ -103,6 +145,14 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    * would both find it free, and both seat it.
    */
   private userLocks = new Map<string, Promise<unknown>>()
+  /**
+   * Quick-sit's opens still waiting on their table's /init, by table id.
+   * Each settles once its `created:` record says how it went (ready, or
+   * gone). An open is offered only once ready, and /init lets other events
+   * in: a quick-sit arriving meanwhile with nothing else to offer waits for
+   * it here, rather than open a second table beside it.
+   */
+  private opening = new Map<string, Promise<void>>()
 
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env)
@@ -191,6 +241,14 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
       return this.cutOff(ws, CLOSE_ABUSE, 'too_large', 'Message too large')
     const msg = typeof message === 'string' ? parseClientMsg(message) : null
     if (msg?.t === 'queue') return this.enqueue(ws, msg.kind)
+    if (msg?.t === 'quick_sit') return this.quickSit(ws, msg.tried ?? [])
+    // The list goes to the socket that asks, never to everyone: the lobby
+    // is one object for every player (ADR, clarifications from PR-24).
+    if (msg?.t === 'tables')
+      return this.send(ws, {
+        t: 'tables',
+        tables: (await this.tables()).map(tableRow),
+      })
     if (msg?.t === 'dequeue') {
       this.requests.delete(this.who(ws).userId)
       await this.ctx.storage.delete(`queue:${this.who(ws).userId}`)
@@ -237,7 +295,7 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
 
   // ---- Queue -------------------------------------------------------------------
 
-  private async enqueue(ws: WebSocket, kind: MatchKind) {
+  private async enqueue(ws: WebSocket, kind: HeadsUpKind) {
     const { userId, username, rated } = this.who(ws)
     const request = ++this.lastRequest
     this.requests.set(userId, request)
@@ -336,14 +394,15 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    * A paired table for two queued players, unless either is at a table by
    * now: they queued free, but a claim (a six table, an invite) may have
    * seated them since, or another pairing may have paired them meanwhile.
-   * In line with both accounts' claims, so none lands in between.
+   * Nor unless both still wait as this pass read them. In line with both
+   * accounts' claims, so none lands in between.
    */
   private startPaired(
     a: Waiting,
     b: Waiting,
     pairs: string,
     count: number,
-    kind: MatchKind,
+    kind: HeadsUpKind,
   ) {
     return this.forUsers([a.userId, b.userId], async () => {
       for (const { userId } of [a, b]) {
@@ -358,6 +417,17 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
         }
         return null
       }
+      // A quick-sit or a cancel deletes the account's row without waiting
+      // for its claims, so a pass that read the queue before (and waited
+      // here) would pair an account that no longer asks for heads-up. Only
+      // the rows this pass read, unchanged, are paired.
+      const keys = [a, b].map((w) => `queue:${w.userId}`)
+      const rows = await this.ctx.storage.get<Waiting>(keys)
+      const still = (w: Waiting) => {
+        const row = rows.get(`queue:${w.userId}`)
+        return row?.since === w.since && kindOf(row) === kindOf(w)
+      }
+      if (!still(a) || !still(b)) return null
       return this.startMatch(a, b, pairs, count, kind)
     })
   }
@@ -371,7 +441,7 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
     b: Who,
     pairs: string,
     count: number,
-    kind: MatchKind,
+    kind: HeadsUpKind,
     rematchOf?: string,
   ) {
     const matchId = crypto.randomUUID()
@@ -437,24 +507,39 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
     return this.forUsers([userId], async () => {
       const active = await this.liveActive(userId)
       if (active) return { active }
-      const t = this.clock()
-      const today = day(t)
-      const key = `creates:${today}:${userId}`
-      const made = ((await this.ctx.storage.get(key)) as number) ?? 0
-      if (made >= MATCH_CREATES_PER_DAY)
-        return { retryAfter: Math.ceil((DAY_MS - (t % DAY_MS)) / 1000) }
+      const creates = await this.createsToday(userId)
+      if (creates.made >= MATCH_CREATES_PER_DAY)
+        return { retryAfter: creates.retryAfter }
       await this.ctx.storage.put({
-        [key]: made + 1,
+        [creates.key]: creates.made + 1,
         [`active:${userId}`]: matchId,
       })
-      // Earlier days' counts are no longer needed.
-      const old = await this.ctx.storage.list({
-        prefix: 'creates:',
-        end: `creates:${today}`,
-      })
-      if (old.size) await this.ctx.storage.delete([...old.keys()])
+      await this.forgetOldCreates(creates.today)
       return {}
     })
+  }
+
+  /** How many tables `userId` has made today, under which key. */
+  private async createsToday(userId: string) {
+    const t = this.clock()
+    const today = day(t)
+    const key = `creates:${today}:${userId}`
+    const made = ((await this.ctx.storage.get(key)) as number) ?? 0
+    return {
+      key,
+      made,
+      today,
+      retryAfter: Math.ceil((DAY_MS - (t % DAY_MS)) / 1000),
+    }
+  }
+
+  /** Earlier days' counts are no longer needed. */
+  private async forgetOldCreates(today: string) {
+    const old = await this.ctx.storage.list({
+      prefix: 'creates:',
+      end: `creates:${today}`,
+    })
+    if (old.size) await this.ctx.storage.delete([...old.keys()])
   }
 
   /** For a finished rated table: how often this pair may still meet today. */
@@ -526,15 +611,19 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
     } satisfies TableEntry)
   }
 
-  /** A six table that deleted itself or halted leaves the list. */
+  /**
+   * A six table that deleted itself or halted leaves the list, and no
+   * longer counts against the cap if quick-sit opened it.
+   */
   async removeTable(tableId: string) {
-    await this.ctx.storage.delete(`table:${tableId}`)
+    await this.ctx.storage.delete([`table:${tableId}`, `created:${tableId}`])
   }
 
   /**
-   * The listed six tables in quick-sit's order (listTables). Not exposed to
-   * clients yet: PR-24 adds the frame or route. Entries too old to trust
-   * are dropped here, on the read, so a report stays a single write.
+   * The listed six tables in quick-sit's order (listTables). Clients see
+   * them through the `tables` frame (tableRow) and quick-sit, both of
+   * which read here. Entries too old to trust are dropped here, on the
+   * read, so a report stays a single write.
    */
   async tables(): Promise<ListedTable[]> {
     const t = this.clock()
@@ -545,6 +634,340 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
       [...rows].map(([key, entry]) => [key.slice('table:'.length), entry]),
       t,
     )
+  }
+
+  // ---- Quick-sit (P2-08b) -------------------------------------------------------
+
+  /**
+   * A six table for this account (ADR, clarifications from PR-24): the
+   * table it is at, if any; else the fullest listed table with a free seat
+   * this quick-sit has not `tried`; else one the lobby opened that nobody
+   * has sat at yet; else a new one, under the cap. With three tried, a new
+   * one first, and one of the others only if none opens. The client sits
+   * there, and asks again naming the tables that refused it.
+   */
+  private async quickSit(ws: WebSocket, tried: string[]) {
+    const { userId, username } = this.who(ws)
+    // One search at a time: a heads-up search left running could pair the
+    // account while it sits down at a six table. It ends even when the
+    // budget refuses the quick-sit, as the client has stopped looking.
+    this.requests.delete(userId)
+    if (await this.ctx.storage.get(`queue:${userId}`)) {
+      await this.ctx.storage.delete(`queue:${userId}`)
+      await this.presence()
+    }
+    if (!(await this.spendQuickSit(userId))) {
+      logEvent('limit_hit', { userId, code: 429, reason: 'quick_sit' })
+      return this.reject(
+        ws,
+        'rate_limited',
+        'Too many quick sits. Try again in a moment.',
+      )
+    }
+    let answer: Answer
+    try {
+      answer = await this.forUsers([userId], async (): Promise<Answer> => {
+        // At a table already (six or heads-up): back to it, as a queue
+        // request would be. So an account at a table never opens one.
+        const active = await this.liveActive(userId)
+        if (active) return { t: 'matched', matchId: active, resumed: true }
+        await this.forgetClosed(tried)
+        await this.settleOrphans()
+        return this.pickTable({ userId, username }, tried)
+      })
+    } catch (error) {
+      // The claim is checked with its table, a call that can throw. The
+      // client waits for an answer to end its seating, so it gets one.
+      logEvent('error', {
+        userId,
+        reason: 'quick_sit',
+        detail: describeError(error),
+      })
+      answer = {
+        t: 'error',
+        code: 'tables_full',
+        message: 'Could not check your table just now. Try again in a moment.',
+      }
+    }
+    this.send(ws, answer)
+  }
+
+  /**
+   * Spends one of the account's quick-sits (QUICK_SITS per
+   * QUICK_SIT_WINDOW_MS); false when none is left. The bucket is stored: a
+   * quiet lobby hibernates within seconds, and a bucket kept in memory came
+   * back full. It is keyed by day so that old ones can be pruned, and the
+   * day before's carries over, so midnight refills nothing.
+   */
+  private async spendQuickSit(userId: string) {
+    const t = this.clock()
+    const yesterday = day(t - DAY_MS)
+    const keys = [
+      `quicksit:${day(t)}:${userId}`,
+      `quicksit:${yesterday}:${userId}`,
+    ]
+    const stored = await this.ctx.storage.get<Bucket>(keys)
+    const bucket = spendToken(
+      stored.get(keys[0]) ?? stored.get(keys[1]),
+      t,
+      QUICK_SITS,
+      QUICK_SIT_WINDOW_MS,
+    )
+    if (!bucket) return false
+    await this.ctx.storage.put(keys[0], bucket)
+    // An account's first quick-sit of the day prunes days before yesterday,
+    // at most one storage delete's worth at a time.
+    if (!stored.has(keys[0])) {
+      const old = await this.ctx.storage.list({
+        prefix: 'quicksit:',
+        end: `quicksit:${yesterday}`,
+        limit: 128,
+      })
+      if (old.size) await this.ctx.storage.delete([...old.keys()])
+    }
+    return true
+  }
+
+  /**
+   * The tables this quick-sit tried that the lobby knows (listed, or
+   * opened by it and answered), each asked whether it still exists. One
+   * that is gone (deleted, its removal lost) or halted leaves the list and
+   * the count. Only the table's own answer drops it: a client naming live
+   * tables cannot hide them from anyone, and cannot make the lobby wake an
+   * object it does not know.
+   */
+  private async forgetClosed(tried: string[]) {
+    for (const tableId of tried) {
+      const keys = [`table:${tableId}`, `created:${tableId}`]
+      const known = await this.ctx.storage.get<TableEntry | Created>(keys)
+      const created = known.get(keys[1]) as Created | undefined
+      if (!known.has(keys[0]) && !created?.ready) continue
+      let state: Liveness
+      try {
+        state = await tableStub(this.env, tableId).liveness()
+      } catch (error) {
+        logEvent('error', {
+          matchId: tableId,
+          reason: 'quick_sit_liveness',
+          detail: describeError(error),
+        })
+        continue
+      }
+      if (state === 'over') await this.ctx.storage.delete(keys)
+    }
+  }
+
+  /**
+   * Opens whose /init never answered here: a record not ready and not in
+   * flight was left by an earlier instance of the lobby (reset during the
+   * call), or by an /init call that threw. Such a record held its account
+   * to one unseated table and counted against the cap until it expired.
+   * Its table says what it is: there ('open'), so the record is made ready
+   * and offered; or not ('over': never made, or gone), so the record goes,
+   * and nothing else is given back (the day's opening was spent). A table
+   * that cannot be asked keeps its record, for removeTable or the expiry.
+   */
+  private async settleOrphans() {
+    for (const [tableId, c] of await this.openedTables(this.clock())) {
+      if (c.ready || this.opening.has(tableId)) continue
+      let state: Liveness
+      try {
+        state = await tableStub(this.env, tableId).liveness()
+      } catch (error) {
+        logEvent('error', {
+          matchId: tableId,
+          reason: 'quick_sit_liveness',
+          detail: describeError(error),
+        })
+        continue
+      }
+      // The call let other events in: only the record just asked about.
+      const key = `created:${tableId}`
+      const now = await this.ctx.storage.get<Created>(key)
+      if (!now || now.ready || now.at !== c.at) continue
+      if (state === 'over') await this.ctx.storage.delete(key)
+      else await this.ctx.storage.put(key, { ...now, ready: true })
+    }
+  }
+
+  /**
+   * Picks or opens the table. Each pass reads afresh, and from its first
+   * read to the writes that take a place under the cap only storage is
+   * awaited, so the input gate holds and no other quick-sit counts in
+   * between: two cannot both open the 50th. A call that lets other events
+   * in (the table's /init) ends a pass.
+   */
+  private async pickTable(who: Who, tried: string[]): Promise<Answer> {
+    const untried = (tableId: string) => !tried.includes(tableId)
+    // Opens this quick-sit has waited for: each at most once.
+    const waited = new Set<string>()
+    let failed = false
+    for (;;) {
+      const t = this.clock()
+      const listed = await this.tables()
+      const opened = await this.openedTables(t)
+      const listedIds = new Set(listed.map((row) => row.tableId))
+      // Opened and nobody has sat there yet: not listed.
+      const unseated = opened.filter(([tableId]) => !listedIds.has(tableId))
+      // A seat: the fullest listed table with one, else a table opened that
+      // nobody has sat at yet, so two players arriving together at an
+      // empty lobby share one table.
+      const seat =
+        listed.find((row) => row.seated < row.maxSeats && untried(row.tableId))
+          ?.tableId ??
+        unseated.find(([tableId, c]) => c.ready && untried(tableId))?.[0]
+      // An open still waiting on its /init will be such a table: one this
+      // quick-sit has not tried, nor waited for already.
+      const pending = unseated.find(
+        ([tableId]) =>
+          this.opening.has(tableId) && untried(tableId) && !waited.has(tableId),
+      )?.[0]
+      const wait = async (tableId: string) => {
+        waited.add(tableId)
+        await this.opening.get(tableId)
+      }
+      // Fewer than three tried: a seat comes first, then the open coming.
+      // Three are leave to open a table, never a ban on a seat (below).
+      if (tried.length < QUICK_SIT_TABLES) {
+        if (seat) return { t: 'sit_at', tableId: seat }
+        if (pending) {
+          // Leaves the storage-only section: read again once it settles.
+          await wait(pending)
+          continue
+        }
+      }
+      const refusal = failed
+        ? 'Could not open a table just now. Try again in a moment.'
+        : await this.refusal(who, listedIds, opened, unseated)
+      if (!refusal) {
+        const tableId = await this.open(who, t)
+        if (tableId) return { t: 'sit_at', tableId }
+        // The open let other events in: read again before answering.
+        failed = true
+        continue
+      }
+      // No table opens for this account: a seat it has not tried, if any,
+      // or one about to be.
+      if (seat) return { t: 'sit_at', tableId: seat }
+      if (pending) {
+        await wait(pending)
+        continue
+      }
+      return { t: 'error', code: 'tables_full', message: refusal }
+    }
+  }
+
+  /**
+   * Why `who` may not open a table now, or null if it may: the cap, its own
+   * table nobody has sat at yet (offered to it and everyone until someone
+   * sits there), or its openings today. Storage reads only.
+   */
+  private async refusal(
+    who: Who,
+    listedIds: Set<string>,
+    opened: (readonly [string, Created])[],
+    unseated: (readonly [string, Created])[],
+  ) {
+    const counted = new Set([...listedIds, ...opened.map(([id]) => id)])
+    if (counted.size >= SIX_TABLES_MAX)
+      return 'Every table is full. Try again in a minute.'
+    if (unseated.some(([, c]) => c.by === who.userId))
+      return 'Your table is still empty. Try again in a minute.'
+    const creates = await this.createsToday(who.userId)
+    if (creates.made >= MATCH_CREATES_PER_DAY)
+      return 'You have opened enough tables today. Try again tomorrow.'
+    return null
+  }
+
+  /**
+   * Opens a table for `who` at `t`: its `created:` record and the day's
+   * count first (the caller has awaited only storage since its reads), and
+   * only then the table's /init, which lets other events in. Its id, or
+   * null if the table did not open. A table that refused its /init was not
+   * made: the record goes and the day's count is given back. A call that
+   * threw may have made it: both stay, for settleOrphans, removeTable or
+   * the expiry to settle.
+   */
+  private async open(who: Who, t: number) {
+    const creates = await this.createsToday(who.userId)
+    const tableId = crypto.randomUUID()
+    const record: Created = { at: t, by: who.userId, ready: false }
+    // In flight from before its record is written: no quick-sit can see
+    // the record and not the open.
+    let settle = () => {}
+    this.opening.set(tableId, new Promise<void>((done) => (settle = done)))
+    try {
+      await this.ctx.storage.put({
+        [`created:${tableId}`]: record,
+        [creates.key]: creates.made + 1,
+      })
+      await this.forgetOldCreates(creates.today)
+      // The place is taken; only now a call that lets other events in.
+      const init = await this.openTable(tableId, who)
+      if (init === 'refused') {
+        await this.ctx.storage.delete(`created:${tableId}`)
+        await this.ctx.storage.put(creates.key, creates.made)
+      }
+      if (init !== 'made') return null
+      await this.ctx.storage.put(`created:${tableId}`, {
+        ...record,
+        ready: true,
+      })
+      return tableId
+    } finally {
+      // Settled once the record says how it went, so whoever waited reads
+      // it afresh.
+      this.opening.delete(tableId)
+      settle()
+    }
+  }
+
+  /**
+   * The tables quick-sit opened that still count (CREATED_MS), by id. Older
+   * records are dropped: such a table counts through its entry, if listed.
+   */
+  private async openedTables(t: number) {
+    const rows = await this.ctx.storage.list<Created>({ prefix: 'created:' })
+    const expired = [...rows]
+      .filter(([, c]) => t - c.at > CREATED_MS)
+      .map(([key]) => key)
+    if (expired.length) await this.ctx.storage.delete(expired)
+    return [...rows]
+      .filter(([, c]) => t - c.at <= CREATED_MS)
+      .map(([key, c]) => [key.slice('created:'.length), c] as const)
+  }
+
+  /**
+   * A new, empty six table: the internal /init pairing uses, with no
+   * opponent and no start deadline. Nobody sits, and it deletes itself
+   * after IDLE_MS, removing itself from the count (removeTable). 'made',
+   * 'refused' (the table answered, not 2xx), or 'unknown' (the call threw).
+   */
+  private async openTable(
+    tableId: string,
+    creator: Who,
+  ): Promise<'made' | 'refused' | 'unknown'> {
+    const body: InitBody = { matchId: tableId, creator, kind: 'six-casual' }
+    try {
+      const created = await tableStub(this.env, tableId).fetch(
+        'https://table/init',
+        { method: 'POST', body: JSON.stringify(body) },
+      )
+      if (created.ok) return 'made'
+      logEvent('error', {
+        matchId: tableId,
+        reason: 'table_init',
+        code: created.status,
+      })
+      return 'refused'
+    } catch (error) {
+      logEvent('error', {
+        matchId: tableId,
+        reason: 'table_init',
+        detail: describeError(error),
+      })
+      return 'unknown'
+    }
   }
 
   /**
@@ -619,7 +1042,7 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
     return ws.deserializeAttachment() as Attachment
   }
 
-  private send(ws: WebSocket, msg: DistributiveOmit<LobbyMsg, 'seq'>) {
+  private send(ws: WebSocket, msg: Answer) {
     try {
       ws.send(JSON.stringify({ ...msg, seq: this.seq }))
     } catch {

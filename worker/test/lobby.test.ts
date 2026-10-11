@@ -60,6 +60,9 @@ async function expire(matchId: string) {
   await elapse(matchId, START_WITHIN_MS)
 }
 
+const lobbyTables = () =>
+  runInDurableObject(lobbyStub(env), (instance: LobbyDO) => instance.tables())
+
 const lobbyState = () =>
   runInDurableObject(lobbyStub(env), async (instance: LobbyDO) => {
     const state = (instance as unknown as { ctx: DurableObjectState }).ctx
@@ -501,7 +504,7 @@ describe('rated pairing by rating', () => {
 })
 
 describe('lobby frames', () => {
-  it('queued/matched/presence/error carry only allowed keys', async () => {
+  it('queued/matched/presence/error/sit_at/tables carry only allowed keys', async () => {
     // A pairing, then the same player queueing again (matched, resumed).
     const { matchId, la, lb } = await pair('alice', 'bob')
     const from = la.frames.length
@@ -515,9 +518,24 @@ describe('lobby frames', () => {
     expect(await lb.next((f) => f.t === 'error')).toMatchObject({
       code: 'illegal',
     })
+    // A six table someone sits at: the list names it, and quick-sit sends
+    // a player there (P2-08b).
+    const six = await sixTable()
+    await sitDown(six, 'dave')
+    await eventually(async () => (await lobbyTables()).length === 1)
+    const lc = await lobby('carol')
+    await lc.next((f) => f.t === 'presence')
+    lc.send({ t: 'tables' })
+    expect(await lc.next((f) => f.t === 'tables')).toMatchObject({
+      tables: [{ tableId: six, seated: 1 }],
+    })
+    lc.send({ t: 'quick_sit' })
+    expect(await lc.next((f) => f.t === 'sit_at')).toMatchObject({
+      tableId: six,
+    })
 
     // Every type the lobby can send was seen, so none goes unchecked.
-    const all = [...la.frames, ...lb.frames]
+    const all = [...la.frames, ...lb.frames, ...lc.frames]
     expect(new Set(all.map((f) => f.t)), 'lobby frame types seen').toEqual(
       new Set(Object.keys(LOBBY_FRAME_KEYS)),
     )
