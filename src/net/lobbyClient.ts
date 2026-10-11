@@ -1,13 +1,16 @@
 // The lobby connection: presence counts, the quick-match queue, and the
 // table the server pairs us at. A queue place is held only while the socket
 // is open, so after a reconnect we ask again if we were still looking.
+// Six tables: quick-sit (the lobby says which table to sit at) and the list
+// of tables. Sitting there, and asking again with the tables tried when one
+// refuses, is the table page's (PR-25).
 import {
   CLOSE_ABUSE,
   CLOSE_RATE_LIMITED,
   CLOSE_REPLACED,
   PROTOCOL,
 } from '../shared/protocol'
-import type { LobbyMsg, MatchKind } from '../shared/protocol'
+import type { LobbyMsg, MatchKind, TableRow } from '../shared/protocol'
 import { socketOrigin } from './client'
 
 export type LobbyState = {
@@ -23,6 +26,12 @@ export type LobbyState = {
   presence: { online: number; queued: number; rated: number } | null
   matched: { matchId: string; resumed: boolean } | null
   error: string | null
+  /** True from a quick-sit until the lobby answers it. */
+  seating: boolean
+  /** The six table quick-sit chose: open it and sit. */
+  sitAt: string | null
+  /** The six tables, as the lobby last listed them; null until asked. */
+  tables: TableRow[] | null
 }
 
 const LIMITED = 'Too many messages, reconnecting…'
@@ -36,6 +45,9 @@ export const INITIAL_LOBBY: LobbyState = {
   presence: null,
   matched: null,
   error: null,
+  seating: false,
+  sitAt: null,
+  tables: null,
 }
 
 type Options = {
@@ -56,6 +68,8 @@ export class LobbyConnection {
    * so a later rated search goes over a fresh one, whatever came between.
    */
   private unverified = false
+  /** The tables the quick-sit being asked has tried (sent with it). */
+  private tried: string[] = []
   private readonly options: Required<Options>
 
   constructor(
@@ -117,6 +131,40 @@ export class LobbyConnection {
       this.socket?.send(JSON.stringify({ t: 'dequeue' }))
   }
 
+  /**
+   * Asks the lobby for a six table to sit at (now, or once the socket is
+   * open), naming the tables this quick-sit has tried. It ends a heads-up
+   * search, as the lobby does.
+   */
+  quickSit(tried: string[] = []) {
+    this.tried = tried
+    this.set({
+      seating: true,
+      sitAt: null,
+      looking: false,
+      queued: null,
+      matched: null,
+      error: null,
+    })
+    if (this.state.status === 'open') this.sendQuickSit()
+  }
+
+  /** Asks for the list of six tables, if the socket is open. */
+  listTables() {
+    if (this.state.status === 'open')
+      this.socket?.send(JSON.stringify({ t: 'tables' }))
+  }
+
+  private sendQuickSit() {
+    this.socket?.send(
+      JSON.stringify(
+        this.tried.length
+          ? { t: 'quick_sit', tried: this.tried }
+          : { t: 'quick_sit' },
+      ),
+    )
+  }
+
   private sendQueue() {
     this.socket?.send(JSON.stringify({ t: 'queue', kind: this.state.kind }))
   }
@@ -144,6 +192,7 @@ export class LobbyConnection {
         ...(this.state.error === LIMITED ? { error: null } : {}),
       })
       if (this.state.looking) this.sendQueue()
+      if (this.state.seating) this.sendQuickSit()
     }
     socket.onmessage = (event) => {
       try {
@@ -194,11 +243,18 @@ export class LobbyConnection {
         return this.set({
           looking: false,
           queued: null,
+          seating: false,
           matched: { matchId: msg.matchId, resumed: !!msg.resumed },
         })
+      case 'sit_at':
+        return this.set({ seating: false, sitAt: msg.tableId })
+      case 'tables':
+        return this.set({ tables: msg.tables })
       case 'error':
         // A rated queue refused: not looking any more, and the card says why.
-        if (msg.code !== 'unverified') return this.set({ error: msg.message })
+        // Anything else also ends a quick-sit waiting for its answer.
+        if (msg.code !== 'unverified')
+          return this.set({ error: msg.message, seating: false })
         this.unverified = true
         return this.set({ looking: false, queued: null, refused: msg.message })
     }

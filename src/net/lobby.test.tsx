@@ -121,6 +121,103 @@ describe('LobbyConnection', () => {
   })
 })
 
+describe('LobbyConnection: quick-sit and the table list', () => {
+  const T1 = '0b7c4a52-6f0e-4d7b-9b55-3c1f2a9e8d01'
+  const T2 = '1c8d5b63-7a1f-4e8c-8c66-4d2a3b0f9e12'
+  function connect() {
+    const connection = new LobbyConnection(async () => 'jwt', {
+      origin: 'wss://qp.test',
+      WebSocketImpl: FakeSocket as unknown as typeof WebSocket,
+    })
+    connection.start()
+    return connection
+  }
+
+  it('asks bare, then with the tables tried, and keeps the table it is sent to', async () => {
+    const connection = connect()
+    await flush()
+    const socket = FakeSocket.last()
+    socket.open()
+    connection.quickSit()
+    expect(sent(socket)).toEqual([{ t: 'quick_sit' }])
+    expect(connection.getState()).toMatchObject({ seating: true, sitAt: null })
+    socket.emit(lobbyFrame({ t: 'sit_at', tableId: T1 }))
+    expect(connection.getState()).toMatchObject({ seating: false, sitAt: T1 })
+    // Refused there (PR-25 sits and retries): ask again, naming it.
+    connection.quickSit([T1])
+    expect(sent(socket).at(-1)).toEqual({ t: 'quick_sit', tried: [T1] })
+    expect(connection.getState().sitAt).toBeNull()
+    socket.emit(lobbyFrame({ t: 'sit_at', tableId: T2 }))
+    expect(connection.getState().sitAt).toBe(T2)
+  })
+
+  it('sends a quick-sit asked before the socket opens, or across a reconnect, once open', async () => {
+    vi.useFakeTimers()
+    const connection = connect()
+    connection.quickSit([T1])
+    await vi.advanceTimersByTimeAsync(0)
+    FakeSocket.last().open()
+    expect(sent(FakeSocket.last())).toEqual([{ t: 'quick_sit', tried: [T1] }])
+    FakeSocket.last().drop(1006)
+    await vi.advanceTimersByTimeAsync(600)
+    FakeSocket.last().open()
+    expect(sent(FakeSocket.last())).toEqual([{ t: 'quick_sit', tried: [T1] }])
+  })
+
+  it('a quick-sit ends a heads-up search, and one resumed goes back to the table', async () => {
+    const connection = connect()
+    await flush()
+    const socket = FakeSocket.last()
+    socket.open()
+    connection.find()
+    connection.quickSit()
+    expect(connection.getState()).toMatchObject({
+      looking: false,
+      seating: true,
+    })
+    socket.emit(lobbyFrame({ t: 'matched', matchId: MATCH, resumed: true }))
+    expect(connection.getState()).toMatchObject({
+      seating: false,
+      matched: { matchId: MATCH, resumed: true },
+    })
+  })
+
+  it('stops a refused quick-sit and says why', async () => {
+    const connection = connect()
+    await flush()
+    const socket = FakeSocket.last()
+    socket.open()
+    connection.quickSit()
+    socket.emit(
+      lobbyFrame({
+        t: 'error',
+        code: 'tables_full',
+        message: 'Every table is full. Try again in a minute.',
+      }),
+    )
+    expect(connection.getState()).toMatchObject({
+      seating: false,
+      sitAt: null,
+      error: 'Every table is full. Try again in a minute.',
+    })
+  })
+
+  it('asks for the list of six tables and keeps it', async () => {
+    const connection = connect()
+    await flush()
+    const socket = FakeSocket.last()
+    socket.open()
+    connection.listTables()
+    expect(sent(socket)).toEqual([{ t: 'tables' }])
+    const tables = [
+      { tableId: T1, seated: 5, maxSeats: 6, avgPot: 120, playersPerHour: 9 },
+      { tableId: T2, seated: 0, maxSeats: 6, avgPot: null, playersPerHour: 0 },
+    ]
+    socket.emit(lobbyFrame({ t: 'tables', tables }))
+    expect(connection.getState().tables).toEqual(tables)
+  })
+})
+
 describe('LobbyConnection: rated', () => {
   function connect() {
     const connection = new LobbyConnection(async () => 'jwt', {
