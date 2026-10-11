@@ -24,7 +24,12 @@ import type { PlateSeat } from './SeatPlate'
 import { SixRing } from './SixRing'
 
 const SEATS = 6
-/** The buy-in, and what a rebuy tops up to: 100 bb (R-10). */
+/**
+ * The buy-in, and what a rebuy tops up to: 100 bb (R-10). Only to offer
+ * Rebuy: the server tops up from the table's stored blinds
+ * (`match.config.blinds`), so if stakes ever vary per table this must
+ * come over the wire instead.
+ */
 const TOP_UP = buyIn(SIX_BLINDS.bb)
 const noop = () => {}
 /** Where a tab keeps the hand it stood from (`matchId:handNo:seat`). */
