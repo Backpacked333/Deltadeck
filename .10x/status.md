@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-10-11 by SDE (casual 6-max: PR-01 to PR-24 live in #34 to #65, except PR-20 (optional); quick-sit opened the gate through the lobby socket, and PR-25 adds the table list and the client's retry. Accounts first: #57 to #63 live, #64 waits on sign-up reaching strangers). Earlier: landing page phases 1 and 2 (#30); rating P1-12 to P1-16 live; hands of a live match closed to clients; S7-11 waits on U-4
+Last updated: 2026-10-11 by SDE (casual 6-max: PR-01 to PR-25 live in #34 to #69, except PR-20 (optional); a signed-in player reaches a six table from the lobby page's Quick sit, and PR-26 adds the P2-11 run evidence. Accounts first: #57 to #63 live, #64 waits on sign-up reaching strangers). Earlier: landing page phases 1 and 2 (#30); rating P1-12 to P1-16 live; hands of a live match closed to clients; S7-11 waits on U-4
 
 **Standing instructions from the user (2026-10-09):**
 
@@ -133,13 +133,16 @@ Merged and deployed, each one verified in production after its merge:
   - side pots shown apart and paid in award order (#54);
   - chip motion at the six table, with a six-seat frame-time gate (#55);
   - a registry of six tables in the lobby, counts only (#58);
-  - quick-sit and the `tables` frame on the lobby socket, under a cap of 50 tables (#65).
+  - quick-sit and the `tables` frame on the lobby socket, under a cap of 50 tables (#65);
+  - Quick sit and the read-only list of six tables on the lobby page, with the client's retry across pages (#69).
   - #47 fixed two Supabase tests that timed out under load: their database boot moved into a hook.
-- **Exposure gate: open, through the signed-in lobby socket only (#65).** `quick_sit` sends a player to the fullest listed table with a free seat, or opens one under the cap of 50; `tables` lists them to the asking socket alone. Every other path stays shut, and a test pins it: the invite route sends no `kind`, the lobby queue refuses `six-casual`, init refuses a six table with an opponent, and `GET /api/tables` is 404. The lobby page has no Quick sit button or list until PR-25, so today only a client that sends the new messages reaches a six table.
-- **Next:** PR-25 (the table list and the client's retry loop), then PR-26 (smoke evidence).
+- **Exposure gate: open, through the signed-in lobby socket only (#65).** `quick_sit` sends a player to the fullest listed table with a free seat, or opens one under the cap of 50; `tables` lists them to the asking socket alone. Every other path stays shut, and a test pins it: the invite route sends no `kind`, the lobby queue refuses `six-casual`, init refuses a six table with an opponent, and `GET /api/tables` is 404. Since #69 the lobby page's 6-max card has Quick sit and the list: a refused sit goes back to the lobby, which asks again naming the tables tried (at most four asks).
+- **P2-11 run evidence (PR-26):** `node scripts/smoke-ws.mjs --six` against a local Worker with fresh state: six clients and a watcher at one real six table for 200 hands with a mid-hand stand, a join, timeouts until sat out (then sat in) and a reconnect; 0 invariant failures, 0 leaks, 200/200 commitments, client round trip p95 8 ms; and `e2e/live.spec.ts` › two browsers at a six-seat table through the real lobby. The checks were strengthened after an independent review and each is shown to fail on a faulty frame.
+- **Still open for 6-max:** ack-to-render p95 at six seats (S7-05 telemetry), the first 1,000 human casual hands with 0 failures (U-4), Safari background tabs, and P2-09 (6-max grading and payout reports).
 - **Open for the user:**
   - Devin's security threads, fixed and replied to but left open for the owner: two on #46, and one on #44 that #46 closed.
-  - "players/hour" is on the wire (#65) as distinct players dealt in during the last hour. If it should be hands per hour, say so before PR-25 shows it.
+  - "Players in the last hour" is on the lobby page (#69): distinct players dealt in during the last hour. If "players/hour" meant hands per hour, the Worker field and the label change together.
+  - A table that refuses a quick-sit sends the player through the lobby page for about half a second before the next table. Keeping the lobby socket open across pages would remove that flash, at about three times the client code; kept as is unless players report it.
   - The heads-up frame test's median sits at 33.3 ms, 0.7 ms under its limit, on main; the trainer's backdrop blurs cause it (found in PR-22, suggested as a separate task).
   - One review finding was declined, not fixed: on #52, Devin asked to stand up a player who sits in at a waiting table once their earlier sit-out clocks run out. They are playing and their seat blocks nobody, so they keep it; a guard test and an ADR clarification record this. Say if you want it the other way.
 

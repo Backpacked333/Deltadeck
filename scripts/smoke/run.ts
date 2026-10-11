@@ -15,6 +15,7 @@ import type {
 } from '../../src/shared/protocol'
 import { PROTOCOL } from '../../src/shared/protocol'
 import { ACK_P95_LIMIT_MS, percentile, verdict } from '../smoke-stats'
+import { six } from './six'
 import type { SmokeResult } from '../smoke-stats'
 
 const PROD = 'https://deltadeck.net'
@@ -36,6 +37,7 @@ function parse(argv: string[]) {
   }
   return {
     prod: argv.includes('--prod'),
+    six: argv.includes('--six'),
     target: arg('target'),
     pairs: Number(arg('pairs') ?? 10),
     hands: Number(arg('hands') ?? 500),
@@ -318,6 +320,12 @@ class Run {
   }
 }
 
+/** --hands, for --six (its default is 200, not the pairs' 500). */
+const arg6 = (argv: string[]) => {
+  const i = argv.indexOf('--hands')
+  return i >= 0 ? argv[i + 1] : undefined
+}
+
 export async function main(argv: string[]) {
   const args = parse(argv)
   const target = (
@@ -328,6 +336,12 @@ export async function main(argv: string[]) {
     /(^|\.)(deltadeck\.net|workers\.dev)$/.test(new URL(target).hostname)
   )
     throw new Error('Production is reached only with --prod; refusing.')
+  // Six seats at one table (P2-11): local only, with dev tokens.
+  if (args.six) {
+    if (args.prod)
+      throw new Error('--six runs against a local server only; refusing.')
+    return six(target, args.secret, Number(arg6(argv) ?? 200))
+  }
   const tokens = args.prod
     ? await confirmProduction(args.tokens)
     : Array.from(

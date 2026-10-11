@@ -1,6 +1,39 @@
 # Handoff
 
-## Current handoff: SDE → SDE (casual 6-max, PR-25 onward)
+## Current handoff: SDE → SDE (casual 6-max, PR-26)
+
+Date: 2026-10-11 · Status: **#34 to #69 merged and verified live (PR-01 to PR-25, PR-20 optional and not built). A signed-in player reaches a six table from the lobby page's Quick sit; the site is now https://deltadeck.net (#67), the repository `Backpacked333/Deltadeck`.**
+
+- **Read first:**
+  - the plan: `.10x/decisions/engineering-manager/six-max-casual.md`, PR-25's "As built" and "Left for later", and PR-26;
+  - the ADR amendment in `.10x/decisions/architect/multiplayer-platform.md`, with its clarifications from PR-12 to PR-25;
+  - `.10x/status.md` §Casual 6-max.
+- **Next:** PR-26 (P2-11 evidence) is built: `scripts/smoke/six.ts` (run with `node scripts/smoke-ws.mjs --six` against a fresh local Worker) and `e2e/live.spec.ts` › six tables through the real lobby; the plan's PR-26 "As built" has the evidence. What remains of 6-max needs other work first: ack-to-render p95 (S7-05), the first 1,000 human hands (U-4), Safari background tabs, and P2-09 (grading).
+- **Constraints:**
+  - heads-up stays byte-identical;
+  - every new message or frame field gets a redaction/allowlist test;
+  - the entry chunk stays under 150 kB (144.9 kB on main);
+  - the registry holds counts only, and the list goes only to the socket that asks.
+- **Recorded decisions to keep:**
+  - removal sets no sit cooldown; "active" means connected; flapping is accepted for play money;
+  - a player who sits in at a waiting table keeps the seat; a grace ends by the clock;
+  - a payout lands only on the plate of the winner it left for;
+  - the registry's removal goes out after `deleteAll`; a refused report is held in storage;
+  - rosters of listed tables are public to signed-in accounts (ADR D1);
+  - a quick-sit and a heads-up search end each other;
+  - the quick-sit retry reopens the lobby socket on the lobby page; only `LiveApp` state crosses pages; each table is pushed from the lobby and a refusal goes back to it (ADR, PR-25).
+- **Open:**
+  - Devin's security threads on #44 and #46, fixed but left for the owner to resolve;
+  - the declined #52 finding, for the user to confirm;
+  - the meaning of "players/hour" (PM);
+  - the half-second pass through the lobby on a refused quick-sit (PM);
+  - this session was configured for the repository's old name, so PR events may not arrive; PRs are polled.
+
+---
+
+## Handoff history
+
+### 2026-10-11 — SDE → SDE (casual 6-max, PR-25 onward)
 
 Date: 2026-10-11 · Status: **#34 to #65 merged and verified live (PR-01 to PR-24, PR-20 optional and not built). Quick-sit opened the gate through the lobby socket; the lobby page shows no list or Quick sit button until PR-25.**
 
@@ -31,10 +64,6 @@ Date: 2026-10-11 · Status: **#34 to #65 merged and verified live (PR-01 to PR-2
   - Devin's security threads on #44 and #46, fixed but left for the owner to resolve;
   - the declined #52 finding, for the user to confirm;
   - the meaning of "players/hour" (PM).
-
----
-
-## Handoff history
 
 ### 2026-10-11 — SDE → SDE (casual 6-max, PR-24 onward)
 
