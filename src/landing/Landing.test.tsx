@@ -36,7 +36,7 @@ let beacons: { name: string }[] = []
 let scoreBodies: { hand: string; ver: number; path: string[] }[] = []
 let scoreFails = false
 
-beforeAll(() => import('./Landing'))
+beforeAll(() => Promise.all([import('./Landing'), import('../net/LiveApp')]))
 beforeEach(() => {
   forgetTracked()
   beacons = []
@@ -113,18 +113,18 @@ describe('who sees the landing page', () => {
     }
   })
 
-  it('not someone back from a sign-in redirect: the app finishes it', async () => {
+  it('not someone back from a sign-in redirect: the online area finishes it', async () => {
     window.history.replaceState(null, '', '/?code=xyz')
     render(<App />)
     expect(
-      await screen.findByRole('region', { name: 'Poker table' }),
+      await screen.findByRole('heading', { level: 1, name: 'Signing you in' }),
     ).toBeVisible()
     expect(landingHeading()).not.toBeInTheDocument()
   })
 
   it('the logo goes home to the landing page, at the bare URL', async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ onboarded: true }))
-    window.history.replaceState(null, '', '/?code=xyz#table')
+    window.history.replaceState(null, '', '/#table')
     const user = userEvent.setup()
     render(<App />)
     expect(
@@ -213,7 +213,9 @@ describe('the challenge', () => {
       ]),
     )
     await user.click(screen.getByRole('button', { name: /Save your score/ }))
-    expect(window.location.hash).toBe('#welcome/onboard')
+    expect(window.location.hash).toBe('#signup')
+    // Signed in, the account goes on to onboarding, which claims the score.
+    expect(sessionStorage.getItem('qp.afterAuth')).toBe('#welcome/onboard')
   }, 30_000)
 
   it('still shows exact grades when the server cannot rank the line', async () => {
@@ -306,17 +308,17 @@ describe('what the page explains, and the way to an account', () => {
     render(<App />)
     await screen.findByRole('heading', { name: 'Your free account' })
     const header = screen.getByRole('link', { name: /Create free account/ })
-    expect(header).toHaveAttribute('href', '#welcome/onboard')
+    expect(header).toHaveAttribute('href', '#signup')
     expect(screen.getByRole('link', { name: 'Sign in' })).toHaveAttribute(
       'href',
-      '#welcome/onboard',
+      '#signin',
     )
     const buttons = screen.getAllByRole('button', {
       name: /Create free account/,
     })
     expect(buttons.length).toBeGreaterThanOrEqual(2)
     await user.click(buttons[0])
-    expect(window.location.hash).toBe('#welcome/onboard')
+    expect(window.location.hash).toBe('#signup')
     expect(beacons.map((b) => b.name)).toContain('signup_start')
   })
 })

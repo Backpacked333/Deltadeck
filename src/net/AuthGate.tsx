@@ -39,7 +39,7 @@ export function AuthGate({
   )
 }
 
-function NotConfigured() {
+export function NotConfigured() {
   return (
     <div className="empty live-empty">
       <UserRound size={26} />

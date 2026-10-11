@@ -18,6 +18,7 @@ if (dom) {
 beforeEach(() => {
   if (!dom) return
   localStorage.clear()
+  sessionStorage.clear()
   window.history.replaceState(null, '', '/')
   vi.stubGlobal('scrollTo', vi.fn())
 })

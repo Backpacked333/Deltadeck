@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { Session, SupabaseClient } from '@supabase/supabase-js'
-import { rememberAuthReturn } from '../lib/authReturn'
+import { isAccountRoute, rememberAuthReturn } from '../lib/authReturn'
 
 export type OAuthProvider = 'google' | 'apple'
 export type Providers = Record<OAuthProvider | 'email', boolean>
@@ -74,7 +74,10 @@ export async function signInWithProvider(
   client: SupabaseClient,
   provider: OAuthProvider,
 ) {
-  rememberAuthReturn(window.location.hash || '#lobby')
+  // From the sign-up or sign-in page, the place to come back to is the one
+  // that sent the player there, already remembered.
+  const here = window.location.hash
+  if (!isAccountRoute(here)) rememberAuthReturn(here || '#lobby')
   const { error } = await client.auth.signInWithOAuth({
     provider,
     options: { redirectTo: returnUrl() },

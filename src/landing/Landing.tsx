@@ -20,6 +20,7 @@ import {
   UserRound,
 } from 'lucide-react'
 import { CHALLENGE_HANDS } from '../challenge/hands'
+import { rememberAuthReturn } from '../lib/authReturn'
 import { hashString } from '../lib/random'
 import { track, visitorId } from '../lib/track'
 import { ChallengeHand } from './ChallengeHand'
@@ -48,7 +49,7 @@ export type Rival = {
 /** Sign-up, from any of the page's account buttons. */
 function createAccount() {
   track('signup_start')
-  window.location.hash = '#welcome/onboard'
+  window.location.hash = '#signup'
 }
 
 /** Scrolls to the explanation; #how is not a route, so the hash stays. */
@@ -66,6 +67,11 @@ function toHow(e: React.MouseEvent) {
 const playOnline = () => (window.location.hash = '#lobby')
 /** Onboarding claims the waiting score for a signed-in account too. */
 const saveScore = () => (window.location.hash = '#welcome/onboard')
+/** A new account goes to onboarding anyway; a returning one claims it there. */
+function signUpToSave() {
+  rememberAuthReturn('#welcome/onboard')
+  createAccount()
+}
 
 export default function Landing({ signedIn = false }: { signedIn?: boolean }) {
   const [index, setIndex] = useState(firstHand)
@@ -192,7 +198,7 @@ export default function Landing({ signedIn = false }: { signedIn?: boolean }) {
               finished={finished}
               rival={against}
               signedIn={signedIn}
-              onSave={signedIn ? saveScore : createAccount}
+              onSave={signedIn ? saveScore : signUpToSave}
               onAgain={again}
             />
           ) : (

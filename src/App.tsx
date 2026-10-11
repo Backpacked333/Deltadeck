@@ -55,7 +55,7 @@ import type {
   Settings,
 } from './lib/storage'
 import { useMediaQuery } from './hooks'
-import { isLearningRoute, useHash } from './lib/navigation'
+import { isLearningRoute, useHash, useSearch } from './lib/navigation'
 import type { LearningSession } from './curriculum/core/session'
 import { spotKey, useSpots } from './state/spots'
 import { guessKey, initialTrainer, trainerReducer } from './state/trainer'
@@ -105,17 +105,19 @@ const Lab = lazy(() => labModule.then((module) => ({ default: module.Lab })))
 
 /**
  * Hash routes: the landing page (the bare URL, #start, or #c/<receipt> for a
- * friend's challenge; the bare URL back from a sign-in opens the table),
- * #table (default), #progress, #lobby[/find], #play/<id>,
- * #ladder[/month], #u/<username> and #match/<id> (online play), #fair-play,
- * #terms and #method, #learn/...
- * and #learn/quick[/id].
+ * friend's challenge), #table (default), #progress, #lobby[/find],
+ * #play/<id>, #ladder[/month], #u/<username> and #match/<id> (online play),
+ * #signup and #signin, #fair-play, #terms and #method, #learn/...
+ * and #learn/quick[/id]. A return from a sign-in provider (?code=…) opens the
+ * online area, which finishes the sign-in, whatever the hash.
  */
 function parseRoute(hash: string, search = ''): Route {
+  if (backFromSignIn(search)) return { view: 'live', lesson: null }
   if (
     hash === '#start' ||
     /^#c\/[0-9a-f]{32}$/.test(hash) ||
-    ((hash === '' || hash === '#') && !backFromSignIn(search))
+    hash === '' ||
+    hash === '#'
   )
     return { view: 'landing', lesson: null }
   const quick = hash.match(/^#learn\/quick(?:\/([\w-]+))?$/)
@@ -131,7 +133,9 @@ function parseRoute(hash: string, search = ''): Route {
     /^#ladder(?:\/month)?$/.test(hash) ||
     /^#u\/[a-z0-9_]{3,20}$/.test(hash) ||
     /^#match\/[0-9a-f-]{36}$/.test(hash) ||
-    hash === '#welcome/onboard'
+    hash === '#welcome/onboard' ||
+    hash === '#signup' ||
+    hash === '#signin'
   )
     return { view: 'live', lesson: null }
   if (hash === '#fair-play' || hash === '#terms' || hash === '#method')
@@ -269,7 +273,8 @@ export default function App() {
   )
   const { spots, request } = useSpots()
   const hash = useHash()
-  const { view, lesson } = parseRoute(hash, window.location.search)
+  const search = useSearch()
+  const { view, lesson } = parseRoute(hash, search)
   // The landing page's account buttons, or the app's, for a signed-in visitor.
   const member = view === 'landing' && signedIn()
   const learningSession = useRef<LearningSession | null>(null)
@@ -881,11 +886,11 @@ export default function App() {
         <div className="header-tools">
           {view === 'landing' && !member ? (
             <span className="header-account">
-              <a href="#welcome/onboard" className="header-signin">
+              <a href="#signin" className="header-signin">
                 Sign in
               </a>
               <a
-                href="#welcome/onboard"
+                href="#signup"
                 className="btn btn-accent header-join"
                 onClick={() => track('signup_start')}
               >
