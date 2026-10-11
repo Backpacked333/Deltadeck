@@ -1583,6 +1583,46 @@ describe('rebuying at a six table', () => {
     checkFrames([...clients[0].frames, ...clients[2].frames], 'six-casual')
   })
 
+  it('between hands the roster carries the stacks the hand left', async () => {
+    const matchId = await sixTable()
+    const clients = await seatAll(matchId, [0, 2], 'rs')
+    await clients[0].next(isState(1))
+    // During a hand the roster keeps the stacks it was dealt with; the
+    // hand's own view has the chips as they move.
+    await move(matchId, clients, () => ({ type: 'call' }))
+    const during = last(clients[2].frames, 'state')
+    expect([rosterStack(during, 0), rosterStack(during, 2)]).toEqual([
+      2000, 2000,
+    ])
+    expect(bySeat(during.view!.players, 0).stack).toBe(1980)
+    // Seat 2 raises and seat 0 folds: 1,980 to 2,020. Every seat, and a
+    // socket without one, sees the stacks the next hand will be dealt:
+    // which players are below 100 bb, and may rebuy, shows on the roster.
+    const from = clients[0].frames.length
+    await move(matchId, clients, () => ({ type: 'raise', to: 60 }))
+    await move(matchId, clients, () => ({ type: 'fold' }))
+    const after = await clients[0].next(isState(1, 3), from)
+    expect([rosterStack(after, 0), rosterStack(after, 2)]).toEqual([1980, 2020])
+    const watcher = await connect(matchId, 'rs-w')
+    const welcome = await watcher.next((f) => f.t === 'welcome')
+    expect(welcome).toMatchObject({ seat: null, view: null })
+    expect([rosterStack(welcome, 0), rosterStack(welcome, 2)]).toEqual([
+      1980, 2020,
+    ])
+    // Dealt: hand 2 plays those stacks, and the roster keeps them.
+    await elapse(matchId, NEXT_HAND_MS)
+    const two = await clients[0].next(isState(2))
+    expect((await peek(matchId)).hand!.config.seats).toEqual([
+      { seat: 0, stack: 1980 },
+      { seat: 2, stack: 2020 },
+    ])
+    expect([rosterStack(two, 0), rosterStack(two, 2)]).toEqual([1980, 2020])
+    checkFrames(
+      [watcher, ...Object.values(clients)].flatMap((c) => c.frames),
+      'six-casual',
+    )
+  })
+
   it('a heads-up table refuses a rebuy', async () => {
     const matchId = await createTable('hu-a')
     const a = await connect(matchId, 'hu-a')

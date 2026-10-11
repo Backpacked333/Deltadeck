@@ -160,7 +160,12 @@ export type SeatView = {
       username: string
       connected: boolean
       consecutiveTimeouts: number
-      /** Six tables: chips as of the last deal (or the buy-in, if since). */
+      /**
+       * Six tables: the chips outside the hand being played. While the
+       * player is dealt into it, as of its deal; otherwise what the next
+       * hand deals them: as the last hand left it, the buy-in, or 100 bb
+       * after a rebuy.
+       */
       stack?: number
       /** Six tables. */
       status?: SeatStatus

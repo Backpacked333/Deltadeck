@@ -230,8 +230,10 @@ export const TABLE_KEYS = keysOf<View['match']>()([
   'handsTotal?',
   'players',
 ])
-// Six-casual adds each seat's stack as of the last deal and whether it is
-// playing or sitting out (six-only, RULES).
+// Six-casual adds each seat's stack outside the hand being played (as of
+// its deal while dealt in, as the last hand left it otherwise: public at
+// the hand's end) and whether it is playing or sitting out (six-only,
+// RULES).
 export const TABLE_PLAYER_KEYS = keysOf<View['match']['players'][number]>()([
   'seat',
   'username',

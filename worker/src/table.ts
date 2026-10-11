@@ -2533,7 +2533,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
         username: p.username,
         connected: this.connected(p.userId, exclude),
         consecutiveTimeouts: p.timeouts,
-        ...(six ? { stack: p.stack!, status: p.status! } : {}),
+        // Between hands, the stack the hand left: the one the next hand
+        // deals, and whether the player may rebuy.
+        ...(six ? { stack: this.stackOf(p), status: p.status! } : {}),
       })),
     }
     const turn = this.deadlines.find((d) => isCurrentTurn(d, this.hand))
