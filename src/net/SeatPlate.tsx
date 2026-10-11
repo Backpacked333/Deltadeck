@@ -81,6 +81,8 @@ export function SeatPlate({
       aria-label={label}
       className="six-seat"
       data-slot={slot}
+      // Where the chip flights find this seat (SixFlights).
+      data-seat={seat}
       data-state={state}
       data-active={active && player ? '' : undefined}
       data-away={away ? '' : undefined}
