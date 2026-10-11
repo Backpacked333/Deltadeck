@@ -181,8 +181,8 @@ export function SettingsDialog({
           Replay the three guided hands
         </button>
         <p className="modal-note">
-          No account. Settings, lessons and your last 100 hands stay in this
-          browser. Reloading deals a fresh hand.
+          Signed in, your settings, lessons and hands are saved to your account;
+          this browser keeps your last 100 hands. Reloading deals a fresh hand.
         </p>
       </div>
     </Modal>
@@ -307,7 +307,9 @@ export function WelcomeDialog({
           from luck.
         </p>
         <ul className="welcome-points">
-          <li>Play money only. No accounts, nothing leaves your browser.</li>
+          <li>
+            Play money only. Signed in, your practice is saved to your account.
+          </li>
           <li>Three guided hands, then shuffled practice against Atlas.</li>
           <li>
             Every decision graded like a chess engine would, on expected value.

@@ -21,6 +21,13 @@ import type {
   LearningStoreV2,
 } from './types'
 import { safeClone } from './validation'
+import { LEARNING_SAVED_EVENT } from '../../lib/storage'
+
+/** Tells the account's sync that the saved progress changed. */
+function savedEvent() {
+  if (typeof window !== 'undefined')
+    window.dispatchEvent(new Event(LEARNING_SAVED_EVENT))
+}
 
 export class LearningSession implements EvidenceCallbacks {
   store: LearningStoreV2
@@ -90,6 +97,7 @@ export class LearningSession implements EvidenceCallbacks {
           this.storage.setItem(LEARNING_KEY, raw)
           this.savedRaw = raw
           this.available = true
+          savedEvent()
           if (!backwardClock(next, this.clock)) this.notice = ''
         }
       } catch {
@@ -217,6 +225,7 @@ export class LearningSession implements EvidenceCallbacks {
         this.storage.setItem(LEARNING_KEY, raw)
         this.savedRaw = raw
         durable = true
+        savedEvent()
         this.storage.removeItem(LEARNING_V1_KEY)
       }
     } catch {

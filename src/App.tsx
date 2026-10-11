@@ -82,7 +82,7 @@ import { Tour } from './components/Tour'
 import { CardDefs } from './components/cards/CardArt'
 import type { TourStep } from './components/Tour'
 import { backFromSignIn } from './lib/landing'
-import { useAccount } from './lib/account'
+import { signedIn, useAccount } from './lib/account'
 import { AccountMenu } from './components/AccountMenu'
 import { track } from './lib/track'
 
@@ -284,6 +284,14 @@ export default function App() {
   // Signed in or not, as the entry chunk can tell; the online chunk confirms.
   const account = useAccount()
   const member = account.signedIn
+  // Signed out elsewhere (another tab, or a session the service ended): start
+  // afresh, so nothing of the account stays in this page.
+  const wasMember = useRef(member)
+  useEffect(() => {
+    if (wasMember.current && !member)
+      window.location.replace(window.location.pathname)
+    wasMember.current = member
+  }, [member])
   const learningSession = useRef<LearningSession | null>(null)
   const [dialog, setDialog] = useState<Dialog>(null)
   const [paused, setPaused] = useState(false)
@@ -314,7 +322,16 @@ export default function App() {
   const style = trainer.style
   const model = settings.opponentModel
   // Not over an invite link: a friend opening #play/<id> goes straight in.
+  // A signed-in player's history (and so whether they were onboarded) may
+  // be on the account: the welcome waits for it, 1.5 s at most.
+  const [historyReady, setHistoryReady] = useState(() => !signedIn())
+  useEffect(() => {
+    if (historyReady) return
+    const timer = setTimeout(() => setHistoryReady(true), 1500)
+    return () => clearTimeout(timer)
+  }, [historyReady])
   const welcome =
+    historyReady &&
     !progress.onboarded &&
     view !== 'live' &&
     view !== 'info' &&
@@ -1194,13 +1211,23 @@ export default function App() {
           <ProgressView
             progress={progress}
             sessionId={sessionId.current}
-            onReplace={(next) => setProgress({ ...next, onboarded: true })}
+            onReplace={(next) =>
+              setProgress((p) => ({
+                ...next,
+                onboarded: true,
+                owner: p.owner,
+                historyClearedAt: p.historyClearedAt,
+              }))
+            }
             onClear={() =>
               setProgress((p) => ({
                 ...emptyProgress(),
                 settings: p.settings,
                 onboarded: true,
                 guidedComplete: p.guidedComplete,
+                owner: p.owner,
+                // On the account too: no device brings these hands back.
+                historyClearedAt: Date.now(),
               }))
             }
             onPlay={() => go('table')}
@@ -1209,7 +1236,12 @@ export default function App() {
       </main>
       {member && (
         <Suspense fallback={null}>
-          <SessionKeeper />
+          <SessionKeeper
+            progress={progress}
+            onMerge={setProgress}
+            onLearningReplaced={() => learningSession.current?.reloadSaved()}
+            onReady={() => setHistoryReady(true)}
+          />
         </Suspense>
       )}
 

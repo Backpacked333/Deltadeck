@@ -19,6 +19,7 @@ import { signOutHere, useAuth } from './auth'
 import { NotConfigured } from './AuthGate'
 import { loadPlayer, PLACEHOLDER } from './players'
 import { SignIn } from './SignIn'
+import { activeSync, clearLocalPractice } from './sync'
 import type { SignInMode } from './SignIn'
 import type { Online } from './supabase'
 
@@ -178,25 +179,60 @@ function CallbackFailed({
 /** How long sign-out waits for the account service before going anyway. */
 export const SIGN_OUT_WAIT_MS = 3000
 
+/** Forgets this browser's account and its practice data, then starts afresh. */
+async function leave(online: Online | null) {
+  clearLocalPractice()
+  if (online)
+    await Promise.race([
+      signOutHere(online.client).catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, SIGN_OUT_WAIT_MS)),
+    ])
+  forgetAccount()
+  window.location.replace(window.location.pathname)
+}
+
 /**
- * #signout: this browser forgets the session (other devices stay signed in),
- * then reloads at the home page, so nothing of the account stays in memory.
+ * #signout: the practice hands still on their way reach the account first
+ * (3 s at most; the player decides if some cannot), then this browser
+ * forgets the session (other devices stay signed in) and its practice data,
+ * and reloads at the home page, so nothing of the account stays in memory.
  */
 export function SignOut({ online }: { online: Online | null }) {
   const started = useRef(false)
+  const [unsent, setUnsent] = useState(false)
   useEffect(() => {
     if (started.current) return
     started.current = true
     void (async () => {
-      if (online)
-        await Promise.race([
-          signOutHere(online.client).catch(() => {}),
-          new Promise((resolve) => setTimeout(resolve, SIGN_OUT_WAIT_MS)),
-        ])
-      forgetAccount()
-      window.location.replace(window.location.pathname)
+      const sync = activeSync()
+      if (sync && !(await sync.flush(SIGN_OUT_WAIT_MS))) setUnsent(true)
+      else await leave(online)
     })()
   }, [online])
+  if (unsent)
+    return (
+      <div className="empty live-empty" role="alert">
+        <h3>Some practice is not saved to your account yet</h3>
+        <p>
+          We could not reach the server, so your latest hands or lessons are
+          only in this browser. Signing out now removes them from it.
+        </p>
+        <div className="live-actions">
+          <button
+            className="btn btn-primary"
+            onClick={() => replaceRoute(HOME_ROUTE)}
+          >
+            Stay signed in
+          </button>
+          <button
+            className="btn btn-outline"
+            onClick={() => void leave(online)}
+          >
+            Sign out anyway
+          </button>
+        </div>
+      </div>
+    )
   return (
     <p className="live-status" role="status">
       Signing you out…
