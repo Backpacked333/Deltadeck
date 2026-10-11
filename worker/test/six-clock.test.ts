@@ -861,6 +861,48 @@ describe('the bank at a six table', () => {
       expect.objectContaining({ t: 'hand_start', handNo: 2 }),
     )
   })
+
+  it('a six table stored without bankRefill counts its orbits but keeps one bank', async () => {
+    // A table created before the orbit bank has no `bankRefill` in its
+    // stored config. The switch, not the orbit, refills: such a table goes
+    // on counting orbits (so the count is right if it ever gains the
+    // switch) and keeps the one bank it was created with.
+    const { matchId, clients } = await threeSeats('legacy')
+    const [a, b, c] = ['legacy-a', 'legacy-b', 'legacy-c']
+    await runInDurableObject(
+      stub(matchId),
+      async (instance: TableDO, state) => {
+        const { match } = instance as unknown as {
+          match: { config: { bankRefill?: string } }
+        }
+        delete match.config.bankRefill
+        await state.storage.put('match', match)
+      },
+    )
+    await think(matchId, clients, 32_000, fold)
+    expect(await banks(matchId)).toEqual({ [a]: 18_000, [b]: BANK, [c]: BANK })
+    await nextHand(matchId, clients)
+    expect(await travelOf(matchId)).toBe(2)
+    await nextHand(matchId, clients, fold)
+    expect(await travelOf(matchId)).toBe(4)
+    // Hand 4: the big blind is back on seat 2, so an orbit starts, but
+    // nothing refills, and seat 0's clock still shows what it had left.
+    const hand = await nextHand(matchId, clients, fold)
+    expect(hand.config).toMatchObject({ button: 4, sb: 0, bb: 2 })
+    expect(await travelOf(matchId)).toBe(0)
+    expect(await banks(matchId)).toEqual({ [a]: 18_000, [b]: BANK, [c]: BANK })
+    await move(matchId, clients, passive)
+    const t = await clockOf(matchId)
+    expect(clockAt(clients[0], 4, 1)).toEqual({
+      toAct: 0,
+      deadline: t + DECISION + 18_000,
+      bankMs: 18_000,
+    })
+    const { match } = await peek(matchId)
+    expect((match as unknown as { config: object }).config).not.toHaveProperty(
+      'bankRefill',
+    )
+  }, 30_000)
 })
 
 describe('heads-up banks', () => {
