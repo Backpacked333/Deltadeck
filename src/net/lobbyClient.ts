@@ -104,13 +104,24 @@ export class LobbyConnection {
     this.socket = null
   }
 
-  /** Joins the queue (now, or as soon as the socket is open). */
+  /**
+   * Joins the queue (now, or as soon as the socket is open). It ends a
+   * quick-sit, as the lobby does, so an answer to one that comes later is
+   * not taken.
+   */
   find(kind: MatchKind = 'hu-casual') {
     // The Worker checks rated eligibility once per socket, so a refused
     // player who retries (after confirming, or once Auth is back) needs a
     // fresh socket for a fresh answer.
     const recheck = kind === 'hu-rated' && this.unverified
-    this.set({ looking: true, kind, matched: null, error: null, refused: null })
+    this.set({
+      looking: true,
+      kind,
+      seating: false,
+      matched: null,
+      error: null,
+      refused: null,
+    })
     if (recheck) return this.reopen()
     if (this.state.status === 'open') this.sendQueue()
   }
@@ -247,10 +258,15 @@ export class LobbyConnection {
           matched: { matchId: msg.matchId, resumed: !!msg.resumed },
         })
       case 'sit_at':
-        return this.set({ seating: false, sitAt: msg.tableId })
+        // Only a quick-sit still waiting takes it: a search since replaced it.
+        return this.state.seating
+          ? this.set({ seating: false, sitAt: msg.tableId })
+          : undefined
       case 'tables':
         return this.set({ tables: msg.tables })
       case 'error':
+        // A quick-sit's refusal, after a search replaced it, says nothing.
+        if (msg.code === 'tables_full' && !this.state.seating) return
         // A rated queue refused: not looking any more, and the card says why.
         // Anything else also ends a quick-sit waiting for its answer.
         if (msg.code !== 'unverified')

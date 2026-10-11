@@ -182,6 +182,47 @@ describe('LobbyConnection: quick-sit and the table list', () => {
     })
   })
 
+  it('a heads-up search asked before the socket opens replaces a quick-sit asked before it', async () => {
+    // Devin's review: both went out on open, and the older choice won.
+    const connection = connect()
+    connection.quickSit([T1])
+    connection.find()
+    expect(connection.getState()).toMatchObject({
+      looking: true,
+      seating: false,
+    })
+    await flush()
+    FakeSocket.last().open()
+    expect(sent(FakeSocket.last())).toEqual([{ t: 'queue', kind: 'hu-casual' }])
+  })
+
+  it('a quick-sit answer arriving after a heads-up search began does not override it', async () => {
+    const connection = connect()
+    await flush()
+    const socket = FakeSocket.last()
+    socket.open()
+    connection.quickSit()
+    connection.find()
+    expect(sent(socket)).toEqual([
+      { t: 'quick_sit' },
+      { t: 'queue', kind: 'hu-casual' },
+    ])
+    socket.emit(lobbyFrame({ t: 'sit_at', tableId: T1 }))
+    socket.emit(
+      lobbyFrame({
+        t: 'error',
+        code: 'tables_full',
+        message: 'Every table is full. Try again in a minute.',
+      }),
+    )
+    expect(connection.getState()).toMatchObject({
+      looking: true,
+      seating: false,
+      sitAt: null,
+      error: null,
+    })
+  })
+
   it('stops a refused quick-sit and says why', async () => {
     const connection = connect()
     await flush()
