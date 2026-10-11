@@ -12,6 +12,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { useReducedMotionConfig } from 'motion/react'
 import { ChipPile } from '../components/table/ChipPile'
+import type { SeatId } from '../engine/types'
 import type { SeatView } from '../shared/protocol'
 
 /** One flight, as long as the trainer's (styles.css `.flight`). */
@@ -72,10 +73,17 @@ function locate(layer: HTMLElement) {
   }
 }
 
-export function SixFlights({ view }: { view: SeatView | null }) {
+export function SixFlights({
+  view,
+  seat,
+}: {
+  view: SeatView | null
+  /** The viewer's seat, which SixRing puts at the bottom (its `you`). */
+  seat: SeatId | null
+}) {
   const reduced = useReducedMotionConfig()
   const layer = useRef<HTMLDivElement>(null)
-  const previous = useRef(view)
+  const previous = useRef({ view, seat })
   const nextId = useRef(0)
   const timers = useRef<number[]>([])
   const [flights, setFlights] = useState<Flight[]>([])
@@ -85,14 +93,24 @@ export function SixFlights({ view }: { view: SeatView | null }) {
   // so the chips start from where the bets were in the same paint that
   // takes the bets off the plates.
   useLayoutEffect(() => {
-    const before = previous.current
-    previous.current = view
-    if (!view || !before || before === view) return
-    // A new hand (or table) takes the last one's chips off at once.
-    if (before.matchId !== view.matchId || before.handNo !== view.handNo) {
+    const { view: before, seat: wasAt } = previous.current
+    previous.current = { view, seat }
+    if (before === view && wasAt === seat) return
+    // A new hand (or table) takes the last one's chips off at once, and so
+    // does a hand gone from the page (a stand's welcome has no view) or a
+    // new seat for the viewer, which turns the ring: either way the chips
+    // fly between places that have moved or gone.
+    if (
+      !view ||
+      !before ||
+      wasAt !== seat ||
+      before.matchId !== view.matchId ||
+      before.handNo !== view.handNo
+    ) {
       timers.current.forEach(window.clearTimeout)
       timers.current = []
-      setFlights([])
+      // The same list when there is nothing to clear, so no render.
+      setFlights((list) => (list.length ? [] : list))
       return
     }
     const closed =
@@ -148,7 +166,7 @@ export function SixFlights({ view }: { view: SeatView | null }) {
       setFlights((list) => list.filter((f) => !ids.has(f.id)))
     }, done)
     timers.current.push(timer)
-  }, [view, reduced])
+  }, [view, seat, reduced])
 
   return (
     <div className="six-flights" ref={layer} aria-hidden="true">

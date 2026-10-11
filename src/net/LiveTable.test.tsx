@@ -1484,6 +1484,58 @@ describe('LiveTable at a six-casual table', () => {
     expect(flights()).toEqual([])
   })
 
+  it('chips in the air go at once when the hand leaves the page or the ring turns to a new seat', async () => {
+    render(<LiveTable matchId={MATCH} identity={identity('erin')} />)
+    const socket = await opened()
+    const at = (s: SeatId) =>
+      sixInfo([...SIX_ROSTER, { seat: s, username: 'erin', stack: 2000 }])
+    let hand = sixHand()
+    for (const s of [5, 0, 2] as const)
+      hand = engineAct(hand, s, { type: 'call' })
+    // erin sat down at seat 1 after the deal: her seat is at the bottom.
+    act(() =>
+      socket.emit(sixFrame('welcome', 1, 1, null, hand, { table: at(1) })),
+    )
+    expect(seat(1)).toHaveAttribute('data-slot', '0')
+    hand = engineAct(hand, 3, { type: 'check' })
+    act(() =>
+      socket.emit(sixFrame('state', 2, 1, null, hand, { table: at(1) })),
+    )
+    expect(gathered()).toHaveLength(4)
+
+    // She stands up: no seat, no hand on the page, and the ring turns seat
+    // 1 back to the bottom. Chips aimed at the old places go with them.
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 3, null, null, hand, { table: sixInfo() }),
+      ),
+    )
+    expect(seat(0)).toHaveAttribute('data-slot', '0')
+    expect(flights()).toEqual([])
+
+    // She sits at seat 4 and the flop is bet and called: the turn's
+    // gathers are in the air when a welcome seats her at seat 1 again,
+    // which turns the ring under them, so they go too.
+    act(() =>
+      socket.emit(sixFrame('welcome', 4, 4, null, hand, { table: at(4) })),
+    )
+    hand = engineAct(hand, 2, { type: 'raise', to: 100 })
+    act(() =>
+      socket.emit(sixFrame('state', 5, 4, null, hand, { table: at(4) })),
+    )
+    for (const s of [3, 5, 0] as const)
+      hand = engineAct(hand, s, { type: 'call' })
+    act(() =>
+      socket.emit(sixFrame('state', 6, 4, null, hand, { table: at(4) })),
+    )
+    expect(gathered()).toHaveLength(4)
+    act(() =>
+      socket.emit(sixFrame('welcome', 7, 1, null, hand, { table: at(1) })),
+    )
+    expect(seat(1)).toHaveAttribute('data-slot', '0')
+    expect(flights()).toEqual([])
+  })
+
   it("a reconnect that lands on a later street flies only the last street's chips, not a bet made since", async () => {
     render(<LiveTable matchId={MATCH} identity={alice} />)
     const socket = await opened()

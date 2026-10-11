@@ -276,7 +276,7 @@ export function SixTable({
         clock={live && live.toAct !== null ? live.clock : null}
         clockOffset={state.clockOffset}
         onSit={canSit ? (s) => void sit(s) : undefined}
-        overlay={<SixFlights view={view} />}
+        overlay={<SixFlights view={view} seat={seat} />}
       >
         <Middle view={view} nameOf={nameOf} />
       </SixRing>
