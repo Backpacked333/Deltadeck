@@ -571,6 +571,14 @@
 .six-seat[data-state='sitting-out'] .six-plate {
   opacity: 0.7;
 }
+/* A player whose socket closed: words and an icon, not colour alone. */
+.six-away {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--on-felt);
+  font-weight: 600;
+}
 .six-seat[data-active] .six-plate {
   border-color: var(--accent);
   /* Mixed from the token, not a fixed rgb, so the halo follows the theme

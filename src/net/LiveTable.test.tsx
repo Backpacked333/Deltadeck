@@ -1430,6 +1430,54 @@ describe('LiveTable at a six-casual table', () => {
     )
     expect(seat(3)).toHaveAccessibleName('Seat 4: empty')
   })
+
+  it('a seat whose player has dropped says Disconnected on its plate until they are back', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    const hand = sixHand()
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    expect(screen.queryByText('Disconnected')).toBeNull()
+
+    // carol's socket closes during the hand. Her plate says so in words,
+    // inside the seat group a screen reader reads, and still shows who
+    // she is and her chips; nobody else's plate changes.
+    act(() =>
+      socket.emit(
+        sixFrame('state', 2, 2, 2, hand, { table: awayIn(sixInfo(), [3]) }),
+      ),
+    )
+    expect(within(seat(3)).getByText('Disconnected')).toBeInTheDocument()
+    expect(seat(3)).toHaveAttribute('data-away')
+    expect(seat(3)).toHaveTextContent('carol')
+    expect(seat(3)).toHaveTextContent('1,480 chips')
+    expect(screen.getAllByText('Disconnected')).toHaveLength(1)
+    expect(seat(5)).not.toHaveAttribute('data-away')
+
+    // Her grace runs out and she sits out: the plate says both.
+    const ended = foldedToCarol()
+    const out = outIn(sixInfo(AFTER_FOLDS), [3])
+    act(() =>
+      socket.emit(
+        sixFrame('state', 3, 2, 2, ended, { table: awayIn(out, [3]) }),
+      ),
+    )
+    expect(within(seat(3)).getByText('Sitting out')).toBeInTheDocument()
+    expect(within(seat(3)).getByText('Disconnected')).toBeInTheDocument()
+
+    // She is back: the word goes, the status stays.
+    act(() => socket.emit(sixFrame('state', 4, 2, 2, ended, { table: out })))
+    expect(within(seat(3)).queryByText('Disconnected')).toBeNull()
+    expect(seat(3)).not.toHaveAttribute('data-away')
+    expect(within(seat(3)).getByText('Sitting out')).toBeInTheDocument()
+  })
+})
+
+/** `table` with the players in `seats` disconnected. */
+const awayIn = (table: MatchInfo, seats: SeatId[]): MatchInfo => ({
+  ...table,
+  players: table.players.map((p) =>
+    seats.includes(p.seat) ? { ...p, connected: false } : p,
+  ),
 })
 
 /** Every remaining player checks or calls the hand down to showdown. */

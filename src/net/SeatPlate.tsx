@@ -1,8 +1,10 @@
 // One seat of the six-seat ring: who sits there, their stack and bet, the
-// dealer button and blinds, and the shot clock while they are to act. An
-// empty seat offers "Sit here". It takes no cards, so a plate can never show
-// a hole card the viewer may not see; cards stay with the live table.
+// dealer button and blinds, the shot clock while they are to act, and
+// whether they sit out or have dropped. An empty seat offers "Sit here".
+// It takes no cards, so a plate can never show a hole card the viewer may
+// not see; cards stay with the live table.
 // Generic on purpose: Atlas's avatar is for Atlas only (P2-05).
+import { WifiOff } from 'lucide-react'
 import type { SeatId } from '../engine/types'
 import type { SeatView } from '../shared/protocol'
 import { clockParts } from './clockParts'
@@ -21,6 +23,11 @@ export type PlateSeat = {
   /** Chips in front of them on this street. */
   bet: number
   status: SeatStatus
+  /**
+   * Their socket is open (MatchInfo.players[].connected). False while they
+   * are away: in their 60 s grace, or sitting out after it.
+   */
+  connected?: boolean
   /** Stood up during the hand whose result is showing (SixTable). */
   left?: boolean
 }
@@ -65,6 +72,8 @@ export function SeatPlate({
     : player.status === 'sitting_out'
       ? 'sitting-out'
       : 'playing'
+  // Said in words, inside the group a screen reader reads with the name.
+  const away = player?.connected === false
   return (
     <div
       role="group"
@@ -73,6 +82,7 @@ export function SeatPlate({
       data-slot={slot}
       data-state={state}
       data-active={active && player ? '' : undefined}
+      data-away={away ? '' : undefined}
       // The viewer's own seat takes focus when the live table moves it off
       // a control that went away (Sit here, the action bar).
       tabIndex={you ? -1 : undefined}
@@ -86,11 +96,17 @@ export function SeatPlate({
             {chips(player.stack)}
             <span className="sr-only"> chips</span>
           </span>
-          {(state === 'sitting-out' || (active && clock)) && (
+          {(state === 'sitting-out' || away || (active && clock)) && (
             <span className="six-line">
               {state === 'sitting-out' && (
                 <span className="six-status">
                   {player.left ? 'Left the table' : 'Sitting out'}
+                </span>
+              )}
+              {away && (
+                <span className="six-away">
+                  <WifiOff size={12} aria-hidden="true" />
+                  Disconnected
                 </span>
               )}
               {active && clock && (

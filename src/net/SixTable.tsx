@@ -352,6 +352,7 @@ function plates(
       // Sitting out takes effect from the next hand: a player who sat out
       // during this one still plays it, and shows as playing until it ends.
       status: inHand ? 'playing' : (p.status ?? 'playing'),
+      connected: p.connected,
     }
   })
   // A player who stood during the hand leaves the roster as it ends. While
