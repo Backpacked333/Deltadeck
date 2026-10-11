@@ -80,3 +80,23 @@ test('a 3-way all-in runout with two side pots has no long frames', async ({
   await page.waitForTimeout(2500)
   await expectNoLongFrames(page)
 })
+
+// The chip flights' layer lies over the whole ring, above the plates, so
+// it must let every click through: here to an empty seat's Sit here, with
+// the mouse, which (unlike the keyboard) lands on whatever is on top.
+test("Sit here takes a click through the chip flights' layer", async ({
+  page,
+}) => {
+  await devSignIn(page, 'you_at_the_bottom')
+  const table = await fakeSixTable(page)
+  await page.goto(`/#play/${SIX_TABLE}`)
+  // She folds, the others play the hand out and its chips fly; between
+  // hands Stand up frees her seat at once, and it is offered back.
+  await page.getByRole('button', { name: /^Fold/ }).click()
+  await expect(page.getByText('Next hand in a few seconds.')).toBeVisible()
+  await page.getByRole('button', { name: 'Stand up' }).click()
+  await expect(page.getByText('Pick an empty seat to play.')).toBeVisible()
+  await expect(page.locator('.six-ring .six-flights')).toHaveCount(1)
+  await page.getByRole('button', { name: /^Sit here/ }).click()
+  await expect.poll(() => table.received.at(-1)).toEqual({ t: 'sit', seat: 0 })
+})
