@@ -93,6 +93,7 @@ type View =
   | 'curriculum'
   | 'quick'
   | 'progress'
+  | 'me'
   | 'gallery'
   | 'live'
   | 'info'
@@ -100,8 +101,8 @@ type View =
   /** A page that needs an account, while the visitor is on their way to one. */
   | 'locked'
 type Route = { view: View; lesson: LessonId | null }
-/** Practice, the lessons and progress: for signed-in players only. */
-const ACCOUNT_VIEWS: View[] = ['play', 'progress', 'curriculum', 'quick']
+/** Practice, the lessons, progress and Your profile: for signed-in players only. */
+const ACCOUNT_VIEWS: View[] = ['play', 'progress', 'me', 'curriculum', 'quick']
 /** A new account's name until it chooses one. */
 const PLACEHOLDER_NAME = /^player_[0-9a-f]{12}$/
 const Curriculum = lazy(() => import('./curriculum/Curriculum'))
@@ -110,6 +111,7 @@ const LiveApp = lazy(() => import('./net/LiveApp'))
 // the account client never reaches the entry chunk).
 const SessionKeeper = lazy(() => import('./net/Session'))
 const InfoPage = lazy(() => import('./info/InfoPages'))
+const MyProfile = lazy(() => import('./profile/MyProfile'))
 const Gallery = lazy(() => import('./dev/Gallery'))
 const Landing = lazy(() => import('./landing/Landing'))
 // The lab is the heaviest view; it loads in parallel with the first paint.
@@ -120,7 +122,7 @@ const Lab = lazy(() => labModule.then((module) => ({ default: module.Lab })))
  * Hash routes: the landing page (the bare URL, #start, or #c/<receipt> for a
  * friend's challenge), #table (default), #progress, #lobby[/find],
  * #play/<id>, #ladder[/month], #u/<username> and #match/<id> (online play),
- * #signup and #signin, #fair-play, #terms, #privacy and #method, #learn/...
+ * #me (Your profile), #signup and #signin, #fair-play, #terms, #privacy and #method, #learn/...
  * and #learn/quick[/id]. A return from a sign-in provider (?code=…) opens the
  * online area, which finishes the sign-in, whatever the hash.
  */
@@ -140,6 +142,7 @@ function parseRoute(hash: string, search = ''): Route {
   }
   if (isLearningRoute(hash)) return { view: 'curriculum', lesson: null }
   if (hash === '#progress') return { view: 'progress', lesson: null }
+  if (hash === '#me') return { view: 'me', lesson: null }
   if (
     /^#lobby(?:\/find)?$/.test(hash) ||
     /^#play\/[0-9a-f-]{36}$/.test(hash) ||
@@ -1246,6 +1249,17 @@ export default function App() {
         {view === 'gallery' && (
           <Suspense fallback={null}>
             <Gallery />
+          </Suspense>
+        )}
+        {view === 'me' && (
+          <Suspense
+            fallback={
+              <div className="curriculum-loading" role="status">
+                Opening your profile…
+              </div>
+            }
+          >
+            <MyProfile progress={progress} username={account.username} />
           </Suspense>
         )}
         {view === 'progress' && (
