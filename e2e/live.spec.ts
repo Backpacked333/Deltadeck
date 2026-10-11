@@ -5,11 +5,17 @@ import { fakeLobby, fakeSitTables, fakeSixTable, SIX_TABLE } from './sixTable'
 
 type Frame = {
   t: string
+  seat?: number | null
+  handNo?: number
   view?: {
     you: number
     handNo: number
     players: { seat: number; cards: [number, number] | null; shown: boolean }[]
   } | null
+  record?: {
+    actions: { action: { type: string }; source: string }[]
+  }
+  own?: { card: number }[]
 }
 
 /** A signed-in player in their own browser, recording every frame. */
@@ -40,6 +46,14 @@ const named = (who: string) => `${who}_${RUN}`
 
 const myTurn = (page: Page) =>
   page.locator('.action-status strong', { hasText: 'Your move' })
+
+/** Every key at any depth of the frames. */
+const frameKeys = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? value.flatMap(frameKeys)
+    : value && typeof value === 'object'
+      ? Object.entries(value).flatMap(([k, v]) => [k, ...frameKeys(v)])
+      : []
 
 test('two browsers play a hand against each other', async ({ browser }) => {
   const alice = await player(browser, named('alice'))
@@ -298,23 +312,37 @@ test('a stand mid-hand at a six-seat table keeps the seat until the hand ends', 
 
 // Six tables through the real lobby. Local state persists, and a player
 // left seated at a table would be dealt in and time out in the next test:
-// these run in order, in one worker, and stand their players up.
+// these run in order, in one worker, and stand their players up after
+// each test, whether it passed or not.
 test.describe('six tables through the real lobby', () => {
   test.describe.configure({ mode: 'default' })
 
-  /** Stands each player up and waits for the seat to go, then closes. */
-  async function leave(...players: Awaited<ReturnType<typeof player>>[]) {
+  type Player = Awaited<ReturnType<typeof player>>
+  let opened: { p: Player; errors: string[] }[] = []
+  /** A player of this test, its console errors kept. */
+  async function sitter(browser: Browser, who: string) {
+    const p = await player(browser, named(who))
+    const errors: string[] = []
+    p.page.on('console', (m) => {
+      if (m.type() === 'error') errors.push(m.text())
+    })
+    opened.push({ p, errors })
+    return { ...p, errors }
+  }
+  test.afterEach(async () => {
+    const players = opened.map((o) => o.p)
+    opened = []
     for (const p of players) {
       const stand = p.page.getByRole('button', { name: 'Stand up' })
-      if (await stand.isVisible()) await stand.click()
+      if (await stand.isVisible().catch(() => false))
+        await stand.click().catch(() => {})
     }
     for (const p of players)
-      await expect(p.page.getByRole('group', { name: /\(you\)$/ })).toHaveCount(
-        0,
-        { timeout: 60_000 },
-      )
+      await expect(p.page.getByRole('group', { name: /\(you\)$/ }))
+        .toHaveCount(0, { timeout: 60_000 })
+        .catch(() => {})
     for (const p of players) await p.close()
-  }
+  })
 
   test('Quick sit seats a player at a six-seat table from the keyboard, and the lobby lists it', async ({
     browser,
@@ -322,7 +350,7 @@ test.describe('six tables through the real lobby', () => {
     // The real lobby and tables. Local state persists between runs, so a
     // quick-sit may land at a table an earlier run left: only that each
     // player is seated is asserted, not that both share one table.
-    const ada = await player(browser, named('ada'))
+    const ada = await sitter(browser, 'ada')
     await ada.page.goto('/#lobby')
     const quick = ada.page.getByRole('button', { name: 'Quick sit' })
     await expect(quick).toBeEnabled()
@@ -336,7 +364,7 @@ test.describe('six tables through the real lobby', () => {
       ada.page.getByRole('button', { name: /^Sit here/ }),
     ).toHaveCount(0)
 
-    const bo = await player(browser, named('bo'))
+    const bo = await sitter(browser, 'bo')
     await bo.page.goto('/#lobby')
     const list = bo.page.getByRole('table', { name: 'Six-max tables' })
     await expect(list.getByRole('row').nth(1)).toBeVisible()
@@ -351,15 +379,16 @@ test.describe('six tables through the real lobby', () => {
     await bo.page.getByRole('button', { name: 'Quick sit' }).click()
     await expect(bo.page).toHaveURL(/#play\/[0-9a-f-]{36}$/)
     await expect(bo.page.getByRole('group', { name: /\(you\)$/ })).toBeVisible()
-    await leave(ada, bo)
+    for (const p of [ada, bo]) expect(p.errors).toEqual([])
   })
 
   test('two browsers at a six-seat table', async ({ browser }) => {
     // P2-11: two real browsers at one real six table. Ana quick-sits; Ben
-    // opens her table by its id, as a link does, and sits. Each plays the
-    // hand from the keyboard (F folds), neither ever receives the other's
-    // cards before they are shown, and the next hand deals to both.
-    const ana = await player(browser, named('ana6'))
+    // opens her table by its id, as a link does, and sits. Once both are
+    // dealt in, whoever is to act folds from the keyboard (F), and the
+    // next hand deals to both. Neither ever receives the other's cards
+    // unshown, a view for another seat, or another seat's opening.
+    const ana = await sitter(browser, 'ana6')
     await ana.page.goto('/#lobby')
     await ana.page.getByRole('button', { name: 'Quick sit' }).click()
     await expect(ana.page).toHaveURL(/#play\/[0-9a-f-]{36}$/)
@@ -368,7 +397,7 @@ test.describe('six tables through the real lobby', () => {
     ).toBeVisible()
     const tableId = ana.page.url().split('#play/')[1]
 
-    const ben = await player(browser, named('ben6'))
+    const ben = await sitter(browser, 'ben6')
     await ben.page.goto(`/#play/${tableId}`)
     await ben.page
       .getByRole('button', { name: /^Sit here/ })
@@ -378,32 +407,65 @@ test.describe('six tables through the real lobby', () => {
       ben.page.getByRole('group', { name: /\(you\)$/ }),
     ).toBeVisible()
 
-    const hand = (page: Page) =>
-      page.getByText(/^6-max · Hand \d+$/).textContent()
+    // Dealt in, both: a table reused from an earlier test still shows its
+    // finished hand until this one deals.
+    const label = (page: Page) => page.getByText(/^6-max · Hand \d+$/)
     for (const { page } of [ana, ben])
-      await expect(page.getByText(/^6-max · Hand \d+$/)).toBeVisible()
-    const first = await hand(ana.page)
-    expect(await hand(ben.page)).toBe(first)
-    // Whoever is to act folds, until the hand is over.
+      await expect(
+        page.getByRole('group', { name: 'Your cards' }),
+      ).toBeVisible()
+    await expect
+      .poll(async () => {
+        const [a, b] = [
+          await label(ana.page).textContent(),
+          await label(ben.page).textContent(),
+        ]
+        return a !== null && a === b
+      })
+      .toBe(true)
+    const first = (await label(ana.page).textContent())!
+    const handNo = Number(first.split('Hand ')[1])
+    // F folds for whoever is to act; well inside the 20 s turn clock, so
+    // the table's own timeout cannot end the hand instead.
     await expect(async () => {
       for (const { page } of [ana, ben])
         if (await myTurn(page).isVisible()) await page.keyboard.press('f')
-      await expect(ana.page.getByText(/^6-max · Hand \d+$/)).not.toHaveText(
-        first ?? '',
-        { timeout: 1000 },
-      )
-    }).toPass({ timeout: 60_000 })
-    const next = await hand(ana.page)
-    await expect(ben.page.getByText(next ?? '', { exact: true })).toBeVisible()
+      await expect(label(ana.page)).not.toHaveText(first, { timeout: 1000 })
+    }).toPass({ timeout: 15_000 })
+    const next = (await label(ana.page).textContent())!
+    await expect(label(ben.page)).toHaveText(next)
+    // The record of that hand has the fold, from a client.
+    const ended = ana.frames.find(
+      (f) => f.t === 'hand_end' && f.handNo === handNo,
+    )
+    expect(
+      ended?.record?.actions.some(
+        (a) => a.action.type === 'fold' && a.source === 'client',
+      ),
+    ).toBe(true)
 
-    // Nothing ever showed one of them the other's cards unshown.
-    for (const p of [ana, ben])
+    for (const p of [ana, ben]) {
+      // The seat this page sat at, from its last welcome with one.
+      const seat = p.frames
+        .filter((f) => f.t === 'welcome' && typeof f.seat === 'number')
+        .at(-1)?.seat
+      const views = p.frames.flatMap((f) => (f.view ? [f.view] : []))
+      expect(views.length).toBeGreaterThan(2)
+      const mine = new Set<number>()
+      for (const v of views) {
+        expect([seat, null]).toContain(v.you)
+        for (const s of v.players) {
+          if (s.seat === v.you && s.cards) s.cards.forEach((c) => mine.add(c))
+          else expect(s.cards === null || s.shown).toBe(true)
+        }
+      }
       for (const f of p.frames)
-        if (f.view)
-          for (const seat of f.view.players)
-            if (seat.seat !== f.view.you)
-              expect(seat.cards === null || seat.shown).toBe(true)
-    await leave(ana, ben)
+        for (const o of f.own ?? []) expect(mine).toContain(o.card)
+      expect(
+        frameKeys(p.frames).filter((k) => /^(deck|secret|holes)$/.test(k)),
+      ).toEqual([])
+      expect(p.errors).toEqual([])
+    }
   })
 })
 
