@@ -29,7 +29,7 @@ import {
 } from '../src/limits'
 import { CREATED_MS, LobbyDO, lobbyStub, SIX_TABLES_MAX } from '../src/lobby'
 import type { TableEntry, TableReport } from '../src/registry'
-import { REPORT_MS } from '../src/registry'
+import { REGISTRY_STALE_MS, REPORT_MS } from '../src/registry'
 import { NEXT_HAND_MS, TableDO } from '../src/table'
 import { checkLobbyFrame, expectKeys, TABLE_ROW_KEYS } from './frames'
 import {
@@ -61,8 +61,7 @@ const counts = (seated: number): TableReport => ({
 })
 
 /** A listed table that exists only as the lobby's entry for it. */
-async function listed(seated: number) {
-  const tableId = crypto.randomUUID()
+async function listed(seated: number, tableId: string = crypto.randomUUID()) {
   await lobbyStub(env).reportTable(tableId, counts(seated))
   return tableId
 }
@@ -126,6 +125,16 @@ async function inLobby(user: string) {
   const client = await lobby(user)
   await client.next((f) => f.t === 'presence')
   return client
+}
+
+/** `client` asks for the list; resolves with its rows, checked. */
+async function tablesFrame(client: LobbyClient) {
+  const from = client.frames.length
+  client.send({ t: 'tables' })
+  const frame = await client.next((f) => f.t === 'tables', from)
+  if (frame.t !== 'tables') throw new Error('no tables frame')
+  checkLobbyFrame(frame)
+  return frame.tables
 }
 
 /** `client` sends a bare sit; resolves with the welcome or error answering. */
@@ -271,6 +280,40 @@ describe('quick-sit picks a table', () => {
     expect(q.frames.some((f) => f.t === 'matched')).toBe(false)
   })
 
+  it('a claim whose table is gone is not resumed, and is cleared', async () => {
+    // The claim is checked with its table, not taken on trust: a table
+    // that ended (its release lost) holds nobody.
+    const tableId = await listed(3)
+    await runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
+      state.storage.put('active:gone-q', crypto.randomUUID()),
+    )
+    const q = await inLobby('gone-q')
+    expect(await quickSit(q)).toMatchObject({ t: 'sit_at', tableId })
+    expect(
+      await runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
+        state.storage.get('active:gone-q'),
+      ),
+    ).toBeUndefined()
+  })
+
+  it('a listed table with players comes before an empty one the lobby opened', async () => {
+    await fullTables(1)
+    const empty = await sentTo(await inLobby('ord-a'))
+    const withPlayers = await listed(4)
+    expect(await sentTo(await inLobby('ord-b'))).toBe(withPlayers)
+    expect(withPlayers).not.toBe(empty)
+  })
+
+  it('quick-sit neither offers nor counts an entry gone stale', async () => {
+    await setLobbyClock(AT)
+    const stale = await listed(3)
+    await setLobbyClock(AT + REGISTRY_STALE_MS + 1)
+    const q = await inLobby('stale-r')
+    const opened = await sentTo(q)
+    expect(opened).not.toBe(stale)
+    expect(await createdOf(opened)).toMatchObject({ by: 'stale-r' })
+  })
+
   it('a pairing pass that read the queue before a quick-sit does not pair that account', async () => {
     // Review B4. The first pairing's /init is held: the passes started by
     // two later queue requests read the queue (u in it) and wait behind
@@ -403,6 +446,61 @@ describe('quick-sit tries the next table', () => {
   })
 })
 
+describe('quick-sit asks only the tables it knows', () => {
+  it('a tried id the lobby does not know is never asked; a known one is, once', async () => {
+    const asked = vi.spyOn(TableDO.prototype, 'liveness')
+    const known = await listed(5)
+    const free = await listed(3)
+    const q = await inLobby('wake-q')
+    expect(await sentTo(q, [crypto.randomUUID()])).toBe(known)
+    expect(asked).not.toHaveBeenCalled()
+    expect(await sentTo(q, [known])).toBe(free)
+    expect(asked).toHaveBeenCalledTimes(1)
+  })
+
+  it('a tried table whose liveness call fails stays listed, and the next is offered', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const busy = await listed(5)
+    const free = await listed(3)
+    vi.spyOn(TableDO.prototype, 'liveness').mockRejectedValue(new Error('x'))
+    expect(await sentTo(await inLobby('err-q'), [busy])).toBe(free)
+    expect(await entryOf(busy)).toBeDefined()
+  })
+
+  it("another account's empty table, tried, does not stop this account opening", async () => {
+    // The one-unseated-table rule is the opener's own.
+    await fullTables(1)
+    const theirs = await sentTo(await inLobby('peer-a'))
+    const b = await inLobby('peer-b')
+    expect(await sentTo(b)).toBe(theirs)
+    const mine = await sentTo(b, [theirs])
+    expect(mine).not.toBe(theirs)
+    expect(await createdOf(mine)).toMatchObject({ by: 'peer-b' })
+  })
+
+  it('an opened table that died with its removal lost is dropped, record and all, when tried', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    await fullTables(1)
+    const a = await inLobby('lost-a')
+    const gone = await sentTo(a)
+    // Nobody sits: the table deletes itself, and its removal is lost.
+    const removal = vi
+      .spyOn(LobbyDO.prototype, 'removeTable')
+      .mockRejectedValue(new Error('lobby down'))
+    await elapse(gone, IDLE_MS)
+    await settled(gone)
+    expect(removal).toHaveBeenCalled()
+    removal.mockRestore()
+    expect(await createdOf(gone)).toBeDefined()
+    // Still its own unseated table, so it is sent there; tried, the table
+    // answers that it is over, and its record goes with its entry.
+    expect(await sentTo(a)).toBe(gone)
+    const next = await sentTo(a, [gone])
+    expect(next).not.toBe(gone)
+    expect(await createdOf(gone)).toBeUndefined()
+  })
+})
+
 describe('quick-sit opens a table', () => {
   it('opens an empty six table when no table has a free seat', async () => {
     const full = await fullTables(2)
@@ -428,6 +526,28 @@ describe('quick-sit opens a table', () => {
         state.storage.get(`creates:${day}:open-q`),
       ),
     ).toBe(1)
+  })
+
+  it('an open the table refuses frees its place, gives the day back, and answers tables_full', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    // The minted id is a table that exists: its /init answers 409.
+    const taken = await sixTable()
+    const q = await inLobby('fail-q')
+    vi.spyOn(crypto, 'randomUUID').mockReturnValueOnce(
+      taken as ReturnType<typeof crypto.randomUUID>,
+    )
+    expect(await quickSit(q)).toMatchObject({
+      t: 'error',
+      code: 'tables_full',
+    })
+    expect(await createdIds()).toEqual([])
+    expect((await createsOf('fail-q')) ?? 0).toBe(0)
+    // Nothing holds the account: its next quick-sit opens a table.
+    const opened = await sentTo(q)
+    expect(opened).not.toBe(taken)
+    expect(await createdIds()).toEqual([opened])
+    expect(await createsOf('fail-q')).toBe(1)
+    for (const f of q.frames) checkLobbyFrame(f)
   })
 
   it('two players who quick-sit at once at an empty lobby land at one table', async () => {
@@ -700,6 +820,20 @@ describe('the cap releases', () => {
     await settled(tableId)
     expect(await createdOf(tableId)).toBeUndefined()
     expect(await entryOf(tableId)).toBeUndefined()
+  })
+
+  it('a table the lobby opened counts for 20 minutes, alive or not', async () => {
+    expect(CREATED_MS).toBe(20 * 60_000)
+    await setLobbyClock(AT)
+    await fullTables(SIX_TABLES_MAX - 1)
+    const fiftieth = await sentTo(await inLobby('life-a'))
+    // IDLE_MS on, when nobody sitting there it would delete itself: still
+    // counted, though another account has tried it.
+    await setLobbyClock(AT + IDLE_MS)
+    expect(await quickSit(await inLobby('life-b'), [fiftieth])).toMatchObject({
+      t: 'error',
+      code: 'tables_full',
+    })
   })
 
   it('and a record whose removal was lost stops counting 20 minutes after the table opened', async () => {
@@ -990,5 +1124,37 @@ describe('the tables frame', () => {
     // No account, seated or asking, and nothing of the lobby's own.
     const json = JSON.stringify(frame)
     expect(json).not.toMatch(/row-|updatedAt|userId|username/)
+  })
+
+  it('the list goes to the socket that asked, no other', async () => {
+    await listed(3)
+    const other = await inLobby('only-b')
+    const asker = await inLobby('only-a')
+    expect(await tablesFrame(asker)).toHaveLength(1)
+    // A later broadcast reaches `other` after anything sent before it.
+    await inLobby('only-c')
+    await other.next((f) => f.t === 'presence' && f.online === 3)
+    expect(other.frames.some((f) => f.t === 'tables')).toBe(false)
+  })
+
+  it('the list leaves out an entry gone stale', async () => {
+    await setLobbyClock(AT)
+    await listed(3)
+    await setLobbyClock(AT + REGISTRY_STALE_MS + 1)
+    expect(await tablesFrame(await inLobby('stale-s'))).toEqual([])
+  })
+
+  it('the list holds full tables too, in quick-sit order whatever the ids', async () => {
+    // Ids in the reverse of quick-sit's order: a free seat first, the
+    // fullest first, full tables last.
+    const five = await listed(5, 'ffffffff-0000-4000-8000-000000000000')
+    const two = await listed(2, '00000000-0000-4000-8000-000000000000')
+    const full = await listed(6, '11111111-0000-4000-8000-000000000000')
+    const rows = await tablesFrame(await inLobby('order-q'))
+    expect(rows.map((r) => [r.tableId, r.seated])).toEqual([
+      [five, 5],
+      [two, 2],
+      [full, 6],
+    ])
   })
 })
