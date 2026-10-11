@@ -484,4 +484,10 @@ export const FLOW_TYPES = {
    * that deals at a waiting table, seen by a socket without a seat too.
    */
   sitOut: ['welcome', 'state', 'hand_start', 'hand_end', 'reveal', 'error'],
+  /**
+   * six-reconnect.test.ts: a player dealt into a hand, one seated but not
+   * dealt in and a socket without a seat drop during it and come back
+   * after the grace, and the hand plays out.
+   */
+  reconnect: ['welcome', 'state', 'hand_start', 'hand_end', 'reveal'],
 } satisfies Record<string, ServerMsg['t'][]>

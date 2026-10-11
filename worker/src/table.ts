@@ -717,8 +717,12 @@ export class TableDO extends DurableObject<WorkerEnv> {
       justSat: true,
     }
     match.players = [...match.players, player].sort((a, b) => a.seat - b.seat)
+    // The socket may have closed while the lobby answered, when its close
+    // found no seat to start a grace for: it starts now.
+    const graced = this.graceForAbsent()
     this.seq++
     await this.ctx.storage.put({ match, seq: this.seq })
+    if (graced) await this.armAlarm()
     this.send(ws, this.frame('welcome', userId))
     this.broadcast('state', { skip: ws, roster: true })
     if (match.status === 'waiting' && match.players.length >= 2) {
@@ -1128,6 +1132,10 @@ export class TableDO extends DurableObject<WorkerEnv> {
   private unseat(gone: Player[], cooldown = true) {
     const match = this.match!
     match.players = match.players.filter((p) => !gone.includes(p))
+    // A grace of theirs has nothing left to do.
+    this.deadlines = this.deadlines.filter(
+      (d) => !(d.kind === 'grace' && gone.some((p) => p.userId === d.userId)),
+    )
     const cooldowns = Object.fromEntries(
       Object.entries(match.cooldowns ?? {}).filter(([userId]) =>
         this.cooldownOf(userId),
@@ -1242,11 +1250,16 @@ export class TableDO extends DurableObject<WorkerEnv> {
 
   /**
    * A socket is closing: the others see the seat offline, and a rated
-   * seat with no other socket open starts its grace.
+   * seat, or a six-table player who is playing, with no other socket open
+   * starts its grace.
    */
   private async socketGone(ws: WebSocket) {
     this.broadcast('state', { gone: ws })
     const match = this.match
+    if (match?.config.kind === 'six-casual') {
+      if (this.graceForAbsent(ws)) await this.armAlarm()
+      return
+    }
     if (!match?.adjusted || match.status !== 'playing') return
     const { userId } = ws.deserializeAttachment() as Attachment
     const player = match.players.find((p) => p.userId === userId)
@@ -1259,9 +1272,21 @@ export class TableDO extends DurableObject<WorkerEnv> {
     await this.armAlarm()
   }
 
-  /** A rated seat that (re)connects ends its grace, or its time away. */
+  /**
+   * A rated seat that (re)connects ends its grace, or its time away. A
+   * six-table player back within the grace ends it; one who sat out
+   * meanwhile (the grace ran out, or two timeouts) stays out until sit_in.
+   */
   private async back(player: Player) {
     const match = this.match!
+    if (match.config.kind === 'six-casual') {
+      const kept = this.deadlines.filter(
+        (d) => !(d.kind === 'grace' && d.userId === player.userId),
+      )
+      if (kept.length === this.deadlines.length) return
+      this.deadlines = kept
+      return this.armAlarm()
+    }
     if (!match.adjusted) return
     const grace = (d: Deadline) => d.kind === 'grace' && d.seat === player.seat
     const away = player.awaySince !== undefined
@@ -1285,11 +1310,15 @@ export class TableDO extends DurableObject<WorkerEnv> {
   }
 
   /**
-   * Seats whose grace ran out are away: a turn of theirs is played at once.
-   * Both away: the match is abandoned, void.
+   * Graces that ran out. Rated: those seats are away, and a turn of theirs
+   * is played at once; both away, the match is abandoned, void. Six-casual
+   * (sixGraceOver): those players sit out.
    */
-  private async graceOver(seats: SeatId[]) {
+  private async graceOver(graces: Extract<Deadline, { kind: 'grace' }>[]) {
     const match = this.match
+    if (match?.config.kind === 'six-casual')
+      return this.sixGraceOver(graces.flatMap((d) => d.userId ?? []))
+    const seats = graces.map((d) => d.seat)
     if (match?.status !== 'playing') return
     const leaving = match.players.filter(
       (p) =>
@@ -1318,6 +1347,66 @@ export class TableDO extends DurableObject<WorkerEnv> {
   }
 
   /**
+   * Six-casual (ADR amendment 2026-10-10, "Reconnect"): the players whose
+   * grace ran out without a socket open sit out from the next hand, and
+   * their removal clocks start (sitOut). Nothing else: a hand they are
+   * dealt into goes on with their turns on the normal clock, nobody is
+   * forfeited and the table never ends for it. With fewer than two left
+   * to deal in (funded), the next deal waits until a second is back.
+   */
+  private async sixGraceOver(userIds: string[]) {
+    const match = this.match
+    if (!match || !this.seatable()) return
+    let changed = false
+    for (const p of match.players)
+      if (
+        userIds.includes(p.userId) &&
+        !p.standing &&
+        !this.connected(p.userId) &&
+        this.sitOut(p)
+      )
+        changed = true
+    if (!changed) return
+    this.seq++
+    await this.ctx.storage.put({ match, seq: this.seq })
+    this.broadcast('state', { roster: true })
+  }
+
+  /**
+   * Six-casual: every seated player who is playing, has no socket open
+   * (other than `exclude`, which is closing) and no grace running yet
+   * gets the 60 s grace from now (ADR "Reconnect"). A player sitting out
+   * needs none: being back changes nothing for them until sit_in. Run as
+   * a socket closes, and as the table's alarm runs, since a restart drops
+   * every socket without the restarted object hearing a close; then the
+   * grace starts at the first alarm after it (a turn, the next deal, or
+   * at the latest the idle check). True when it started any; the caller
+   * stores the deadlines (armAlarm).
+   */
+  private graceForAbsent(exclude?: WebSocket) {
+    const match = this.match
+    if (match?.config.kind !== 'six-casual' || match.status === 'finished')
+      return false
+    let started = false
+    for (const p of match.players) {
+      if (p.status !== 'playing' || p.standing) continue
+      if (this.connected(p.userId, exclude)) continue
+      if (
+        this.deadlines.some((d) => d.kind === 'grace' && d.userId === p.userId)
+      )
+        continue
+      this.deadlines.push({
+        kind: 'grace',
+        at: this.clock() + GRACE_MS,
+        seat: p.seat,
+        userId: p.userId,
+      })
+      started = true
+    }
+    return started
+  }
+
+  /**
    * Runs every deadline that is due. Each one is checked against the table
    * first, so a late or repeated alarm does nothing. Never throws: a throw
    * would spend the platform's retry budget on a bug.
@@ -1325,10 +1414,14 @@ export class TableDO extends DurableObject<WorkerEnv> {
   async alarm() {
     try {
       const t = this.clock()
+      // Six-casual: players whose sockets a restart closed unseen.
+      this.graceForAbsent()
       const due = this.deadlines.filter((d) => d.at <= t)
       this.deadlines = this.deadlines.filter((d) => d.at > t)
       // All graces first, so two seats gone together void the match.
-      const graces = due.flatMap((d) => (d.kind === 'grace' ? [d.seat] : []))
+      const graces = due.filter(
+        (d): d is Extract<Deadline, { kind: 'grace' }> => d.kind === 'grace',
+      )
       if (graces.length) await this.graceOver(graces)
       for (const d of due) {
         if (d.kind === 'grace') continue
@@ -1519,9 +1612,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
       else if (!match.sessionOver && match.handNo >= SESSION_DEAL_LIMIT)
         return this.holdDealing()
     }
-    // A six table deals only to people who are there: with fewer than two
-    // funded, connected players it waits, and a reconnect or a sit deals
-    // again (the 60 s grace and sitting out come with PR-16/17).
+    // A six table deals only while two players are active (funded): with
+    // fewer it waits, and a reconnect, a sit, a sit_in or a rebuy deals
+    // again. A player in their grace is dealt in when it deals.
     if (six && this.funded().length < 2) return this.waitForPlayers()
     const handNo = six && match.sessionOver ? 1 : match.handNo + 1
     const plan = six
@@ -1942,7 +2035,14 @@ export class TableDO extends DurableObject<WorkerEnv> {
     return player.stack!
   }
 
-  /** Six-casual: the players a hand could deal in now. */
+  /**
+   * Six-casual: the active players, whom a hand could deal in now: playing,
+   * with chips and with a socket open. Fewer than two, and the table waits
+   * (ADR "Reconnect": the heads-up "every player away" rule, as "fewer than
+   * two active, then pause"). A player in their 60 s grace is not active,
+   * so does not make the table deal, but is dealt in when it does: their
+   * turns run on the normal clock until the grace ends and they sit out.
+   */
   private funded() {
     return this.match!.players.filter(
       (p) => p.stack! > 0 && p.status === 'playing' && this.connected(p.userId),
