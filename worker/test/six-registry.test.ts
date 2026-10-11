@@ -445,10 +445,13 @@ describe('reporting to the lobby', () => {
     expect(two.actions).toEqual([])
     expect(two.street).toBe('showdown')
     expect(potOf(two)).toBe(20)
-    // The next report averages both hands: (40 + 20) / 2.
-    await elapse(matchId, REPORT_MS)
+    // After the window C sits, which reports before any other hand is
+    // dealt (one that split hand 2's pot could deal hand 3 over at the
+    // deal too): the average is over both hands, (40 + 20) / 2.
+    await setClock(matchId, (await clockOf(matchId)) + REPORT_MS)
+    await sitDown(matchId, 'deal-c', 4)
     await settled(matchId)
-    expect(sent(matchId).at(-1)).toEqual(counts(2, 30, 2))
+    expect(sent(matchId).at(-1)).toEqual(counts(3, 30, 2))
   })
 
   it('a heads-up table never reports, nor leaves a list it was never on', async () => {
