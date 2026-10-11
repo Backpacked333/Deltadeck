@@ -10,7 +10,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { replaceRoute, takeAuthReturn } from '../lib/authReturn'
 import { backFromSignIn } from '../lib/landing'
 import { useHash } from '../lib/navigation'
-import { AccountPage, AuthCallback, HOME_ROUTE } from './AccountPage'
+import { AccountPage, AuthCallback, HOME_ROUTE, SignOut } from './AccountPage'
 import { devIdentity } from './api'
 import type { Identity } from './api'
 import { AuthGate } from './AuthGate'
@@ -82,6 +82,22 @@ export default function LiveApp() {
   useEffect(() => {
     if (dev && account) replaceRoute(takeAuthReturn() ?? HOME_ROUTE)
   }, [dev, account])
+
+  if (hash === '#signout')
+    return (
+      <div className="page live-page">
+        <header className="page-head">
+          <h1>Signing out</h1>
+        </header>
+        {dev || online !== undefined ? (
+          <SignOut online={online ?? null} />
+        ) : (
+          <p className="live-status" role="status">
+            Connecting…
+          </p>
+        )}
+      </div>
+    )
 
   if (callback || account)
     return (

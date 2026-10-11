@@ -12,6 +12,7 @@ import { treeFor } from '../challenge/trees'
 import { PENDING_CLAIM_KEY } from '../lib/landing'
 import { hashString } from '../lib/random'
 import { STORAGE_KEY } from '../lib/storage'
+import { seedSession } from '../test/session'
 
 vi.mock('../net/supabase', () => ({ loadOnline: async () => null }))
 
@@ -149,7 +150,7 @@ describe('who sees the landing page', () => {
   })
 
   it('a signed-in visitor is offered play online, not a new account', async () => {
-    localStorage.setItem('sb-abc-auth-token', '{}')
+    seedSession()
     render(<App />)
     await screen.findByRole('heading', { level: 1, name: /misprice/ })
     expect(screen.queryByText('Sign in')).not.toBeInTheDocument()

@@ -17,6 +17,7 @@ import * as atlas from './lib/atlas'
 import { analyzeSpot, quickOutcome } from './lib/range'
 import type { SpotRequest } from './lib/range'
 import { lcg } from './lib/sim'
+import { seedSession } from './test/session'
 
 // Online play is configured per deployment; tests never reach the network.
 vi.mock('./net/supabase', () => ({ loadOnline: async () => null }))
@@ -333,5 +334,62 @@ describe('recording finished hands', () => {
     expect(hands).toHaveLength(1)
     expect(hands[0]).toMatchObject({ net: -60, graded: false })
     expect(hands[0].decisions).toBeUndefined()
+  })
+})
+
+/** The app's own header (pages have their own <header> elements too). */
+const appHeader = () => document.querySelector<HTMLElement>('header.header')!
+
+describe('the header', () => {
+  it('offers Sign in and Create free account on every page when signed out', async () => {
+    render(<App />)
+    for (const hash of ['#table', '#progress', '#learn/path']) {
+      navigate(hash)
+      const header = appHeader()
+      expect(
+        within(header).getByRole('link', { name: 'Sign in' }),
+      ).toHaveAttribute('href', '#signin')
+      expect(
+        within(header).getByRole('link', { name: /Create free account/ }),
+      ).toHaveAttribute('href', '#signup')
+    }
+    expect(screen.queryByRole('button', { name: /^Account/ })).toBeNull()
+  })
+
+  it('shows the signed-in player a menu with their profile, online play and sign out', async () => {
+    seedSession({ username: 'alice' })
+    const user = userEvent.setup()
+    render(<App />)
+    const header = appHeader()
+    expect(within(header).queryByRole('link', { name: 'Sign in' })).toBeNull()
+    const account = within(header).getByRole('button', {
+      name: 'Account: alice',
+    })
+    expect(account).toHaveTextContent('A')
+    expect(account).toHaveAttribute('aria-expanded', 'false')
+    await user.click(account)
+    expect(account).toHaveAttribute('aria-expanded', 'true')
+    expect(within(header).getByText('alice')).toBeVisible()
+    expect(
+      within(header).getByRole('link', { name: 'Your profile' }),
+    ).toHaveAttribute('href', '#u/alice')
+    expect(
+      within(header).getByRole('link', { name: 'Play online' }),
+    ).toHaveAttribute('href', '#lobby')
+    expect(
+      within(header).getByRole('link', { name: 'Sign out' }),
+    ).toHaveAttribute('href', '#signout')
+    await user.keyboard('{Escape}')
+    expect(account).toHaveAttribute('aria-expanded', 'false')
+    expect(account).toHaveFocus()
+  })
+
+  it('offers no profile before a new account has chosen its name', async () => {
+    seedSession({ username: 'player_0123456789ab' })
+    const user = userEvent.setup()
+    render(<App />)
+    await user.click(screen.getByRole('button', { name: /^Account/ }))
+    expect(screen.queryByRole('link', { name: 'Your profile' })).toBeNull()
+    expect(screen.getByRole('link', { name: 'Sign out' })).toBeVisible()
   })
 })

@@ -21,18 +21,8 @@ const read = (key: string) => {
   }
 }
 
-/** True when this browser holds a Supabase session (any project). */
-export function signedIn() {
-  try {
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i) ?? ''
-      if (key.startsWith('sb-') && key.endsWith('-auth-token')) return true
-    }
-  } catch {
-    // Storage blocked: treat as signed out.
-  }
-  return false
-}
+/** Who is signed in now lives with the rest of the account state. */
+export { signedIn } from './account'
 
 /**
  * Back from a sign-in provider with no route to restore (authReturn): the
