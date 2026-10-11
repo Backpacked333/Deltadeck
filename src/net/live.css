@@ -723,6 +723,36 @@
 .six-pot b {
   color: var(--on-felt);
 }
+/* Side pots (P2-06a): one pill per pot, like the bets on the plates. A
+   row of them wraps inside the middle rather than widen it on a phone;
+   the pots paid go one per line, so their order reads top to bottom. */
+.six-pots {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 6px;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.six-pots li {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgb(0 0 0 / 0.32);
+  color: var(--on-felt-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.six-pots b {
+  color: var(--on-felt);
+}
+.six-paid {
+  flex-direction: column;
+  align-items: center;
+}
 .six-board,
 .six-hole {
   display: flex;

@@ -1099,6 +1099,95 @@ describe('LiveTable at a six-casual table', () => {
     ).toBeInTheDocument()
   })
 
+  it('side pots render separately and pay out in award order', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    // carol (300) and bob (800) are all in pre-flop, then alice bets 400 on
+    // the flop and dave calls: a main pot for all four, side pot 1 without
+    // carol, and side pot 2 between alice and dave.
+    let hand = sixHand({
+      stacks: { 0: 800, 3: 300 },
+      holes: { 0: 'Th Td', 2: 'Ah 9d', 3: 'Js 8s', 5: '8d 8h' },
+    })
+    hand = engineAct(hand, 5, { type: 'raise', to: 800 })
+    hand = engineAct(hand, 0, { type: 'call' })
+    hand = engineAct(hand, 2, { type: 'call' })
+    hand = engineAct(hand, 3, { type: 'call' })
+    hand = engineAct(hand, 2, { type: 'raise', to: 400 })
+    hand = engineAct(hand, 5, { type: 'call' })
+    expect(hand.street).toBe('turn')
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+
+    // The total line stays, and each pot is a stack of its own that says
+    // in words who can still win it.
+    const table = screen.getByRole('region', { name: 'Poker table' })
+    expect(within(table).getByText(/^Pot/)).toHaveTextContent('Pot 3,500')
+    expect(items(within(table).getByRole('list', { name: 'Pots' }))).toEqual([
+      'Main pot 1,200 chips between bob, you, carol and dave',
+      'Side pot 1 1,500 chips between bob, you and dave',
+      'Side pot 2 800 chips between you and dave',
+    ])
+
+    // Checked down: carol's straight takes the main pot, bob's three tens
+    // side pot 1 and alice's nines side pot 2. The chips go out as the
+    // engine pushes them, the last side pot first and the main pot last.
+    hand = playedOut(hand)
+    expect(hand.result!.awards.map((a) => a.pot)).toEqual([2, 1, 0])
+    act(() => socket.emit(sixFrame('state', 2, 2, 2, hand)))
+    expect(within(table).queryByRole('list', { name: 'Pots' })).toBeNull()
+    expect(
+      items(within(table).getByRole('list', { name: 'Pots paid' })),
+    ).toEqual([
+      'Side pot 2 800 chips to you',
+      'Side pot 1 1,500 chips to bob',
+      'Main pot 1,200 chips to carol',
+    ])
+  })
+
+  it("a split side pot shows each winner's share", async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    // carol is all in for 300 with a straight; alice and dave tie with
+    // nines and ace kicker, so they split the side pot.
+    let hand = sixHand({
+      stacks: { 3: 300 },
+      holes: { 0: '7c 2h', 2: 'Ah 9d', 3: 'Js 8s', 5: 'Ad 9c' },
+    })
+    hand = engineAct(hand, 5, { type: 'raise', to: 800 })
+    hand = engineAct(hand, 0, { type: 'fold' })
+    hand = engineAct(hand, 2, { type: 'call' })
+    hand = engineAct(hand, 3, { type: 'call' })
+    hand = playedOut(hand)
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+
+    expect(items(screen.getByRole('list', { name: 'Pots paid' }))).toEqual([
+      'Side pot 1 1,000 chips split: you 500, dave 500',
+      'Main pot 900 chips to carol',
+    ])
+  })
+
+  it('a hand with a single pot still reads Pot and its total', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    // Called round to carol, who checks: one pot on the flop.
+    let hand = sixHand()
+    for (const s of [5, 0, 2]) hand = engineAct(hand, s, { type: 'call' })
+    hand = engineAct(hand, 3, { type: 'check' })
+    expect(hand.pots).toHaveLength(1)
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+
+    const table = screen.getByRole('region', { name: 'Poker table' })
+    expect(within(table).getByText(/^Pot/)).toHaveTextContent('Pot 80')
+    expect(within(table).queryByRole('list')).toBeNull()
+    expect(within(table).queryByText(/Main pot|Side pot/)).toBeNull()
+
+    // Its result names the winner below the table, as before.
+    act(() => socket.emit(sixFrame('state', 2, 2, 2, playedOut(hand))))
+    expect(screen.getByText(/ wins? · /)).toBeInTheDocument()
+    expect(within(table).queryByText(/^Pot/)).toBeNull()
+    expect(within(table).queryByRole('list')).toBeNull()
+  })
+
   it('a table waiting for players promises no next hand', async () => {
     render(<LiveTable matchId={MATCH} identity={alice} />)
     const socket = await opened()
@@ -1510,6 +1599,12 @@ const awayIn = (table: MatchInfo, seats: SeatId[]): MatchInfo => ({
     seats.includes(p.seat) ? { ...p, connected: false } : p,
   ),
 })
+
+/** A list's items as read aloud: their text, hidden words included. */
+const items = (list: HTMLElement) =>
+  within(list)
+    .getAllByRole('listitem')
+    .map((li) => li.textContent!.replace(/\s+/g, ' ').trim())
 
 /** Every remaining player checks or calls the hand down to showdown. */
 function playedOut(start: HandState) {
