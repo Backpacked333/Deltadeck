@@ -8,7 +8,7 @@ Date: 2026-10-11 · Status: **#34 to #69 merged and verified live (PR-01 to PR-2
   - the plan: `.10x/decisions/engineering-manager/six-max-casual.md`, PR-25's "As built" and "Left for later", and PR-26;
   - the ADR amendment in `.10x/decisions/architect/multiplayer-platform.md`, with its clarifications from PR-12 to PR-25;
   - `.10x/status.md` §Casual 6-max.
-- **Next:** PR-26 (P2-11 evidence): `scripts/smoke-ws` with six Node clients reaching a real six table through quick-sit, 200 hands with joins, leaves, timeouts and a reconnect, chips conserved, no leaks, client-measured p95 printed; and `e2e/live.spec.ts › two browsers at a six-seat table`. Server-side ack-to-render p95 waits on S7-05, and counting the first 1,000 human hands on U-4.
+- **Next:** PR-26 (P2-11 evidence) is built: `scripts/smoke/six.ts` (run with `node scripts/smoke-ws.mjs --six` against a fresh local Worker) and `e2e/live.spec.ts` › six tables through the real lobby; the plan's PR-26 "As built" has the evidence. What remains of 6-max needs other work first: ack-to-render p95 (S7-05), the first 1,000 human hands (U-4), Safari background tabs, and P2-09 (grading).
 - **Constraints:**
   - heads-up stays byte-identical;
   - every new message or frame field gets a redaction/allowlist test;

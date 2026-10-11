@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-10-11 by SDE (casual 6-max: PR-01 to PR-25 live in #34 to #69, except PR-20 (optional); a signed-in player reaches a six table from the lobby page's Quick sit, and PR-26 (smoke evidence) is next. Accounts first: #57 to #63 live, #64 waits on sign-up reaching strangers). Earlier: landing page phases 1 and 2 (#30); rating P1-12 to P1-16 live; hands of a live match closed to clients; S7-11 waits on U-4
+Last updated: 2026-10-11 by SDE (casual 6-max: PR-01 to PR-25 live in #34 to #69, except PR-20 (optional); a signed-in player reaches a six table from the lobby page's Quick sit, and PR-26 adds the P2-11 run evidence. Accounts first: #57 to #63 live, #64 waits on sign-up reaching strangers). Earlier: landing page phases 1 and 2 (#30); rating P1-12 to P1-16 live; hands of a live match closed to clients; S7-11 waits on U-4
 
 **Standing instructions from the user (2026-10-09):**
 
@@ -137,7 +137,8 @@ Merged and deployed, each one verified in production after its merge:
   - Quick sit and the read-only list of six tables on the lobby page, with the client's retry across pages (#69).
   - #47 fixed two Supabase tests that timed out under load: their database boot moved into a hook.
 - **Exposure gate: open, through the signed-in lobby socket only (#65).** `quick_sit` sends a player to the fullest listed table with a free seat, or opens one under the cap of 50; `tables` lists them to the asking socket alone. Every other path stays shut, and a test pins it: the invite route sends no `kind`, the lobby queue refuses `six-casual`, init refuses a six table with an opponent, and `GET /api/tables` is 404. Since #69 the lobby page's 6-max card has Quick sit and the list: a refused sit goes back to the lobby, which asks again naming the tables tried (at most four asks).
-- **Next:** PR-26 (smoke evidence: six Node clients at a real six table for 200 hands with joins, leaves, timeouts and a reconnect, conservation and leak checks, client-measured p95; two browsers at a six-seat table). Server-side ack-to-render p95 waits on S7-05 telemetry, and the first 1,000 human hands on U-4.
+- **P2-11 run evidence (PR-26):** `node scripts/smoke-ws.mjs --six` against a local Worker with fresh state: six clients and a watcher at one real six table for 200 hands with a mid-hand stand, a join, timeouts until sat out (then sat in) and a reconnect; 0 invariant failures, 0 leaks, 200/200 commitments, client round trip p95 8 ms; and `e2e/live.spec.ts` › two browsers at a six-seat table through the real lobby. The checks were strengthened after an independent review and each is shown to fail on a faulty frame.
+- **Still open for 6-max:** ack-to-render p95 at six seats (S7-05 telemetry), the first 1,000 human casual hands with 0 failures (U-4), Safari background tabs, and P2-09 (6-max grading and payout reports).
 - **Open for the user:**
   - Devin's security threads, fixed and replied to but left open for the owner: two on #46, and one on #44 that #46 closed.
   - "Players in the last hour" is on the lobby page (#69): distinct players dealt in during the last hour. If "players/hour" meant hands per hour, the Worker field and the label change together.
