@@ -834,6 +834,33 @@ describe('the bank at a six table', () => {
     expect(hand.config).toMatchObject({ handNo: 2, bb: 2 })
     expect(await banks(matchId)).toEqual({ [a]: BANK, [b]: BANK, [c]: BANK })
   }, 30_000)
+
+  it('a corrupt stored orbit count halts the table as an engine fault, before any hand is dealt on it', async () => {
+    const { matchId, clients } = await threeSeats('corrupt')
+    await move(matchId, clients, fold)
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 1)
+    await runInDurableObject(
+      stub(matchId),
+      async (instance: TableDO, state) => {
+        const { match } = instance as unknown as {
+          match: { orbitTravel: number }
+        }
+        match.orbitTravel = 7
+        await state.storage.put('match', match)
+      },
+    )
+    await elapse(matchId, NEXT_HAND_MS)
+    for (const client of Object.values(clients))
+      expect(await client.next((f) => f.t === 'match_end')).toMatchObject({
+        result: { reason: 'engine_fault' },
+      })
+    const { match, hand } = await peek(matchId)
+    expect(match.status).toBe('finished')
+    expect(hand!.config.handNo).toBe(1)
+    expect(Object.values(clients).flatMap((x) => x.frames)).not.toContainEqual(
+      expect.objectContaining({ t: 'hand_start', handNo: 2 }),
+    )
+  })
 })
 
 describe('heads-up banks', () => {
