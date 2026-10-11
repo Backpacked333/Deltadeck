@@ -1,6 +1,33 @@
 # Handoff
 
-## Current handoff: SDE → DevOps / User (landing v2 ready to ship)
+## Current handoff: SDE → SDE (casual 6-max, PR-14 onward)
+
+Date: 2026-10-11 · Status: **#34 to #49 merged and verified live; PR-14 and PR-15 being built.**
+
+- **Read first:**
+  - the plan: `.10x/decisions/engineering-manager/six-max-casual.md` (exposure gate, the notes left by reviews);
+  - the ADR amendment, with its "Clarifications from PR-12" and "Clarifications from PR-13";
+  - `.10x/status.md` §Casual 6-max.
+- **Order:**
+  1. PR-14 rebuy, with the Rebuy and Stand up controls.
+  2. PR-15 orbit bank.
+  3. PR-16 sit-out and removal, with the Sit out and Sit in controls.
+  4. PR-17 60 s reconnect.
+  5. PR-21 and PR-22.
+  6. PR-23 to PR-25, which open the gate.
+  7. PR-26 smoke evidence.
+- **Constraints:**
+  - heads-up stays byte-identical;
+  - every new message or frame field gets a redaction/allowlist test;
+  - the entry chunk stays under 150 kB;
+  - nothing creates a six table from outside before PR-14 and PR-16 land.
+- **Open:** Devin's security threads on #44 and #46, fixed but left for the owner to resolve.
+
+---
+
+## Handoff history
+
+### 2026-10-10 — SDE → DevOps / User (landing v2 ready to ship)
 
 Date: 2026-10-10 · Status: **built, verified locally; PR next, merge when CI is green.**
 
@@ -14,8 +41,6 @@ Date: 2026-10-10 · Status: **built, verified locally; PR next, merge when CI is
 - **Open:** three `lobby.test.ts` tests fail on `main` locally (not this change).
 
 ---
-
-## Handoff history
 
 ### 2026-10-10 — Architect → SDE (landing v2, cinematic 3D)
 
