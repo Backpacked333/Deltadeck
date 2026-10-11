@@ -1,16 +1,36 @@
 // The six-seat smoke (P2-11), `scripts/smoke-ws.mjs --six`. Six clients
 // reach a real six table, the first through the lobby's quick-sit and the
-// rest by the table's id (as a link does; quick-sit's choice depends on
-// whatever other tables a local server still lists), and play random legal
-// moves hand after hand. Meanwhile the run makes one player leave, a new
-// one join, one time out until the table sits them out (then sit in again)
-// and one drop their connection and come back within the grace. Every
-// frame is checked: no other seat's cards before they are shown, nothing
-// of a hand for a socket without a seat, chips conserved within each hand,
-// sequence numbers never going back, and every hand's reveal verifying
-// against the commitment sent before its deal. Exits 1 above the P2-11
-// p95 (150 ms) or on any broken invariant.
-import { fromBase64, verifyDeal } from '../../src/engine/deck'
+// rest by the table's id (as a link does), and play random legal moves
+// hand after hand, watched by a seventh socket that never sits. Meanwhile
+// the run makes one player stand up mid-hand, a new one join, one time out
+// until the table sits them out (then sit in again) and one drop their
+// connection and come back within the grace. It needs a server with no
+// other player at a six table (fresh state): quick-sit sends the run to
+// the fullest table with a free seat.
+//
+// What fails the run:
+// - a leak: a view for another seat, another seat's cards before they are
+//   shown (or shown folded, or before the showdown), a hand frame or a
+//   view on a socket without a seat, or an own hole opening for a socket
+//   not dealt in;
+// - chips: a view of a hand whose stacks and pot differ from its first, a
+//   record dealing other than that, an account dealt other than what its
+//   last hand left it (or the 100 bb buy-in after a sit or a rebuy), or a
+//   record naming another account at a client's seat;
+// - frames: a sequence number going back, an error, a hand that started
+//   and never ended (or a gap in hand numbers), a reveal that does not
+//   verify, a dealt client's own opening missing or not verifying, a move
+//   never acknowledged, a seat lost without a stand;
+// - the events: each counted only once its effect shows (the stood player
+//   kept the seat until the hand ended and was never dealt again; the
+//   joiner and the reconnected player were dealt in after; the silent one
+//   timed out twice, was sat out, missed a deal and sat in again);
+// - the lobby not listing the table with the clients still seated;
+// - a p95 client round trip over 150 ms (P2-11's number; this is a Node
+//   client's send-to-ack on a local server, not ack-to-render, which
+//   waits on the S7-05 telemetry).
+import { fromBase64, verifyDeal, verifyOwn } from '../../src/engine/deck'
+import { buyIn, SIX_BLINDS } from '../../src/engine/stacks'
 import type {
   HandRecordV1,
   LobbyMsg,
@@ -34,20 +54,34 @@ export const SIX_EVENTS = {
 const AWAY_MS = 3000
 /** The whole run gives up after this long. */
 const RUN_MS = 40 * 60_000
+/** A move still unacknowledged this long when the run ends is a failure. */
+export const ACK_LOST_MS = 10_000
+const BUY_IN = buyIn(SIX_BLINDS.bb)
 
-type Client = {
+export type Client = {
   name: string
   token: string
-  ws: WebSocket | null
+  ws: {
+    send(data: string): void
+    close(code?: number, reason?: string): void
+  } | null
   /** Our seat at the table, from the last welcome. */
   seat: number | null
-  /** Wants a seat: sends a bare sit on a seatless welcome. */
-  sitting: boolean
+  /** Sends a bare sit on a seatless welcome: until first seated. */
+  wantsSeat: boolean
+  everSeated: boolean
+  /** Sent a stand: the seatless welcome that follows is expected. */
+  stood: boolean
+  /** To stand once dealt into a hand it is not to act in (the leave). */
+  standWanted: boolean
+  /** The seat a reconnecting client must come back to. */
+  returning: number | null
   seq: number
   pending: { reqId: string; sentAt: number } | null
   /** Makes no move: its turns run out (the timeouts event). */
   silent: boolean
-  /** Hands this client asked a rebuy for (one each). */
+  /** Sat or asked for a top-up since its last hand: 100 bb is allowed. */
+  toppedUp: boolean
   rebuys: Set<string>
 }
 
@@ -58,27 +92,44 @@ type HandLog = {
   commitment?: string
   record?: HandRecordV1
   revealed?: boolean
+  /** Who each view said sat where, and the cards each saw of its own. */
+  dealt: Map<number, string>
+  cards: Map<string, [number, number]>
 }
 
 export async function six(target: string, secret: string, hands: number) {
-  const run = new SixRun(target, secret, hands)
-  return run.main()
+  return new SixRun(target, secret, hands).main()
 }
 
-class SixRun {
+export class SixRun {
   readonly result: SmokeResult
-  private readonly clients: Client[] = []
+  readonly clients: Client[] = []
+  readonly events: string[] = []
   private readonly handLogs = new Map<string, HandLog>()
   /** Hands counted: a reconnect sends the last one's end again. */
   private readonly counted = new Set<string>()
-  private readonly events: string[] = []
-  private readonly started = Date.now()
-  private tableId = ''
+  /** Every hand any socket saw start, by match id. */
+  private readonly started = new Map<string, Set<number>>()
+  /** Each account's stack as its last hand left it. */
+  private readonly finals = new Map<string, number>()
+  private readonly began = Date.now()
+  tableId = ''
   private n = 0
   private finish: (() => void) | null = null
   private table: MatchInfo | null = null
-  /** The scripted events' watchers, cleared when the run ends. */
-  private readonly watchers: ReturnType<typeof setInterval>[] = []
+  private foreign = false
+  /** The leave: the hand the stood player stood in. */
+  private stoodIn: { name: string; handNo: number; matchId: string } | null =
+    null
+  /** The timeouts: timeouts seen, sat out, then a deal without them. */
+  private silence: {
+    name: string
+    timeouts: number
+    out: boolean
+    done: boolean
+  } | null = null
+  /** The joiner and the reconnected player, until dealt in after. */
+  private readonly awaited = new Map<string, string>()
 
   constructor(
     private readonly target: string,
@@ -100,7 +151,37 @@ class SixRun {
     this.result.failures.push(what)
   }
 
-  private ws(path: string, token: string) {
+  private leak(what: string) {
+    this.result.leaks++
+    this.fail(what)
+  }
+
+  /** A client; an observer never sits. */
+  client(i: number | string, observer = false): Client {
+    const name = `six${this.began.toString(36)}${i}`
+    return {
+      name,
+      token: `dev.${name}.${this.secret}`,
+      ws: null,
+      seat: null,
+      wantsSeat: !observer,
+      everSeated: false,
+      stood: false,
+      standWanted: false,
+      returning: null,
+      seq: 0,
+      pending: null,
+      silent: false,
+      toppedUp: !observer,
+      rebuys: new Set(),
+    }
+  }
+
+  private send(me: Client, msg: object) {
+    me.ws?.send(JSON.stringify(msg))
+  }
+
+  private socket(path: string, token: string) {
     return new WebSocket(
       `${this.target.replace(/^http/, 'ws')}${path}`,
       // Node's WebSocket sends an Origin only when asked; the server
@@ -112,25 +193,10 @@ class SixRun {
     )
   }
 
-  private client(i: number): Client {
-    const name = `six${this.started.toString(36)}${i}`
-    return {
-      name,
-      token: `dev.${name}.${this.secret}`,
-      ws: null,
-      seat: null,
-      sitting: true,
-      seq: 0,
-      pending: null,
-      silent: false,
-      rebuys: new Set(),
-    }
-  }
-
   /** Asks the lobby for a six table to sit at; resolves with its id. */
   private quickSit(token: string) {
     return new Promise<string>((resolve, reject) => {
-      const ws = this.ws('/ws/lobby', token)
+      const ws = this.socket('/ws/lobby', token)
       const timer = setTimeout(() => {
         ws.close(1000)
         reject(new Error('quick-sit: no answer in 15 s'))
@@ -151,7 +217,7 @@ class SixRun {
   /** The lobby's list, asked of a fresh lobby socket. */
   private listed(token: string) {
     return new Promise<{ tableId: string; seated: number }[]>((resolve) => {
-      const ws = this.ws('/ws/lobby', token)
+      const ws = this.socket('/ws/lobby', token)
       const timer = setTimeout(() => {
         ws.close(1000)
         resolve([])
@@ -169,13 +235,19 @@ class SixRun {
 
   private handOf(matchId: string, handNo: number) {
     const key = `${matchId}#${handNo}`
-    if (!this.handLogs.has(key)) this.handLogs.set(key, {})
+    if (!this.handLogs.has(key))
+      this.handLogs.set(key, { dealt: new Map(), cards: new Map() })
     return { key, log: this.handLogs.get(key)! }
+  }
+
+  private start(matchId: string, handNo: number) {
+    if (!this.started.has(matchId)) this.started.set(matchId, new Set())
+    this.started.get(matchId)!.add(handNo)
   }
 
   /** Opens `me`'s table socket (again, after a drop). */
   private connect(me: Client) {
-    const ws = this.ws(`/ws/table/${this.tableId}`, me.token)
+    const ws = this.socket(`/ws/table/${this.tableId}`, me.token)
     me.ws = ws
     me.pending = null
     ws.onclose = (e) => {
@@ -187,7 +259,7 @@ class SixRun {
       void this.receive(me, JSON.parse(String(event.data)) as ServerMsg)
   }
 
-  private async receive(me: Client, msg: ServerMsg) {
+  async receive(me: Client, msg: ServerMsg) {
     if (msg.seq < me.seq)
       this.fail(`${me.name}: seq went back ${me.seq} → ${msg.seq}`)
     me.seq = Math.max(me.seq, msg.seq)
@@ -195,84 +267,90 @@ class SixRun {
       case 'error':
         return this.fail(`${me.name}: error ${msg.code} ${msg.message}`)
       case 'welcome':
-      case 'state': {
-        this.table = msg.table
-        if (msg.t === 'welcome') me.seat = msg.seat
-        if (me.seat === null) {
-          // A socket without a seat sees the roster, never a hand.
-          if (msg.view) {
-            this.result.leaks++
-            this.fail(`${me.name}: a view without a seat`)
-          }
-          if (msg.t === 'welcome' && me.sitting && me.ws)
-            me.ws.send(JSON.stringify({ t: 'sit' }))
-          return
-        }
-        if (msg.view) this.view(me, msg.view)
-        this.maybeRebuy(me, msg.table, msg.view)
-        return
-      }
+      case 'state':
+        return this.snapshot(me, msg)
       case 'hand_start': {
+        if (me.seat === null)
+          this.leak(
+            `${me.name}: hand ${msg.handNo} started on a socket without a seat`,
+          )
+        this.start(msg.matchId, msg.handNo)
         const { log } = this.handOf(msg.matchId, msg.handNo)
         if (log.commitment && log.commitment !== msg.commitment)
           this.fail(`${msg.matchId}#${msg.handNo}: two commitments`)
         log.commitment ??= msg.commitment
         return
       }
-      case 'hand_end': {
-        if (this.counted.has(`${msg.matchId}#${msg.handNo}`)) return
-        const { log } = this.handOf(msg.matchId, msg.handNo)
-        if (log.record) return
-        log.record = msg.record
-        const net = Object.values(msg.record.netBySeat).reduce(
-          (s, x) => s + x,
-          0,
-        )
-        if (net !== 0) this.fail(`${msg.matchId}#${msg.handNo}: net ${net}`)
-        const dealt = msg.record.config.seats.reduce((s, p) => s + p.stack, 0)
-        if (log.chips !== undefined && dealt !== log.chips)
-          this.fail(
-            `${msg.matchId}#${msg.handNo}: dealt ${dealt} ≠ ${log.chips}`,
-          )
-        if (log.commitment && msg.record.commitment !== log.commitment)
-          this.fail(`${msg.matchId}#${msg.handNo}: record commitment differs`)
-        return this.handDone(msg.matchId, msg.handNo)
-      }
-      case 'reveal': {
-        if (this.counted.has(`${msg.matchId}#${msg.handNo}`)) return
-        const { log } = this.handOf(msg.matchId, msg.handNo)
-        if (log.revealed) return
-        if (!log.record || !log.commitment)
-          return this.fail(
-            `${msg.matchId}#${msg.handNo}: reveal before record or commitment`,
-          )
-        log.revealed = true
-        const ok = await verifyDeal(
-          log.commitment,
-          fromBase64(msg.leaves),
-          msg.slots,
-          log.record,
-        )
-        if (ok) this.result.commitments++
-        else this.fail(`${msg.matchId}#${msg.handNo}: reveal does not verify`)
-        return this.handDone(msg.matchId, msg.handNo)
-      }
+      case 'hand_end':
+        return this.handEnd(me, msg.matchId, msg.handNo, msg.record)
+      case 'reveal':
+        return this.reveal(me, msg)
     }
+  }
+
+  private snapshot(
+    me: Client,
+    msg: Extract<ServerMsg, { t: 'welcome' | 'state' }>,
+  ) {
+    this.table = msg.table
+    const names = new Set(this.clients.map((c) => c.name))
+    if (
+      !this.foreign &&
+      msg.table.players.some((p) => !names.has(p.username))
+    ) {
+      this.foreign = true
+      this.fail(
+        `${this.tableId} holds a player from outside this run: run --six against fresh state`,
+      )
+    }
+    if (msg.t === 'welcome') {
+      if (me.returning !== null && msg.seat !== me.returning)
+        this.fail(
+          `${me.name}: back from a drop at seat ${msg.seat}, not ${me.returning}`,
+        )
+      me.returning = null
+      me.seat = msg.seat
+      if (msg.seat !== null) {
+        me.everSeated = true
+        me.wantsSeat = false
+      } else if (me.wantsSeat) this.send(me, { t: 'sit' })
+      else if (me.everSeated && !me.stood)
+        this.fail(`${me.name}: lost its seat`)
+    }
+    if (me.seat === null) {
+      // A socket without a seat sees the roster, never a hand.
+      if (msg.view) this.leak(`${me.name}: a view without a seat`)
+      return
+    }
+    this.watchSilence()
+    if (msg.view) this.view(me, msg.view)
+    this.maybeRebuy(me, msg.table, msg.view)
   }
 
   /** Checks one seat's view, records an ack, and moves on our turn. */
   private view(me: Client, view: SeatView) {
-    for (const p of view.players)
-      if (p.seat !== view.you && p.cards && !p.shown) {
-        this.result.leaks++
-        this.fail(
+    if (view.you !== null && view.you !== me.seat)
+      this.leak(
+        `${me.name} ${view.matchId}#${view.handNo}: a view for seat ${view.you}, sitting at ${me.seat}`,
+      )
+    for (const p of view.players) {
+      if (p.seat !== view.you && p.cards && !p.shown)
+        this.leak(
           `${me.name} ${view.matchId}#${view.handNo}: seat ${p.seat}'s cards before shown`,
         )
-      }
-    // A view of a hand: stacks and pot together are the chips dealt, the
-    // same in every view of it (the result's stacks hold the pot).
+      if (p.shown && (p.folded || view.street !== 'showdown'))
+        this.leak(
+          `${me.name} ${view.matchId}#${view.handNo}: seat ${p.seat} shown ${p.folded ? 'folded' : `on the ${view.street}`}`,
+        )
+    }
     if (view.you !== null) {
+      this.start(view.matchId, view.handNo)
       const { log } = this.handOf(view.matchId, view.handNo)
+      log.dealt.set(view.you, me.name)
+      const own = view.players.find((p) => p.seat === view.you)?.cards
+      if (own) log.cards.set(me.name, own)
+      // Stacks and pot together are the chips dealt, the same in every
+      // view of the hand (the result's stacks hold the pot).
       const stacks = view.players.reduce((s, p) => s + p.stack, 0)
       const total = view.result ? stacks : stacks + view.pot.total
       log.chips ??= total
@@ -280,6 +358,23 @@ class SixRun {
         this.fail(
           `${me.name} ${view.matchId}#${view.handNo}: chips ${total} ≠ ${log.chips}`,
         )
+      // The leave: stand while dealt in and not to act, so the table keeps
+      // the seat until the hand ends.
+      if (
+        me.standWanted &&
+        !view.result &&
+        view.toAct !== null &&
+        view.toAct !== view.you
+      ) {
+        me.standWanted = false
+        me.stood = true
+        this.stoodIn = {
+          name: me.name,
+          handNo: view.handNo,
+          matchId: view.matchId,
+        }
+        this.send(me, { t: 'stand' })
+      }
     }
     if (me.pending && view.lastReqId === me.pending.reqId) {
       this.result.acks.push(Date.now() - me.pending.sentAt)
@@ -288,8 +383,7 @@ class SixRun {
     if (
       me.pending ||
       me.silent ||
-      // Stood up: the table folds for us when the action comes round.
-      !me.sitting ||
+      me.stood ||
       !me.ws ||
       view.result ||
       view.toAct === null ||
@@ -309,15 +403,13 @@ class SixRun {
             : { type: 'call' as const }
     const reqId = `x${++this.n}`
     me.pending = { reqId, sentAt: Date.now() }
-    me.ws.send(
-      JSON.stringify({
-        t: 'act',
-        reqId,
-        handNo: view.handNo,
-        actionIndex: view.actions.length,
-        action,
-      }),
-    )
+    this.send(me, {
+      t: 'act',
+      reqId,
+      handNo: view.handNo,
+      actionIndex: view.actions.length,
+      action,
+    })
   }
 
   /** A seat with no chips, out of any hand being played, tops up. */
@@ -327,65 +419,195 @@ class SixRun {
     const key = `${view?.matchId ?? ''}#${view?.handNo ?? 0}`
     if (me.rebuys.has(key)) return
     me.rebuys.add(key)
-    me.ws.send(JSON.stringify({ t: 'rebuy' }))
+    me.toppedUp = true
+    this.send(me, { t: 'rebuy' })
+  }
+
+  /** The silent player, once the roster says the table sat them out. */
+  private watchSilence() {
+    const s = this.silence
+    if (!s || s.out) return
+    const mine = this.table?.players.find((p) => p.username === s.name)
+    if (mine?.status !== 'sitting_out') return
+    // Its timeouts are counted from the records, the last one's possibly
+    // still to come: checked once a deal has left it out.
+    s.out = true
+    if (!mine.stack)
+      this.fail(`${s.name}: sat out with no chips, not by its timeouts`)
+  }
+
+  private handEnd(
+    me: Client,
+    matchId: string,
+    handNo: number,
+    record: HandRecordV1,
+  ) {
+    const key = `${matchId}#${handNo}`
+    if (this.counted.has(key)) return
+    const { log } = this.handOf(matchId, handNo)
+    if (me.seat === null && ![...log.dealt.values()].includes(me.name))
+      this.leak(`${me.name}: hand ${handNo}'s end on a socket not dealt in`)
+    if (log.record) return
+    log.record = record
+    this.start(matchId, handNo)
+    const net = Object.values(record.netBySeat).reduce((s, x) => s + x, 0)
+    if (net !== 0) this.fail(`${key}: net ${net}`)
+    const dealt = record.config.seats.reduce((s, p) => s + p.stack, 0)
+    if (log.chips !== undefined && dealt !== log.chips)
+      this.fail(`${key}: dealt ${dealt} ≠ ${log.chips}`)
+    if (log.commitment && record.commitment !== log.commitment)
+      this.fail(`${key}: record commitment differs`)
+    // Who the views said sat where is who the record says.
+    for (const [seat, name] of log.dealt) {
+      const named = record.seats.find((s) => s.seat === seat)?.username
+      if (named !== name)
+        this.fail(
+          `${key}: seat ${seat} is ${name} in its views, ${named} in the record`,
+        )
+    }
+    this.carry(key, record)
+    this.scriptedOn(record)
+    this.handDone(matchId, handNo)
+  }
+
+  /**
+   * Chips from one hand to the next, per account: dealt what the last hand
+   * left it, or the 100 bb buy-in after a sit or a rebuy from below it.
+   */
+  private carry(key: string, record: HandRecordV1) {
+    for (const { seat, username } of record.seats) {
+      const dealt = record.config.seats.find((s) => s.seat === seat)?.stack
+      const last = this.finals.get(username)
+      const c = this.clients.find((x) => x.name === username)
+      const toppedUp =
+        !!c?.toppedUp &&
+        dealt === BUY_IN &&
+        (last === undefined || last < BUY_IN)
+      if (dealt !== last && !toppedUp)
+        this.fail(
+          `${key}: ${username} dealt ${dealt}, left with ${last ?? 'nothing'} by its last hand`,
+        )
+      // Used up only by the buy-in it allowed: a rebuy asked as a hand
+      // ends goes out before that hand's record arrives.
+      if (c && toppedUp) c.toppedUp = false
+      this.finals.set(username, (dealt ?? 0) + (record.netBySeat[seat] ?? 0))
+    }
+  }
+
+  /** Each scripted event, counted once its effect shows in a record. */
+  private scriptedOn(record: HandRecordV1) {
+    const names = new Set(record.seats.map((s) => s.username))
+    const stood = this.stoodIn
+    if (stood && record.matchId === stood.matchId) {
+      if (record.handNo === stood.handNo && !names.has(stood.name))
+        this.fail(`${stood.name}: gone from the hand it stood in`)
+      if (record.handNo > stood.handNo && names.has(stood.name))
+        this.fail(`${stood.name}: dealt in after standing up`)
+      if (
+        record.handNo > stood.handNo &&
+        !this.events.some((e) => e.startsWith('leave'))
+      )
+        this.events.push(
+          `leave: ${stood.name} stood up during hand ${stood.handNo}, kept the seat until it ended, and was not dealt again`,
+        )
+    }
+    for (const [name, what] of this.awaited)
+      if (names.has(name)) {
+        this.awaited.delete(name)
+        this.events.push(`${what}, and was dealt into hand ${record.handNo}`)
+      }
+    const s = this.silence
+    if (s && !s.done) {
+      const seat = record.seats.find((x) => x.username === s.name)?.seat
+      if (seat !== undefined)
+        s.timeouts += record.actions.filter(
+          (a) => a.seat === seat && a.source === 'timeout',
+        ).length
+      if (s.out && seat === undefined) {
+        s.done = true
+        if (s.timeouts < 2)
+          this.fail(`${s.name}: sat out after ${s.timeouts} timeouts, not 2`)
+        const c = this.clients.find((x) => x.name === s.name)!
+        c.silent = false
+        this.send(c, { t: 'sit_in' })
+        this.events.push(
+          `timeouts: ${s.name} timed out ${s.timeouts} times, was sat out, missed hand ${record.handNo} and sat in again`,
+        )
+      }
+    }
+  }
+
+  private async reveal(me: Client, msg: Extract<ServerMsg, { t: 'reveal' }>) {
+    const key = `${msg.matchId}#${msg.handNo}`
+    const { log } = this.handOf(msg.matchId, msg.handNo)
+    const record = log.record
+    if (!record || !log.commitment) {
+      if (!this.counted.has(key))
+        this.fail(`${key}: reveal before record or commitment`)
+      return
+    }
+    // This socket's own opening: its own two cards, and only if dealt.
+    const seat = record.seats.find((s) => s.username === me.name)?.seat
+    if (seat === undefined) {
+      if (msg.own) this.leak(`${me.name} ${key}: an own opening, not dealt in`)
+    } else if (!msg.own) this.fail(`${me.name} ${key}: no own opening`)
+    else {
+      const cards = log.cards.get(me.name)
+      const ok =
+        !!cards &&
+        (await verifyOwn(
+          log.commitment,
+          fromBase64(msg.leaves),
+          msg.own,
+          record.config,
+          seat,
+          cards,
+        ))
+      if (!ok) this.leak(`${me.name} ${key}: its own opening does not verify`)
+    }
+    if (log.revealed || this.counted.has(key)) return
+    log.revealed = true
+    const ok = await verifyDeal(
+      log.commitment,
+      fromBase64(msg.leaves),
+      msg.slots,
+      record,
+    )
+    if (ok) this.result.commitments++
+    else this.fail(`${key}: reveal does not verify`)
+    this.handDone(msg.matchId, msg.handNo)
   }
 
   private handDone(matchId: string, handNo: number) {
     const { key, log } = this.handOf(matchId, handNo)
-    if (!log.record || !log.revealed) return
-    this.handLogs.delete(key)
+    if (!log.record || !log.revealed || this.counted.has(key)) return
     this.counted.add(key)
     this.result.hands++
-    void this.script(this.result.hands)
+    this.script(this.result.hands)
     if (this.result.hands >= this.result.target) this.finish?.()
   }
 
-  private watch(check: () => void, ms: number) {
-    const timer = setInterval(check, ms)
-    this.watchers.push(timer)
-    return timer
-  }
-
-  /** The scripted events, each once, as the run passes its hand count. */
-  private async script(hands: number) {
+  /** Starts each scripted event once, as the run passes its hand count. */
+  private script(hands: number) {
     const [, , c2, c3, , c5] = this.clients
-    if (hands === SIX_EVENTS.leave) {
-      this.events.push(`leave: ${c5.name} stood up after hand ${hands}`)
-      c5.sitting = false
-      c5.ws?.send(JSON.stringify({ t: 'stand' }))
-      // Gone once the seat is: the table frees it between hands at once,
-      // or when the hand it is dealt into ends.
-      const gone = this.watch(() => {
-        if (c5.seat !== null) return
-        clearInterval(gone)
-        c5.ws?.close(1000, 'left')
-        c5.ws = null
-      }, 200)
-    }
+    if (!c5) return
+    if (hands === SIX_EVENTS.leave) c5.standWanted = true
     if (hands === SIX_EVENTS.join) {
       const c6 = this.client(6)
       this.clients.push(c6)
-      this.events.push(`join: ${c6.name} sat down after hand ${hands}`)
+      this.awaited.set(c6.name, `join: ${c6.name} sat down after hand ${hands}`)
       this.connect(c6)
     }
     if (hands === SIX_EVENTS.timeouts) {
-      this.events.push(
-        `timeouts: ${c2.name} made no move from hand ${hands} until sat out`,
-      )
       c2.silent = true
-      const back = this.watch(() => {
-        const mine = this.table?.players.find((p) => p.seat === c2.seat)
-        if (mine?.status !== 'sitting_out') return
-        clearInterval(back)
-        this.events.push(`timeouts: ${c2.name} was sat out, and sat in again`)
-        c2.silent = false
-        c2.ws?.send(JSON.stringify({ t: 'sit_in' }))
-      }, 500)
+      this.silence = { name: c2.name, timeouts: 0, out: false, done: false }
     }
     if (hands === SIX_EVENTS.reconnect) {
-      this.events.push(
-        `reconnect: ${c3.name} dropped after hand ${hands} and came back ${AWAY_MS / 1000} s later`,
+      this.awaited.set(
+        c3.name,
+        `reconnect: ${c3.name} dropped after hand ${hands}, came back to seat ${c3.seat} ${AWAY_MS / 1000} s later`,
       )
+      c3.returning = c3.seat
       const ws = c3.ws
       c3.ws = null
       ws?.close(1000, 'drop')
@@ -393,11 +615,53 @@ class SixRun {
     }
   }
 
+  /**
+   * At the run's end: every hand started before the last one ended, with
+   * no gap in the numbers, and no move left unacknowledged. Returns the
+   * number of moves never acknowledged.
+   */
+  endChecks(now = Date.now()) {
+    for (const [matchId, hands] of this.started) {
+      const nos = [...hands].sort((a, b) => a - b)
+      const last = nos[nos.length - 1]
+      for (let h = nos[0]; h < last; h++)
+        if (!this.counted.has(`${matchId}#${h}`))
+          this.fail(
+            `${matchId}#${h}: ${hands.has(h) ? 'started and never ended' : 'never seen'}`,
+          )
+    }
+    const lost = this.clients.filter(
+      (c) => c.pending && now - c.pending.sentAt > ACK_LOST_MS,
+    )
+    for (const c of lost) this.fail(`${c.name}: a move never acknowledged`)
+    return lost.length
+  }
+
+  /**
+   * Stands up the clients holding a seat: a stand from a socket without
+   * one is refused (an error frame, so a failure).
+   */
+  standSeated() {
+    for (const c of this.clients) {
+      c.stood = true
+      if (c.seat !== null) this.send(c, { t: 'stand' })
+    }
+  }
+
+  /** The lobby's entry for the table, with the clients still seated. */
+  listedCheck(entry: { seated: number } | undefined) {
+    const seated = this.clients.filter((c) => c.seat !== null).length
+    if (!entry) this.fail(`the lobby does not list ${this.tableId}`)
+    else if (entry.seated !== seated)
+      this.fail(`the lobby lists ${entry.seated} seated, not ${seated}`)
+  }
+
   async main() {
     console.log(
-      `smoke --six: 6 clients at one six table, ${this.result.target} hands → ${this.target}`,
+      `smoke --six: 6 clients and a watcher at one six table, ${this.result.target} hands → ${this.target}`,
     )
     for (let i = 0; i < 6; i++) this.clients.push(this.client(i))
+    this.clients.push(this.client('w', true))
     this.tableId = await this.quickSit(this.clients[0].token)
     console.log(`quick-sit sent ${this.clients[0].name} to ${this.tableId}`)
     let limit: ReturnType<typeof setTimeout> | undefined
@@ -409,32 +673,29 @@ class SixRun {
     await done
     // Or the process waits out the limit after printing its result.
     clearTimeout(limit)
-    for (const timer of this.watchers) clearInterval(timer)
+    const unacked = this.endChecks()
     const listed = await this.listed(this.clients[0].token)
     const entry = listed.find((t) => t.tableId === this.tableId)
-    if (!entry) this.fail(`the lobby does not list ${this.tableId}`)
-    for (const c of this.clients) {
-      c.sitting = false
-      c.ws?.send(JSON.stringify({ t: 'stand' }))
-    }
+    this.listedCheck(entry)
+    this.standSeated()
     await new Promise((r) => setTimeout(r, 500))
     for (const c of this.clients) c.ws?.close(1000, 'smoke done')
 
     const r = this.result
     const ms = (p: number) => `${percentile(r.acks, p)} ms`
     console.log(
-      `played ${r.hands} hands in ${((Date.now() - this.started) / 1000).toFixed(1)} s`,
+      `played ${r.hands} hands in ${((Date.now() - this.began) / 1000).toFixed(1)} s`,
     )
     for (const e of this.events) console.log(`event ${e}`)
     console.log(
-      `ack latency over ${r.acks.length} moves: p50 ${ms(50)} · p95 ${ms(95)} · p99 ${ms(99)} (limit p95 ${SIX_ACK_P95_LIMIT_MS} ms)`,
+      `client round trip over ${r.acks.length} moves (${unacked} never acknowledged): p50 ${ms(50)} · p95 ${ms(95)} · p99 ${ms(99)} (limit p95 ${SIX_ACK_P95_LIMIT_MS} ms)`,
     )
     console.log(
       `invariant failures ${r.failures.length} · leaks ${r.leaks} · commitments ${r.commitments}/${r.hands} · listed ${entry ? `${entry.seated} seated` : 'no'}`,
     )
     const problems = verdict(r, SIX_ACK_P95_LIMIT_MS)
-    if (this.events.length < 5)
-      problems.push(`${this.events.length} of 5 scripted events happened`)
+    if (this.events.length < 4)
+      problems.push(`${this.events.length} of 4 scripted events happened`)
     for (const p of problems) console.error(`FAIL ${p}`)
     console.log(problems.length ? 'FAIL' : 'PASS')
     return problems.length ? 1 : 0
