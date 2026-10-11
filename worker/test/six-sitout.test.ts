@@ -7,8 +7,15 @@
 import { runInDurableObject } from 'cloudflare:test'
 import { describe, expect, it } from 'vitest'
 import { legalActions } from '../../src/engine/hand'
+import { deckWith } from '../../src/engine/testing'
 import type { HandState, PlayerAction, SeatId } from '../../src/engine/types'
-import type { ClientMsg, ServerMsg } from '../../src/shared/protocol'
+import type {
+  ClientMsg,
+  MatchConfig,
+  ServerMsg,
+} from '../../src/shared/protocol'
+import { CashController } from '../src/controller'
+import type { Roster, TableController } from '../src/controller'
 import { NEXT_HAND_MS } from '../src/table'
 import type { InitBody, TableDO } from '../src/table'
 import { checkFrames } from './frames'
@@ -41,6 +48,43 @@ async function sixTable() {
   await freezeClock(matchId)
   return matchId
 }
+
+/**
+ * The table's own controller, except that while `holes` is set each seat
+ * dealt in that it names gets those hole cards, over `board`: a test can
+ * decide who wins a showdown, and so who loses their last chip.
+ */
+class Rigged implements TableController {
+  private readonly inner = new CashController()
+  holes: Record<number, string> | null = null
+  board = 'Kc Qd 9h 4s 3s'
+  nextHandPlan(handNo: number, config: MatchConfig, roster?: Roster) {
+    const plan = this.inner.nextHandPlan(handNo, config, roster)
+    if (plan && this.holes) {
+      const dealt = plan.config.seats.map((s) => s.seat)
+      const holes = Object.fromEntries(
+        Object.entries(this.holes).filter(([s]) => dealt.includes(Number(s))),
+      )
+      plan.deck = deckWith(plan.config, holes, this.board)
+    }
+    return plan
+  }
+}
+
+/** Gives the table `controller` to deal from (until a restart). */
+const rig = (matchId: string, controller: TableController) =>
+  runInDurableObject(stub(matchId), (instance: TableDO) => {
+    instance.sixController = controller
+  })
+
+/** Sets `seat`'s stored stack, for a player not dealt into the last hand. */
+const setStack = (matchId: string, seat: SeatId, stack: number) =>
+  runInDurableObject(stub(matchId), (instance: TableDO) => {
+    const { match } = instance as unknown as {
+      match: { players: { seat: SeatId; stack: number }[] }
+    }
+    match.players.find((p) => p.seat === seat)!.stack = stack
+  })
 
 /** `user` connects and sits in `seat`. */
 async function sitDown(matchId: string, user: string, seat: SeatId) {
@@ -344,5 +388,115 @@ describe('heads-up timeouts', () => {
       result: { reason: 'forfeit', forfeit: 0 },
     })
     checkFrames([...seats[0].frames, ...seats[1].frames])
+  })
+})
+
+describe('a busted player at a six table', () => {
+  it('a busted player sits out until a rebuy deals them in, without sit_in', async () => {
+    const matchId = await sixTable()
+    const rigged = new Rigged()
+    await rig(matchId, rigged)
+    const watcher = await connect(matchId, 'bo-w')
+    await watcher.next((f) => f.t === 'welcome')
+    const clients: Record<SeatId, Client> = {
+      0: await sitDown(matchId, 'bo-0', 0),
+      2: await sitDown(matchId, 'bo-2', 2),
+    }
+    await clients[0].next(isState(1))
+    // Seat 4 sits during hand 1 and starts hand 2 on 100 chips, in the big
+    // blind, with seven high against seat 0's aces.
+    clients[4] = await sitDown(matchId, 'bo-4', 4)
+    await setStack(matchId, 4, 100)
+    rigged.holes = { 0: 'As Ad', 4: '7c 2h' }
+    const two = await nextHand(matchId, clients, fold)
+    rigged.holes = null
+    expect(two.config).toMatchObject({ button: 0, sb: 2, bb: 4 })
+    expect(two.config.seats).toContainEqual({ seat: 4, stack: 100 })
+    await move(matchId, clients, () => ({ type: 'raise', to: 200 }))
+    await move(matchId, clients, fold)
+    // Seat 4 calls its last 80 chips and loses them at the showdown: no
+    // chips, so it sits out, and every socket hears it as the hand ends.
+    const seen = watcher.frames.length
+    await move(matchId, clients, () => ({ type: 'call' }))
+    const ended = (await peek(matchId)).hand!
+    expect(ended.street).toBe('showdown')
+    expect(bySeat(ended.players, 4).stack).toBe(0)
+    const told = await watcher.next(
+      (f) => f.t === 'state' && statusOf(f, 4) === 'sitting_out',
+      seen,
+    )
+    expect(rosterOf(told, 4)).toMatchObject({ stack: 0 })
+    // It cannot sit in with nothing to play: it must rebuy.
+    expect(await sitIn(clients[4])).toMatchObject({
+      t: 'error',
+      code: 'no_chips',
+    })
+
+    // Hand 3 deals seats 0 and 2 only.
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 2)
+    await elapse(matchId, NEXT_HAND_MS)
+    await clients[0].next(isState(3))
+    expect((await peek(matchId)).hand!.config.seats.map((s) => s.seat)).toEqual(
+      [0, 2],
+    )
+    // A rebuy at 0 chips while hand 3 is played: 100 bb, and playing.
+    const topped = await answer(clients[4], { t: 'rebuy' })
+    expect(rosterOf(topped, 4)).toMatchObject({
+      stack: 2000,
+      status: 'playing',
+    })
+    // Hand 4 deals it in, with no sit_in sent.
+    const four = await nextHand(matchId, { 0: clients[0], 2: clients[2] })
+    expect(four.config.seats.map((s) => s.seat)).toEqual([0, 2, 4])
+    expect(four.config.seats).toContainEqual({ seat: 4, stack: 2000 })
+    checkFrames(
+      [watcher, ...Object.values(clients)].flatMap((c) => c.frames),
+      'six-casual',
+    )
+  }, 30_000)
+
+  it('a player who loses their last chips in a hand over at the deal sits out', async () => {
+    const matchId = await sixTable()
+    const rigged = new Rigged()
+    await rig(matchId, rigged)
+    const watcher = await connect(matchId, 'bd-w')
+    await watcher.next((f) => f.t === 'welcome')
+    const clients: Record<SeatId, Client> = {
+      0: await sitDown(matchId, 'bd-0', 0),
+      2: await sitDown(matchId, 'bd-2', 2),
+    }
+    await clients[0].next(isState(1))
+    // Hand 1: seat 0 folds its small blind. Then seat 2 is left with 10
+    // chips (as a lost all-in would), and hand 2 makes it the button and
+    // small blind: its 10 chips are all in at the deal, against seat 0's
+    // big blind and aces, and the hand is over before anyone acts.
+    await move(matchId, clients, fold)
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 1)
+    await runInDurableObject(stub(matchId), (instance: TableDO) => {
+      const { hand } = instance as unknown as { hand: HandState }
+      bySeat(hand.players, 0).stack += bySeat(hand.players, 2).stack - 10
+      bySeat(hand.players, 2).stack = 10
+    })
+    rigged.holes = { 0: 'As Ad', 2: '7c 2h' }
+    const seen = watcher.frames.length
+    await elapse(matchId, NEXT_HAND_MS)
+    const two = (await peek(matchId)).hand!
+    expect(two.config).toMatchObject({ handNo: 2, button: 2, sb: 2, bb: 0 })
+    expect(two.actions).toEqual([])
+    expect(two.street).toBe('showdown')
+    expect(bySeat(two.players, 2).stack).toBe(0)
+    const told = await watcher.next(
+      (f) => f.t === 'state' && statusOf(f, 2) === 'sitting_out',
+      seen,
+    )
+    expect(rosterOf(told, 2)).toMatchObject({ stack: 0 })
+    expect((await seated(matchId)).map((p) => [p.seat, p.status])).toEqual([
+      [0, 'playing'],
+      [2, 'sitting_out'],
+    ])
+    checkFrames(
+      [watcher, ...Object.values(clients)].flatMap((c) => c.frames),
+      'six-casual',
+    )
   })
 })

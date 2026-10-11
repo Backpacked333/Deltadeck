@@ -147,6 +147,11 @@ export type ErrorCode =
   | 'in_hand'
   /** Six tables: a rebuy from a player not below 100 bb (the buy-in). */
   | 'not_below'
+  /**
+   * Six tables: a sit_in from a player with no chips, who sits out until
+   * they rebuy (a rebuy at 0 chips deals them in without sit_in).
+   */
+  | 'no_chips'
 
 /**
  * Everything one seat may know about the table. There is deliberately no

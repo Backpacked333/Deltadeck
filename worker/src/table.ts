@@ -833,6 +833,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
     // hand's final one; the deal finds them settled and leaves them.
     this.settleStacks()
     player.stack = stack + topUp.amount
+    // At 0 chips they sat out; the rebuy deals them in from the next hand
+    // without a sit_in (ADR "Stacks and rebuy").
+    if (stack === 0) this.sitIn(player)
     this.seq++
     await this.ctx.storage.put({ match, seq: this.seq })
     this.send(ws, this.frame('welcome', userId))
@@ -881,6 +884,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
     if (!player) return this.reject(ws, 'not_seated', 'You have no seat here')
     if (player.status !== 'sitting_out')
       return this.send(ws, this.frame('welcome', userId))
+    // Nothing to be dealt in with: a rebuy deals them in instead.
+    if (this.stackOf(player) === 0)
+      return this.reject(ws, 'no_chips', 'Rebuy to be dealt in')
     this.sitIn(player)
     this.seq++
     await this.ctx.storage.put({ match, seq: this.seq })
@@ -906,6 +912,21 @@ export class TableDO extends DurableObject<WorkerEnv> {
   private sitIn(player: Player) {
     player.status = 'playing'
     player.timeouts = 0
+  }
+
+  /**
+   * Six-casual: the players `hand`, just over, left with no chips sit out
+   * until they rebuy (ADR "Stacks and rebuy"). A player who stood from it
+   * has left already. True when any status changed.
+   */
+  private bustOut(hand: HandState) {
+    let changed = false
+    for (const p of hand.players) {
+      if (p.stack > 0) continue
+      const player = this.playerIn(p.seat)
+      if (player && this.sitOut(player)) changed = true
+    }
+    return changed
   }
 
   /**
@@ -1221,12 +1242,14 @@ export class TableDO extends DurableObject<WorkerEnv> {
       six && player.timeouts >= SIT_OUT_TIMEOUTS && this.sitOut(player)
     // Six-casual: players who stood during this hand leave as it ends.
     const stood = isOver(next) ? match.players.filter((p) => p.standing) : []
+    let busted = false
     if (isOver(next)) {
       this.addNet(next)
       this.logHandEnd(next, t - current.startedAt)
       this.ended = await this.endOfHand(next, current, writes)
       writes.ended = this.ended
       if (stood.length) this.unseat(stood)
+      busted = six && this.bustOut(next)
       this.setGameDeadline(
         forfeit
           ? null
@@ -1240,7 +1263,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     if (isOver(next)) await this.dropDeckIfUnqueued(writes)
     // A seat that freed, or a status that changed, changes the table for
     // sockets without a seat too.
-    this.broadcast('state', { roster: stood.length > 0 || satOut })
+    this.broadcast('state', { roster: stood.length > 0 || satOut || busted })
     if (isOver(next)) for (const ws of this.openSockets()) this.sendEnded(ws)
     for (const ws of this.openSockets()) {
       const userId = this.userOf(ws)
@@ -1435,6 +1458,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const writes: Record<string, unknown> = { match }
     this.ended = await this.endOfHand(hand, this.current!, writes)
     writes.ended = this.ended
+    const busted = match.config.kind === 'six-casual' && this.bustOut(hand)
     this.setGameDeadline({
       kind: 'nextHand',
       at: this.clock() + NEXT_HAND_MS,
@@ -1445,6 +1469,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
     await this.ctx.storage.put(writes)
     await this.armAlarm()
     await this.dropDeckIfUnqueued(writes)
+    // The deal's own state went to the seats; a status is everyone's news.
+    if (busted) this.broadcast('state', { roster: true })
     for (const ws of this.openSockets()) this.sendEnded(ws)
     void this.flushOutbox()
   }
