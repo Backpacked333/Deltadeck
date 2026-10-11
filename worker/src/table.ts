@@ -1247,11 +1247,19 @@ export class TableDO extends DurableObject<WorkerEnv> {
         )
     } catch (error) {
       // A plan the engine refuses (a bad stored deck, in Phase 1): halt the
-      // match like any engine fault rather than break the object.
+      // match like any engine fault rather than break the object. A six
+      // table's evidence adds the orbit count and the blinds it counts
+      // from, so a corrupt count can be diagnosed from the incident.
       return this.engineFault(error, plan.config.handNo, {
         config: plan.config,
         deck: plan.deck,
         secret: toBase64(plan.secret),
+        ...(six
+          ? {
+              orbitTravel: match.orbitTravel ?? null,
+              blinds: match.blinds ?? null,
+            }
+          : {}),
       })
     }
     if (!this.invariantsHold(hand)) return

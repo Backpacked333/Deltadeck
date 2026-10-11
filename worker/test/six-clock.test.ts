@@ -6,8 +6,12 @@
 // dead button, a dead small blind, players sitting down and players leaving
 // must neither stretch an orbit (someone posts the big blind twice in it)
 // nor shorten it (someone dealt in throughout never posts it).
-import { abortAllDurableObjects, runInDurableObject } from 'cloudflare:test'
-import { describe, expect, it } from 'vitest'
+import {
+  abortAllDurableObjects,
+  env,
+  runInDurableObject,
+} from 'cloudflare:test'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { legalActions } from '../../src/engine/hand'
 import { nextBlinds } from '../../src/engine/positions'
 import type { Blinds } from '../../src/engine/positions'
@@ -15,6 +19,7 @@ import { seededRandom } from '../../src/engine/testing'
 import { EngineError } from '../../src/engine/types'
 import type { HandState, PlayerAction, SeatId } from '../../src/engine/types'
 import type { ServerMsg } from '../../src/shared/protocol'
+import { forgetUsernames } from '../src/auth'
 import { orbitDone } from '../src/deadlines'
 import { NEXT_HAND_MS } from '../src/table'
 import type { InitBody, TableDO } from '../src/table'
@@ -901,6 +906,91 @@ describe('the bank at a six table', () => {
     const { match } = await peek(matchId)
     expect((match as unknown as { config: object }).config).not.toHaveProperty(
       'bankRefill',
+    )
+  }, 30_000)
+})
+
+describe('the incident for a corrupt orbit count', () => {
+  const USERS = [
+    'a2000000-0000-4000-8000-00000000000a',
+    'b2000000-0000-4000-8000-00000000000b',
+    'c2000000-0000-4000-8000-00000000000c',
+  ]
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('records the stored count and the blinds it was counted from, beside the plan', async () => {
+    // Supabase, stubbed: every archive call is recorded. Real accounts, so
+    // the table is archived and its engine fault becomes an incident.
+    const calls: { rpc: string; p: Record<string, unknown> }[] = []
+    const realFetch = globalThis.fetch
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(
+          input instanceof Request ? input.url : String(input),
+        )
+        if (url.origin !== new URL(env.SUPABASE_URL).origin)
+          return realFetch(input, init)
+        if (url.pathname === '/rest/v1/players') {
+          const id = url.searchParams.get('user_id')!.slice(3)
+          return Response.json([{ username: `p${USERS.indexOf(id)}` }])
+        }
+        if (url.pathname.endsWith('/audit_hand'))
+          return Response.json({ verified: true })
+        if (url.pathname.startsWith('/rest/v1/rpc/'))
+          calls.push({
+            rpc: url.pathname.slice('/rest/v1/rpc/'.length),
+            p: JSON.parse(String(init!.body)).p,
+          })
+        return new Response(null, { status: 204 })
+      },
+    )
+    forgetUsernames()
+    const matchId = await sixTable()
+    const clients: Record<SeatId, Client> = {
+      0: await sitDown(matchId, USERS[0], 0),
+      2: await sitDown(matchId, USERS[1], 2),
+    }
+    await clients[0].next(isState(1))
+    clients[4] = await sitDown(matchId, USERS[2], 4)
+    await move(matchId, clients, fold)
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 1)
+    // The count is corrupted between hands; the blinds it counts from stay.
+    const blinds = await runInDurableObject(
+      stub(matchId),
+      async (instance: TableDO, state) => {
+        const { match } = instance as unknown as {
+          match: { orbitTravel: number; blinds: Blinds }
+        }
+        match.orbitTravel = 7
+        await state.storage.put('match', match)
+        return structuredClone(match.blinds)
+      },
+    )
+    expect(blinds).toMatchObject({ button: 0, bb: 2 })
+    await elapse(matchId, NEXT_HAND_MS)
+    await clients[0].next((f) => f.t === 'match_end')
+    for (
+      let i = 0;
+      i < 400 && !calls.some((c) => c.rpc === 'record_incident');
+      i++
+    )
+      await new Promise((r) => setTimeout(r, 5))
+    const incidents = calls.filter((c) => c.rpc === 'record_incident')
+    expect(incidents).toHaveLength(1)
+    const { p } = incidents[0]
+    expect(p).toMatchObject({
+      matchId,
+      handNo: 2,
+      kind: 'engine_fault',
+      detail: { error: 'An orbit count of 7' },
+    })
+    // What diagnoses it: the corrupt count and the last deal's blinds, and
+    // the plan it refused (only the service role reads an incident).
+    const { evidence } = p.detail as { evidence: Record<string, unknown> }
+    expect(evidence).toMatchObject({ orbitTravel: 7, blinds })
+    expect(Object.keys(evidence).sort()).toEqual(
+      ['blinds', 'config', 'deck', 'orbitTravel', 'secret'].sort(),
     )
   }, 30_000)
 })
