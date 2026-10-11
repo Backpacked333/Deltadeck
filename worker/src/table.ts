@@ -951,16 +951,62 @@ export class TableDO extends DurableObject<WorkerEnv> {
    * deal, so it is dealt as it was planned. One still dealt into the hand
    * being played is left alone until it ends (leavable).
    */
-  private satOutTooLong(orbitStart: boolean) {
+  private satOutTooLong(orbitStart: boolean, writes: Record<string, unknown>) {
     const t = this.clock()
     const due: Player[] = []
+    let repaired = false
     for (const p of this.match!.players) {
       if (!this.leavable(p)) continue
-      if (orbitStart) p.outOrbits = (p.outOrbits ?? 0) + 1
-      if ((p.outOrbits ?? 0) >= SIT_OUT_ORBITS || t >= p.outSince! + SIT_OUT_MS)
+      if (this.repairOut(p, writes)) repaired = true
+      if (orbitStart) p.outOrbits! += 1
+      if (p.outOrbits! >= SIT_OUT_ORBITS || t >= p.outSince! + SIT_OUT_MS)
         due.push(p)
     }
-    return due
+    return { due, repaired }
+  }
+
+  /**
+   * Six-casual: a stored sit-out count or time that cannot be right (not
+   * 0 to SIT_OUT_ORBITS - 1 orbit starts, or not a time) is set back to 0,
+   * or to now, logged, and recorded as an incident with what was stored
+   * (only the service role reads incidents). One player's bad count must
+   * not halt the table for everyone else, as a corrupt `orbitTravel` does
+   * (ADR, clarifications from PR-15): the most it costs is that player's
+   * later removal, which SIT_OUT_MS still bounds. True when it repaired.
+   */
+  private repairOut(p: Player, writes: Record<string, unknown>) {
+    const orbitsOk =
+      Number.isInteger(p.outOrbits) &&
+      p.outOrbits! >= 0 &&
+      p.outOrbits! < SIT_OUT_ORBITS
+    const sinceOk = Number.isFinite(p.outSince)
+    if (orbitsOk && sinceOk) return false
+    const match = this.match!
+    const stored = {
+      outOrbits: p.outOrbits ?? null,
+      outSince: p.outSince ?? null,
+    }
+    if (!orbitsOk) p.outOrbits = 0
+    if (!sinceOk) p.outSince = this.clock()
+    logEvent('error', {
+      matchId: this.matchId(),
+      handNo: match.handNo,
+      userId: p.userId,
+      reason: 'sitout_count',
+    })
+    // One per account and hand: incidents_once keys on the kind.
+    if (this.recordable())
+      writes[this.outboxKey(match.handNo, `sitout:${p.userId}`)] = {
+        rpc: 'record_incident',
+        attempts: 0,
+        body: {
+          matchId: this.matchId(),
+          handNo: match.handNo,
+          kind: `sitout_count:${p.userId}`,
+          detail: { userId: p.userId, ...stored },
+        },
+      } satisfies Outbox
+    return true
   }
 
   /**
@@ -987,7 +1033,12 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const due = this.seatable()
       ? match.players
           .filter((p) => this.leavable(p))
-          .map((p) => p.outSince! + SIT_OUT_MS)
+          // A time that is not one is due now, so the alarm repairs it.
+          .map((p) =>
+            Number.isFinite(p.outSince)
+              ? p.outSince! + SIT_OUT_MS
+              : this.clock(),
+          )
       : []
     this.deadlines = [
       ...this.deadlines.filter((d) => d.kind !== 'sitout'),
@@ -999,27 +1050,34 @@ export class TableDO extends DurableObject<WorkerEnv> {
 
   /**
    * The `sitout` alarm: players sitting out whose time ran out leave, as a
-   * stand between hands would, with no cooldown.
+   * stand between hands would, with no cooldown. A bad stored count or
+   * time found on the way is repaired (repairOut).
    */
   private async sitOutTimeUp() {
     const match = this.match
     if (!match || !this.seatable()) return
-    const gone = this.satOutTooLong(false)
-    if (!gone.length) return
-    this.unseat(gone, false)
-    // As at the last stand: an open session still ends IDLE_MS after its
-    // last hand started; with none open, the table goes IDLE_MS from now.
-    if (!match.players.length && match.status === 'waiting')
-      this.setGameDeadline(this.idleDeadline())
-    this.seq++
-    await this.ctx.storage.put({
-      match,
-      seq: this.seq,
-      deadlines: this.deadlines,
-    })
+    const writes: Record<string, unknown> = { match }
+    const { due: gone, repaired } = this.satOutTooLong(false, writes)
+    if (!gone.length && !repaired) return
+    if (gone.length) {
+      this.unseat(gone, false)
+      // As at the last stand: an open session still ends IDLE_MS after
+      // its last hand started; with none open, the table goes IDLE_MS
+      // from now.
+      if (!match.players.length && match.status === 'waiting')
+        this.setGameDeadline(this.idleDeadline())
+      this.seq++
+      writes.seq = this.seq
+    }
+    writes.deadlines = this.deadlines
+    this.expectArchive(writes)
+    await this.ctx.storage.put(writes)
     await this.armAlarm()
-    this.broadcast('state', { roster: true })
-    this.leave(gone)
+    if (gone.length) {
+      this.broadcast('state', { roster: true })
+      this.leave(gone)
+    }
+    if (repaired) void this.flushOutbox()
   }
 
   /**
@@ -1490,6 +1548,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
     match.handNo = plan.config.handNo
     /** Six-casual: players sitting out whom this deal stands up. */
     let leaving: Player[] = []
+    /** Six-casual: incidents for bad stored sit-out counts (repairOut). */
+    const repairs: Record<string, unknown> = {}
     if (six) {
       match.tableHands = (match.tableHands ?? 0) + 1
       match.blinds = plan.blinds!
@@ -1501,7 +1561,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
         for (const p of match.players) p.bankMs = match.config.bankMs
       // Those sitting out for SIT_OUT_ORBITS orbit starts leave as it is
       // dealt, as a stand between hands would, with no cooldown.
-      leaving = this.satOutTooLong(orbit!.refill)
+      leaving = this.satOutTooLong(orbit!.refill, repairs).due
       if (leaving.length) this.unseat(leaving, false)
       match.dealt = plan.users!.map(({ seat, userId }) => ({
         seat,
@@ -1539,6 +1599,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
       deadlines: this.deadlines,
       seq: this.seq,
       ...(fresh ? { lastAck: this.lastAck } : {}),
+      ...repairs,
       // Kept for the match: the reveal opens it, Phase 1 replays decks.
       [this.deckKey(match.handNo)]: {
         deck: plan.deck,
@@ -1584,7 +1645,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
       })
     // A hand that is over at the deal (blinds all in) still needs its end.
     if (isOver(hand)) await this.applyEndAtDeal(hand)
-    else if (match.handNo === 1) void this.flushOutbox()
+    else if (match.handNo === 1 || Object.keys(repairs).length)
+      void this.flushOutbox()
   }
 
   /** Settles a hand the blinds alone finished, through the normal end path. */

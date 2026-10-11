@@ -9,7 +9,7 @@ import {
   env,
   runInDurableObject,
 } from 'cloudflare:test'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { legalActions } from '../../src/engine/hand'
 import { deckWith } from '../../src/engine/testing'
 import type { HandState, PlayerAction, SeatId } from '../../src/engine/types'
@@ -18,6 +18,7 @@ import type {
   MatchConfig,
   ServerMsg,
 } from '../../src/shared/protocol'
+import { forgetUsernames } from '../src/auth'
 import { CashController } from '../src/controller'
 import type { Roster, TableController } from '../src/controller'
 import { lobbyStub } from '../src/lobby'
@@ -907,4 +908,146 @@ describe('sitting out across a restart', () => {
       'six-casual',
     )
   }, 60_000)
+})
+
+describe('a bad stored sit-out count', () => {
+  const USERS = [
+    'a3000000-0000-4000-8000-00000000000a',
+    'b3000000-0000-4000-8000-00000000000b',
+    'c3000000-0000-4000-8000-00000000000c',
+  ]
+  afterEach(() => vi.unstubAllGlobals())
+
+  /**
+   * Supabase, stubbed: every archive call is recorded. Real accounts, so
+   * the table archives, and its incidents reach record_incident.
+   */
+  function stubArchive() {
+    const calls: { rpc: string; p: Record<string, unknown> }[] = []
+    const realFetch = globalThis.fetch
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(
+          input instanceof Request ? input.url : String(input),
+        )
+        if (url.origin !== new URL(env.SUPABASE_URL).origin)
+          return realFetch(input, init)
+        if (url.pathname === '/rest/v1/players') {
+          const id = url.searchParams.get('user_id')!.slice(3)
+          return Response.json([{ username: `p${USERS.indexOf(id)}` }])
+        }
+        if (url.pathname.endsWith('/audit_hand'))
+          return Response.json({ verified: true })
+        if (url.pathname.startsWith('/rest/v1/rpc/'))
+          calls.push({
+            rpc: url.pathname.slice('/rest/v1/rpc/'.length),
+            p: JSON.parse(String(init!.body)).p,
+          })
+        return new Response(null, { status: 204 })
+      },
+    )
+    forgetUsernames()
+    return calls
+  }
+
+  /** Sets a stored field of the player in `seat`, in memory and storage. */
+  const corrupt = (matchId: string, seat: SeatId, patch: object) =>
+    runInDurableObject(stub(matchId), async (instance: TableDO, state) => {
+      const { match } = instance as unknown as {
+        match: { players: { seat: SeatId }[] }
+      }
+      Object.assign(match.players.find((p) => p.seat === seat)!, patch)
+      await state.storage.put('match', match)
+    })
+
+  /** Waits until record_incident has been called `n` times. */
+  async function incidents(calls: ReturnType<typeof stubArchive>, n: number) {
+    await eventually(
+      async () => calls.filter((c) => c.rpc === 'record_incident').length >= n,
+    )
+    return calls.filter((c) => c.rpc === 'record_incident').map((c) => c.p)
+  }
+
+  it('a bad orbit count is reset to 0 and recorded, and the table plays on', async () => {
+    const calls = stubArchive()
+    const matchId = await sixTable()
+    const clients: Record<SeatId, Client> = {
+      0: await sitDown(matchId, USERS[0], 0),
+      2: await sitDown(matchId, USERS[1], 2),
+    }
+    await clients[0].next(isState(1))
+    // Seat 4 sits out before it is dealt a hand. Hand 3 is the first
+    // orbit start since (big blinds 2, 0, 2).
+    clients[4] = await sitDown(matchId, USERS[2], 4)
+    await sitOut(clients[4])
+    const players = { 0: clients[0], 2: clients[2] }
+    await nextHand(matchId, players, fold)
+    await nextHand(matchId, players, fold)
+    expect((await seated(matchId)).find((p) => p.seat === 4)!.outOrbits).toBe(1)
+    // Its stored count goes bad. The next deal finds it, sets it to 0
+    // (the next orbit start is then its first again) and records an
+    // incident with what was stored; nothing halts.
+    await corrupt(matchId, 4, { outOrbits: 7 })
+    const four = await nextHand(matchId, players, fold)
+    expect(four.config.handNo).toBe(4)
+    expect((await seated(matchId)).find((p) => p.seat === 4)!.outOrbits).toBe(0)
+    const [incident] = await incidents(calls, 1)
+    expect(incident).toEqual({
+      matchId,
+      handNo: 4,
+      kind: `sitout_count:${USERS[2]}`,
+      detail: {
+        userId: USERS[2],
+        outOrbits: 7,
+        outSince: expect.any(Number),
+      },
+    })
+    // Hands 5, 7 and 9 are its three orbit starts from there.
+    for (let n = 4; n < 9; n++) {
+      expect((await peek(matchId)).match.status).toBe('playing')
+      expect((await seated(matchId)).map((p) => p.seat)).toEqual([0, 2, 4])
+      await nextHand(matchId, players, fold)
+    }
+    expect((await peek(matchId)).hand!.config.handNo).toBe(9)
+    expect((await seated(matchId)).map((p) => p.seat)).toEqual([0, 2])
+    expect(await incidents(calls, 1)).toHaveLength(1)
+  }, 60_000)
+
+  it('a bad sit-out time is reset to now and recorded, and the alarm keeps running', async () => {
+    const calls = stubArchive()
+    const matchId = await sixTable()
+    const clients: Record<SeatId, Client> = {
+      0: await sitDown(matchId, USERS[0], 0),
+      2: await sitDown(matchId, USERS[1], 2),
+    }
+    await clients[0].next(isState(1))
+    await playOut(matchId, clients, fold)
+    await clients[0].next((f) => f.t === 'reveal' && f.handNo === 1)
+    await sitOut(clients[2])
+    await elapse(matchId, NEXT_HAND_MS)
+    expect((await peek(matchId)).match.status).toBe('waiting')
+    // Its stored time goes bad: not a number, so no deadline can be read
+    // from it. The table looks at once, sets it to now and records it.
+    await corrupt(matchId, 2, { outSince: 'soon' })
+    await elapse(matchId, 0)
+    await elapse(matchId, 0)
+    const t = await clockOf(matchId)
+    expect((await seated(matchId)).find((p) => p.seat === 2)).toMatchObject({
+      status: 'sitting_out',
+      outSince: t,
+    })
+    const [incident] = await incidents(calls, 1)
+    expect(incident).toEqual({
+      matchId,
+      handNo: 1,
+      kind: `sitout_count:${USERS[1]}`,
+      detail: { userId: USERS[1], outOrbits: 0, outSince: 'soon' },
+    })
+    // Five minutes from then, it is stood up as anyone would be.
+    await elapse(matchId, FIVE_MINUTES - 1)
+    expect((await seated(matchId)).map((p) => p.seat)).toEqual([0, 2])
+    await elapse(matchId, 1)
+    expect((await seated(matchId)).map((p) => p.seat)).toEqual([0])
+  })
 })
