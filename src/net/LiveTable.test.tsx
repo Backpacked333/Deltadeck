@@ -799,6 +799,82 @@ describe('LiveTable at a six-casual table', () => {
     expect(screen.queryByText('Leaving after this hand')).toBeNull()
   })
 
+  it('a double press on Rebuy or Stand up sends one frame until the table answers', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    const ended = foldedToCarol()
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 1, 2, 2, ended, { table: sixInfo(AFTER_FOLDS) }),
+      ),
+    )
+    const sent = () => socket.sent.map((m) => JSON.parse(m))
+    // The second press of a double press would be refused (not_below) and
+    // flash "You already have 100 big blinds" just after the top-up.
+    const rebuy = rebuyButton()!
+    fireEvent.click(rebuy)
+    fireEvent.click(rebuy)
+    expect(sent()).toEqual([{ t: 'rebuy' }])
+    expect(rebuyButton()).toBeNull()
+
+    // The socket drops before the answer, which may never have gone out:
+    // back, with the roster still short, Rebuy is offered again.
+    vi.useFakeTimers()
+    act(() => socket.drop(1006))
+    await act(async () => vi.advanceTimersByTime(10_000))
+    vi.useRealTimers()
+    await act(async () => {})
+    const again = FakeSocket.last()
+    act(() => again.open())
+    act(() =>
+      again.emit(
+        sixFrame('welcome', 2, 2, 2, ended, { table: sixInfo(AFTER_FOLDS) }),
+      ),
+    )
+    expect(rebuyButton()).toBeInTheDocument()
+    const retry = rebuyButton()!
+    fireEvent.click(retry)
+    fireEvent.click(retry)
+    expect(again.sent.map((m) => JSON.parse(m))).toEqual([{ t: 'rebuy' }])
+    // Topped up: nothing more to rebuy.
+    const topped = withStack(AFTER_FOLDS, 2, 2000)
+    act(() =>
+      again.emit(
+        sixFrame('welcome', 3, 2, 2, ended, { table: sixInfo(topped) }),
+      ),
+    )
+    expect(rebuyButton()).toBeNull()
+
+    // Between hands a stand frees the seat at once: one frame, whose
+    // welcome takes the seat away; a second would earn not_seated.
+    const stand = standButton()!
+    fireEvent.click(stand)
+    fireEvent.click(stand)
+    expect(again.sent.map((m) => JSON.parse(m))).toEqual([
+      { t: 'rebuy' },
+      { t: 'stand' },
+    ])
+    expect(standButton()).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+
+    // Answered: no seat. A table that deals nothing keeps the finished
+    // hand, so sitting down again in the same seat, with the same 2,000,
+    // comes back to the same hand and stack: a new seat, offered Stand up.
+    const gone = topped.filter((p) => p.seat !== 2)
+    act(() =>
+      again.emit(
+        sixFrame('welcome', 4, null, null, null, { table: sixInfo(gone) }),
+      ),
+    )
+    expect(screen.queryByRole('group', { name: 'Your seat' })).toBeNull()
+    act(() =>
+      again.emit(
+        sixFrame('welcome', 5, 2, null, ended, { table: sixInfo(topped) }),
+      ),
+    )
+    expect(standButton()).toBeInTheDocument()
+  })
+
   it('no seat control shows while the socket reconnects or once the table has closed', async () => {
     render(<LiveTable matchId={MATCH} identity={alice} />)
     const socket = await opened()

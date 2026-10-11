@@ -122,12 +122,32 @@ export function SixTable({
   const mine =
     seat === null ? undefined : table.players.find((p) => p.seat === seat)
   const controls = state.status === 'open' && table.status !== 'finished'
+  // A Rebuy, or a Stand up between hands, sent and not yet answered. The
+  // answer is a welcome (the new stack; no seat) or an error, and the
+  // button stays away until then: a double press would send the frame
+  // twice, and the second one's refusal (not_below, not_seated) would
+  // flash just after the first worked. Keyed by the hand and our stack,
+  // which the answer changes. A dropped socket may have lost the frame,
+  // and a new seat has asked nothing, so either forgets it.
+  const [asked, setAsked] = useState<string | null>(null)
+  const askKey = `${handKey}:${mine?.stack}`
+  useEffect(() => setAsked(null), [state.status, seat])
   // The roster's stack is what the next hand deals us (after the last
   // hand, or a rebuy); the server decides, this only offers.
   const canRebuy =
-    controls && !playing && mine?.stack !== undefined && mine.stack < TOP_UP
+    controls &&
+    !playing &&
+    mine?.stack !== undefined &&
+    mine.stack < TOP_UP &&
+    asked !== `rebuy:${askKey}`
+  const canStand = controls && !!mine && !leaving && asked !== `stand:${askKey}`
+  const onRebuy = () => {
+    if (rebuy()) setAsked(`rebuy:${askKey}`)
+  }
   const onStand = () => {
-    if (stand() && playing) setStoodFrom(handKey)
+    if (!stand()) return
+    if (playing) setStoodFrom(handKey)
+    else setAsked(`stand:${askKey}`)
   }
   return (
     <div
@@ -182,9 +202,9 @@ export function SixTable({
       {seat !== null && (
         <SeatControls
           canRebuy={canRebuy}
-          canStand={controls && !!mine && !leaving}
+          canStand={canStand}
           leaving={leaving}
-          onRebuy={() => void rebuy()}
+          onRebuy={onRebuy}
           onStand={onStand}
         />
       )}
