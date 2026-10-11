@@ -288,13 +288,34 @@ test('the header is solid over a six-seat table on a phone, and keeps its blur o
     page
       .locator('.header')
       .evaluate((el) => getComputedStyle(el).backdropFilter)
-  // The trainer's table is drawn as before.
-  await page.goto('/')
-  await expect(page.getByRole('region', { name: 'Poker table' })).toBeVisible()
-  await expect.poll(blur).toBe('blur(14px)')
   // The six table scrolls under the header on a phone, where a blur would
   // be redrawn on every frame the chips fly beneath it (P2-06b).
   await page.goto(`/#play/${SIX_TABLE}`)
   await expect(page.getByText('6-max · Hand 1')).toBeVisible()
   await expect.poll(blur).toBe('none')
+  // Back to the trainer in the app, with no reload: the six table's
+  // stylesheet stays on the page, and the trainer's header keeps its blur.
+  await page
+    .getByRole('navigation', { name: 'Main' })
+    .getByRole('button', { name: 'Play' })
+    .click()
+  await expect(page.locator('.six-table')).toHaveCount(0)
+  await expect(page.getByRole('region', { name: 'Poker table' })).toBeVisible()
+  const liveSheet = () =>
+    page.evaluate(() =>
+      [...document.styleSheets].some((sheet) =>
+        [...sheet.cssRules].some((rule) =>
+          rule.cssText.startsWith('.six-ring {'),
+        ),
+      ),
+    )
+  expect(await liveSheet()).toBe(true)
+  await expect.poll(blur).toBe('blur(14px)')
+  // One pixel wider than the phone rule's 680 px, the six table keeps the
+  // blur like every other page.
+  await page.goto(`/#play/${SIX_TABLE}`)
+  await expect(page.getByText('6-max · Hand 1')).toBeVisible()
+  await expect.poll(blur).toBe('none')
+  await page.setViewportSize({ width: 681, height: 800 })
+  await expect.poll(blur).toBe('blur(14px)')
 })
