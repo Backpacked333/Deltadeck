@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test'
 import { act, isOver, legalActions, startHand } from '../src/engine/hand'
 import { seatView } from '../src/engine/redact'
-import { seededDeck } from '../src/engine/testing'
+import { deckWith, seededDeck } from '../src/engine/testing'
 import type {
   HandConfig,
   HandState,
@@ -81,7 +81,9 @@ const SIDE_POTS: [number, PlayerAction][] = [
  * changes, and a sit_in with no chips is refused. `away`: seats whose
  * players have dropped (PR-17), so their plates say Disconnected.
  * `sidePots`: play SIDE_POTS instead of `street`, to the river with a main
- * pot and two side pots (P2-06a).
+ * pot and two side pots (P2-06a). `split`: deal a royal flush on the board,
+ * which plays for everyone, so every pot is split between all who can win
+ * it and the result names each of them with their share.
  */
 export async function fakeSixTable(
   page: Page,
@@ -90,11 +92,13 @@ export async function fakeSixTable(
     hold = false,
     away = [],
     sidePots = false,
+    split = false,
   }: {
     street?: Street
     hold?: boolean
     away?: number[]
     sidePots?: boolean
+    split?: boolean
   } = {},
 ) {
   const config: HandConfig = {
@@ -130,7 +134,10 @@ export async function fakeSixTable(
           ],
     ),
   })
-  let hand: HandState = startHand(config, seededDeck(2026))
+  let hand: HandState = startHand(
+    config,
+    split ? deckWith(config, {}, 'As Ks Qs Js Ts') : seededDeck(2026),
+  )
   let seq = 0
   let lastReqId: string | null = null
   const passive = (state: HandState) =>

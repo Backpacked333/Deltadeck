@@ -182,6 +182,30 @@ test('a six-seat table with two side pots fits 320 px, in the hand and at its re
   await expectRingFits(page, { board, pots: paid })
 })
 
+test('a six-seat table fits 320 px when its side pots are split between the longest names', async ({
+  page,
+}) => {
+  await devSignIn(page, 'you_at_the_bottom')
+  // A royal flush on the board plays for everyone, so each pot is split
+  // between all who can win it: the "Pots paid" lines are the longest the
+  // middle gets, up to six names with a share each.
+  await fakeSixTable(page, { sidePots: true, split: true })
+  await page.setViewportSize({ width: 320, height: 640 })
+  await page.goto(`/#play/${SIX_TABLE}`)
+  const ring = page.getByRole('region', { name: 'Poker table' })
+  const board = ring.getByRole('group', { name: 'Community cards' })
+  await expect(board.getByRole('img', { name: / of / })).toHaveCount(5)
+  await page.getByRole('button', { name: /^(Call|Check)/ }).click()
+  const paid = ring.getByRole('list', { name: 'Pots paid' })
+  await expect(paid.getByRole('listitem')).toHaveText([
+    'Side pot 2 800 chips split: you 200, maximilian_okafor 200, seraphina_lindqvist 200, ozymandias_kings 200',
+    'Side pot 1 2,800 chips split: you 560, maximilian_okafor 560, seraphina_lindqvist 560, bartholomew_99 560, ozymandias_kings 560',
+    'Main pot 5,640 chips split: you 940, maximilian_okafor 940, seraphina_lindqvist 940, bartholomew_99 940, evangeline_marten 940, ozymandias_kings 940',
+  ])
+  await expectNoOverflow(page)
+  await expectRingFits(page, { board, pots: paid })
+})
+
 /**
  * The ring from 320 to 860 px. Phones get the grid and wider screens the
  * oval; what is in the middle (the board, and any pots) must clear every
