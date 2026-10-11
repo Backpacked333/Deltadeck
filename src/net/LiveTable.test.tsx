@@ -799,6 +799,71 @@ describe('LiveTable at a six-casual table', () => {
     expect(screen.queryByText('Leaving after this hand')).toBeNull()
   })
 
+  it('no seat control shows while the socket reconnects or once the table has closed', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    // Between hands, short of 100 bb: both controls, nothing to say.
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 1, 2, 2, foldedToCarol(), {
+          table: sixInfo(AFTER_FOLDS),
+        }),
+      ),
+    )
+    expect(rebuyButton()).toBeInTheDocument()
+    expect(standButton()).toBeInTheDocument()
+
+    // The socket drops: a press would send nothing, so neither shows.
+    vi.useFakeTimers()
+    act(() => socket.drop(1006))
+    expect(screen.getByText('Reconnecting…')).toBeInTheDocument()
+    expect(seatStatus()).toHaveTextContent(/^$/)
+    expect(rebuyButton()).toBeNull()
+    expect(standButton()).toBeNull()
+
+    // Back, at a table that has closed meanwhile: still neither.
+    await act(async () => vi.advanceTimersByTime(10_000))
+    vi.useRealTimers()
+    await act(async () => {})
+    const again = FakeSocket.last()
+    expect(again).not.toBe(socket)
+    act(() => again.open())
+    act(() =>
+      again.emit(
+        sixFrame('welcome', 2, 2, 2, foldedToCarol(), {
+          table: sixInfo(AFTER_FOLDS, 'finished'),
+        }),
+      ),
+    )
+    expect(screen.getByText('This table has closed.')).toBeInTheDocument()
+    expect(seatStatus()).toHaveTextContent(/^$/)
+    expect(rebuyButton()).toBeNull()
+    expect(standButton()).toBeNull()
+  })
+
+  it("the hand's end takes the seat controls from a player who stood, before the table frees her seat", async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, sixHand())))
+    await userEvent.click(standButton()!)
+    expect(seatStatus()).toHaveTextContent('Leaving after this hand')
+
+    // The hand ends. Its last state comes before the welcome that frees
+    // her seat (she still sees the hand she was dealt into), and its
+    // roster has already dropped her: there is nothing left to stand up
+    // from or leave after, and no stack to top up.
+    const left = AFTER_FOLDS.filter((p) => p.seat !== 2)
+    act(() =>
+      socket.emit(
+        sixFrame('state', 2, 2, 2, foldedToCarol(), { table: sixInfo(left) }),
+      ),
+    )
+    expect(screen.getByText('carol wins')).toBeInTheDocument()
+    expect(seatStatus()).toHaveTextContent(/^$/)
+    expect(standButton()).toBeNull()
+    expect(rebuyButton()).toBeNull()
+  })
+
   it('between hands the plates show the stacks the roster carries', async () => {
     render(<LiveTable matchId={MATCH} identity={alice} />)
     const socket = await opened()
@@ -947,6 +1012,9 @@ function playedOut(start: HandState) {
 /** The Rebuy and Stand up controls, when the table offers them. */
 const rebuyButton = () => screen.queryByRole('button', { name: /^Rebuy/ })
 const standButton = () => screen.queryByRole('button', { name: 'Stand up' })
+/** The live line under the viewer's own seat controls. */
+const seatStatus = () =>
+  within(screen.getByRole('group', { name: 'Your seat' })).getByRole('status')
 
 /** `roster` with `seat`'s stack replaced. */
 const withStack = (roster: typeof SIX_ROSTER, at: number, stack: number) =>
