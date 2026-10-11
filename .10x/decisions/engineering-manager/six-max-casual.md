@@ -670,6 +670,13 @@ The plan gave `rebuy` (here) and `stand` (PR-12) server messages but no control 
 
 - **Files:** new `src/net/TableList.tsx`; `Lobby.tsx:142-147`; `lobbyClient.ts:13-26,179-205`.
 - **Tests (red):** `TableList.test › lists tables with seats taken of 6 and Quick sit navigates to the table the lobby chose`.
+- **Decided before the code** (ADR, "Clarifications from PR-25"; a design panel of three and a judge, the design kept in the session scratchpad):
+  - the lobby socket is reopened on a retry, not kept open across the navigation; the quick-sit crosses pages as `LiveApp` state, set by the page that leaves, navigated by `LiveApp` after it commits, taken and cleared by the page that arrives; nothing in the URL or storage;
+  - the table page sends one bare `sit` per arrival, and moves on at `table_full`, `sit_cooldown`, `illegal`, a `finished` welcome or a 4404; 4409 goes to the named table; at most four lobby asks; the first table pushes a history entry and every later hop replaces it;
+  - a sit unanswered for 10 s is given up with one `resync` (the Worker can stay silent after a claim; answering there is a follow-up);
+  - the list is read-only: Seats, Average pot (bb), Players in the last hour; asked on open, every 15 s while visible, and on becoming visible; ten rows, then how many more;
+  - Quick sit and the Find buttons exclude each other in the UI;
+  - files: new `src/net/TableList.tsx`; `LiveApp.tsx`, `Lobby.tsx`, `LiveTable.tsx` (`useSitOnArrival`), `SixTable.tsx` (`taking`), `client.ts` and `useTable.ts` (bare `sit()`, `resync()`), `live.css`; no Worker, protocol or `lobbyClient` code change (the plan's `lobbyClient.ts` lines are not needed).
 
 ### Phase E
 
