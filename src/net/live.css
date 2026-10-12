@@ -172,13 +172,32 @@
   max-width: 980px;
   padding-top: 20px;
 }
+/* The match's facts as glass pills over the table. */
 .live-matchbar {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 18px;
+  gap: 8px;
   align-items: center;
   color: var(--text-2);
-  font-size: 14px;
+  font-size: 13px;
+}
+.live-matchbar > span:not(.sr-only, .live-signal) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 13px;
+  border-radius: 999px;
+  background: var(--glass);
+  border: 1px solid var(--glass-edge);
+  box-shadow: var(--glass-shine);
+  white-space: nowrap;
+}
+.live-matchbar .live-clock {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.live-matchbar .live-warn {
+  color: var(--warning);
 }
 .live-matchbar .player-avatar,
 .live-matchbar .school-crest {
@@ -1255,4 +1274,206 @@
 }
 .live-signal-poor {
   background: var(--negative);
+}
+
+/* ---- Six seats: card backs on the plate of each seat still in the hand */
+.six-plate {
+  overflow: visible;
+}
+.six-backs {
+  position: absolute;
+  right: -10px;
+  top: -16px;
+  display: flex;
+  pointer-events: none;
+}
+.six-backs i {
+  display: block;
+  width: 26px;
+  height: 36px;
+  overflow: hidden;
+  border-radius: 3px;
+  box-shadow: 0 6px 12px rgb(0 0 0 / 0.35);
+}
+.six-backs i:first-child {
+  transform: rotate(-8deg);
+}
+.six-backs i:last-child {
+  transform: rotate(10deg) translateX(-12px);
+}
+
+/* ---- The six table full bleed (wide screens): the seats round a large
+   oval, the viewer's plate at the bottom left and their cards held up in
+   the middle, and the action dock lying on the felt at the bottom right.
+   Phones keep the grid above. */
+@media (min-width: 900px) {
+  .live-page-table:has(.six-table) {
+    max-width: 1480px;
+  }
+  .six-table {
+    position: relative;
+  }
+  .six-ring {
+    display: block;
+    height: clamp(660px, 80vh, 840px);
+    padding: 0;
+    border-radius: 32px;
+  }
+  .six-ring > .scene {
+    inset: 110px 13% 170px;
+  }
+  .six-seat {
+    position: absolute;
+    width: 270px;
+    transform: translate(-50%, -50%);
+    z-index: 2;
+  }
+  .six-seat[data-slot='3'] {
+    left: 50%;
+    top: 12%;
+  }
+  .six-seat[data-slot='2'] {
+    left: 21%;
+    top: 26%;
+  }
+  .six-seat[data-slot='4'] {
+    left: 79%;
+    top: 26%;
+  }
+  .six-seat[data-slot='1'] {
+    left: 14%;
+    top: 61%;
+  }
+  .six-seat[data-slot='5'] {
+    left: 86%;
+    top: 61%;
+  }
+  .six-seat[data-slot='0'] {
+    left: 17%;
+    top: 89%;
+    width: 330px;
+  }
+  .six-plate {
+    min-height: 70px;
+  }
+  .six-face {
+    width: 58px;
+    height: 58px;
+  }
+  .six-face .player-avatar,
+  .six-initial {
+    width: 48px;
+    height: 48px;
+  }
+  /* The middle covers the ring; its parts sit where the felt has room. */
+  .six-mid {
+    position: absolute;
+    inset: 0;
+    display: block;
+    pointer-events: none;
+    --card-sm-w: 64px;
+    --card-md-w: 92px;
+    --card-lg-w: 150px;
+  }
+  .six-mid > * {
+    pointer-events: auto;
+  }
+  .six-pot {
+    position: absolute;
+    left: 50%;
+    top: 29%;
+    transform: translateX(-50%);
+  }
+  .six-pots {
+    position: absolute;
+    left: 50%;
+    top: 35%;
+    width: 60%;
+    transform: translateX(-50%);
+  }
+  .six-board {
+    position: absolute;
+    left: 50%;
+    top: 46%;
+    gap: 12px;
+    transform: translate(-50%, -50%);
+  }
+  .six-hole {
+    position: absolute;
+    left: 47%;
+    bottom: 22px;
+    gap: 0;
+    transform: translateX(-50%);
+    filter: drop-shadow(0 30px 40px rgb(0 0 0 / 0.6));
+    --card-md-w: 150px;
+  }
+  .six-hole .pcard:first-child {
+    transform: rotate(-7deg) translateY(6px);
+  }
+  .six-hole .pcard:last-child {
+    transform: rotate(6deg) translateX(-30px);
+  }
+  /* The dock lies on the felt, without a card of its own. */
+  .six-dock {
+    position: absolute;
+    right: 28px;
+    bottom: 26px;
+    z-index: 4;
+    width: min(500px, 35%);
+  }
+  .six-dock .action-bar,
+  .six-dock .six-wait {
+    padding: 0;
+    background: none;
+    border: 0;
+    box-shadow: none;
+  }
+}
+
+/* ---- The heads-up live table full bleed (wide screens), as the six table:
+   a tall stage, your cards held up, the dock on the felt. */
+@media (min-width: 900px) {
+  .live-page-table:has(.live-felt) {
+    max-width: 1480px;
+  }
+  .live-felt {
+    position: relative;
+  }
+  .live-felt .stage {
+    --card-sm-w: 54px;
+    --card-md-w: 88px;
+    --card-lg-w: 148px;
+    height: clamp(620px, 76vh, 800px);
+  }
+  .live-felt .scene {
+    inset: 70px 12% 150px;
+  }
+  .live-felt .pot {
+    top: 30%;
+  }
+  .live-felt .board {
+    top: 39%;
+  }
+  .live-felt .seat-hero {
+    left: 45%;
+  }
+  .live-felt .seat-hero .seat-plate {
+    right: calc(100% + 12vw);
+  }
+  .live-felt .seat-hero .seat-hand {
+    left: auto;
+    right: calc(100% + 12vw);
+    bottom: 86px;
+  }
+  .live-felt > .action-bar {
+    position: absolute;
+    right: 28px;
+    bottom: 26px;
+    z-index: 5;
+    width: min(500px, 35%);
+    padding: 0;
+    background: none;
+    border: 0;
+    box-shadow: none;
+  }
 }

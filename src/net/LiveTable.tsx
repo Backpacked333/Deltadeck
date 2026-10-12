@@ -473,52 +473,56 @@ function LiveHand({
 
   return (
     <>
-      <Table
-        game={game}
-        style="balanced"
-        bubble={null}
-        paused={false}
-        yourTurn={yourTurn}
-        guidedStep={null}
-        showBubbles={false}
-        onTogglePause={noop}
-        onHistory={noop}
-        onSettings={noop}
-        onSkipGuided={noop}
-        runout={runout}
-        versus={{ opponent }}
-        clock={clock}
-      />
-      <ActionBar
-        game={game}
-        legal={legal}
-        yourTurn={yourTurn && !state.pending}
-        heroTurn={yourTurn}
-        paused={false}
-        raiseTo={raiseTo}
-        presets={presets}
-        math={{
-          revealed: false,
-          ready: false,
-          breakEven: legal.toCall / (game.pot + legal.toCall || 1),
-        }}
-        guess={{
-          show: false,
-          value: 0.5,
-          locked: null,
-          onChange: noop,
-          onLock: noop,
-          onSkip: noop,
-        }}
-        shortcuts={false}
-        onRaiseTo={(to) => setSizing({ id: decision, to })}
-        onAct={onAct}
-        onDeal={noop}
-        onReview={noop}
-        revealing={runout.revealing}
-        versus={{ opponent, next, rated: view.match.kind === 'hu-rated' }}
-        sending={sending}
-      />
+      {/* The table and its dock together: on wide screens the dock lies on
+          the felt (live.css). */}
+      <div className="live-felt">
+        <Table
+          game={game}
+          style="balanced"
+          bubble={null}
+          paused={false}
+          yourTurn={yourTurn}
+          guidedStep={null}
+          showBubbles={false}
+          onTogglePause={noop}
+          onHistory={noop}
+          onSettings={noop}
+          onSkipGuided={noop}
+          runout={runout}
+          versus={{ opponent }}
+          clock={clock}
+        />
+        <ActionBar
+          game={game}
+          legal={legal}
+          yourTurn={yourTurn && !state.pending}
+          heroTurn={yourTurn}
+          paused={false}
+          raiseTo={raiseTo}
+          presets={presets}
+          math={{
+            revealed: false,
+            ready: false,
+            breakEven: legal.toCall / (game.pot + legal.toCall || 1),
+          }}
+          guess={{
+            show: false,
+            value: 0.5,
+            locked: null,
+            onChange: noop,
+            onLock: noop,
+            onSkip: noop,
+          }}
+          shortcuts={false}
+          onRaiseTo={(to) => setSizing({ id: decision, to })}
+          onAct={onAct}
+          onDeal={noop}
+          onReview={noop}
+          revealing={runout.revealing}
+          versus={{ opponent, next, rated: view.match.kind === 'hu-rated' }}
+          sending={sending}
+        />
+      </div>
       {ended?.outcomeBySeat ? (
         <MatchEnd
           result={ended}

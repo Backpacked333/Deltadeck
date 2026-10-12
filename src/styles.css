@@ -59,6 +59,11 @@
   );
   --glass-edge: rgb(255 255 255 / 0.1);
   --glass-shine: inset 0 1px 0 rgb(255 255 255 / 0.12);
+  --card-sheen: radial-gradient(
+    120% 90% at 0% 0%,
+    rgb(150 120 255 / 0.07),
+    transparent 60%
+  );
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3);
   --shadow: 0 14px 40px rgb(0 0 0 / 0.4);
   --shadow-lg: 0 30px 70px rgb(0 0 0 / 0.5);
@@ -154,6 +159,11 @@
     );
     --glass-edge: rgb(255 255 255 / 0.9);
     --glass-shine: inset 0 1px 0 rgb(255 255 255 / 1);
+    --card-sheen: radial-gradient(
+      120% 90% at 0% 0%,
+      rgb(143 140 255 / 0.08),
+      transparent 60%
+    );
     --shadow-sm: 0 1px 2px rgb(40 30 90 / 0.06);
     --shadow: 0 14px 40px rgb(60 45 130 / 0.1);
     --shadow-lg: 0 30px 70px rgb(50 35 120 / 0.18);
@@ -212,6 +222,11 @@
   );
   --glass-edge: rgb(255 255 255 / 0.9);
   --glass-shine: inset 0 1px 0 rgb(255 255 255 / 1);
+  --card-sheen: radial-gradient(
+    120% 90% at 0% 0%,
+    rgb(143 140 255 / 0.08),
+    transparent 60%
+  );
   --shadow-sm: 0 1px 2px rgb(40 30 90 / 0.06);
   --shadow: 0 14px 40px rgb(60 45 130 / 0.1);
   --shadow-lg: 0 30px 70px rgb(50 35 120 / 0.18);
@@ -272,6 +287,11 @@
   );
   --glass-edge: rgb(255 255 255 / 0.9);
   --glass-shine: inset 0 1px 0 rgb(255 255 255 / 1);
+  --card-sheen: radial-gradient(
+    120% 90% at 0% 0%,
+    rgb(143 140 255 / 0.08),
+    transparent 60%
+  );
   --shadow-sm: 0 1px 2px rgb(40 30 90 / 0.06);
   --shadow: 0 14px 40px rgb(60 45 130 / 0.1);
   --shadow-lg: 0 30px 70px rgb(50 35 120 / 0.18);
@@ -5604,4 +5624,21 @@ html.resizing * {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+/* ---- Surfaces: every card and panel is a pane of the same glass ---- */
+.lab,
+.tile,
+.panel,
+.lesson-card,
+.widget,
+.modal,
+.tour-card,
+.live-card {
+  background: var(--card-sheen), var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--glass-shine), var(--shadow-sm);
+}
+.live-card {
+  border-radius: var(--radius-lg);
 }

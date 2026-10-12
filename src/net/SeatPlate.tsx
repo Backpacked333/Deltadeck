@@ -2,10 +2,12 @@
 // dealer button and blinds, the shot clock while they are to act, and
 // whether they sit out or have dropped. An empty seat offers "Sit here".
 // It takes no cards, so a plate can never show a hole card the viewer may
-// not see; cards stay with the live table.
+// not see; cards stay with the live table. A seat still in the hand shows
+// two card backs, drawn here, which say only that it holds cards.
 // Generic on purpose: Atlas's avatar is for Atlas only (P2-05). A player's
 // own picture and school crest show beside their name when they have them.
 import { WifiOff } from 'lucide-react'
+import { CardBack } from '../components/cards/CardArt'
 import type { SeatId } from '../engine/types'
 import { crestFor } from '../lib/crests'
 import type { SeatView } from '../shared/protocol'
@@ -36,6 +38,8 @@ export type PlateSeat = {
   left?: boolean
   /** Folded in the hand being played. */
   folded?: boolean
+  /** Dealt into the hand being played and still in it: two backs show. */
+  holding?: boolean
   /** Their picture's bucket path, and their verified school's domain. */
   avatar?: string
   school?: string
@@ -121,6 +125,17 @@ export function SeatPlate({
             </span>
           </span>
           <School school={player.school} />
+          {player.holding && !you && (
+            // Two backs, never a face: the plate never carries cards.
+            <span className="six-backs" aria-hidden="true">
+              <i>
+                <CardBack />
+              </i>
+              <i>
+                <CardBack />
+              </i>
+            </span>
+          )}
           <span className="six-stack">
             {chips(player.stack)}
             <span className="sr-only"> chips</span>
