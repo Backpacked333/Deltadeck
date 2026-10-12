@@ -1,4 +1,11 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MotionConfig } from 'motion/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -17,6 +24,7 @@ import {
   finishedHand,
   firstHand,
   frame,
+  inviteFrame,
   MATCH,
   SIX_ROSTER,
   sixFrame,
@@ -2284,6 +2292,520 @@ describe('Lobby', () => {
   it('shows why a table could not be opened', async () => {
     const fetcher = vi.fn(async () => new Response('', { status: 500 }))
     render(<Lobby identity={alice} fetcher={fetcher} />)
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Play a friend by link' }),
+    )
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Could not create a table',
+    )
+  })
+})
+
+// ---- Hosting an invite table --------------------------------------------------
+
+describe('LiveTable: hosting an invite table', () => {
+  const BOB = { id: '0123456789abcdef', username: 'bob', ageMs: 4_000 }
+  const CAROL = { id: 'fedcba9876543210', username: 'carol', ageMs: 1_000 }
+
+  async function waiting(seat: 0 | 1 = 0) {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    act(() =>
+      socket.emit({
+        t: 'welcome',
+        seq: 0,
+        matchId: MATCH,
+        seat,
+        serverNow: 0,
+        table: tableInfo(1, 'waiting'),
+        view: null,
+      }),
+    )
+    return socket
+  }
+  const invite = (
+    socket: FakeSocket,
+    seq: number,
+    rest: Parameters<typeof inviteFrame>[1] = {},
+  ) => act(() => socket.emit(inviteFrame(seq, rest)))
+  const sentFrames = (socket: FakeSocket) =>
+    socket.sent.map((m) => JSON.parse(m))
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, 'share')
+    Reflect.deleteProperty(document, 'visibilityState')
+    document.title = ''
+  })
+
+  it('keeps the waiting text, the invite link and its copy button as they were', async () => {
+    const socket = await waiting()
+    invite(socket, 1)
+    expect(screen.getByText('Waiting for your opponent')).toBeInTheDocument()
+    expect(screen.getByLabelText('Invite link')).toHaveValue(
+      `${window.location.origin}/#play/${MATCH}`,
+    )
+    expect(screen.getByRole('button', { name: 'Copy link' })).toBeVisible()
+  })
+
+  it('shows the code large as XXX-XXX and spells it out for a screen reader', async () => {
+    const socket = await waiting()
+    expect(screen.queryByText('Game code')).toBeNull() // no frame yet
+    invite(socket, 1, { code: 'ABC234' })
+    expect(screen.getByText('ABC-234')).toHaveClass('live-code-text')
+    expect(screen.getByText('A B C 2 3 4')).toHaveClass('sr-only')
+    expect(screen.getByRole('group', { name: 'Game code' })).toBeVisible()
+  })
+
+  it('copies the code and says so', async () => {
+    const user = userEvent.setup()
+    const socket = await waiting()
+    invite(socket, 1, { code: 'ABC234' })
+    const copy = vi.spyOn(navigator.clipboard, 'writeText')
+    await user.click(screen.getByRole('button', { name: 'Copy code' }))
+    expect(copy).toHaveBeenCalledWith('ABC-234')
+    expect(screen.getAllByText('Code copied').length).toBeGreaterThan(0)
+    // The name of the button is the same after: nothing to re-find.
+    expect(screen.getByRole('button', { name: 'Copy code' })).toBeVisible()
+  })
+
+  it('offers Share only where the device can share, with the code and its link', async () => {
+    const socket = await waiting()
+    invite(socket, 1, { code: 'ABC234' })
+    expect(navigator.share).toBeUndefined()
+    expect(screen.queryByRole('button', { name: 'Share' })).toBeNull()
+    cleanup()
+
+    const share = vi.fn(async () => {
+      throw new DOMException('dismissed', 'AbortError')
+    })
+    Object.defineProperty(navigator, 'share', {
+      configurable: true,
+      value: share,
+    })
+    const again = await waiting()
+    invite(again, 1, { code: 'ABC234' })
+    await userEvent.click(screen.getByRole('button', { name: 'Share' }))
+    expect(share).toHaveBeenCalledWith({
+      title: expect.any(String),
+      text: 'Code ABC-234',
+      url: `${window.location.origin}/#join/ABC234`,
+    })
+    // A dismissed sheet is not an error to show.
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('says the code is gone and the link still works', async () => {
+    const socket = await waiting()
+    invite(socket, 1, { code: null })
+    expect(
+      screen.getByText('Code expired, your link still works.'),
+    ).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Copy code' })).toBeNull()
+    expect(screen.getByLabelText('Invite link')).toBeVisible()
+  })
+
+  it('says who is listed, and shows an empty list of requests as an invitation', async () => {
+    const socket = await waiting()
+    invite(socket, 1, { listed: true })
+    expect(screen.getByText('Listed in open games.')).toBeVisible()
+    const region = screen.getByRole('region', { name: 'Join requests' })
+    expect(
+      within(region).getByText(
+        'No requests yet. Anyone with your code or link joins instantly.',
+      ),
+    ).toBeVisible()
+  })
+
+  it('lists each request by name with Accept and Decline', async () => {
+    const socket = await waiting()
+    invite(socket, 1, { requests: [BOB, CAROL] })
+    const region = screen.getByRole('region', { name: 'Join requests' })
+    const items = within(within(region).getByRole('list')).getAllByRole(
+      'listitem',
+    )
+    expect(items).toHaveLength(2)
+    expect(within(items[0]).getByText('bob wants to join')).toBeVisible()
+    expect(
+      within(items[0]).getByRole('button', { name: 'Accept bob' }),
+    ).toBeEnabled()
+    expect(
+      within(items[1]).getByRole('button', { name: 'Decline carol' }),
+    ).toBeEnabled()
+    expect(within(region).getByRole('list')).toHaveAttribute(
+      'aria-live',
+      'polite',
+    )
+  })
+
+  it('moves focus to the requests and says what was pressed, without renaming the buttons', async () => {
+    const socket = await waiting()
+    invite(socket, 1, { requests: [BOB, CAROL] })
+    const region = screen.getByRole('region', { name: 'Join requests' })
+    const before = within(region).getAllByRole('status')[0]
+    expect(before).toBeEmptyDOMElement()
+    await userEvent.click(screen.getByRole('button', { name: 'Accept bob' }))
+    expect(
+      within(region).getByRole('heading', { name: 'Join requests' }),
+    ).toHaveFocus()
+    expect(before).toHaveTextContent('Accepting bob…')
+    expect(screen.getByRole('button', { name: 'Accept bob' })).toBeDisabled()
+    invite(socket, 2, { reservedFor: 'bob' })
+    expect(within(region).getByText('bob is joining…')).toBeVisible()
+  })
+
+  it('tells a host who asked to be listed that the game is not, and that the code and link work', async () => {
+    window.sessionStorage.setItem(`qp-unlisted-${MATCH}`, '1')
+    try {
+      const socket = await waiting()
+      invite(socket, 1, { code: 'ABC234' })
+      expect(screen.getByText(/not listed in open games/)).toHaveTextContent(
+        'Your code and link still work',
+      )
+    } finally {
+      window.sessionStorage.clear()
+    }
+  })
+
+  it('says nothing of listing to a host who did not ask, or whose game is listed', async () => {
+    const socket = await waiting()
+    invite(socket, 1, { code: 'ABC234' })
+    expect(screen.queryByText(/not listed in open games/)).toBeNull()
+    window.sessionStorage.setItem(`qp-unlisted-${MATCH}`, '1')
+    try {
+      invite(socket, 2, { code: 'ABC234', listed: true })
+      expect(screen.queryByText(/not listed in open games/)).toBeNull()
+    } finally {
+      window.sessionStorage.clear()
+    }
+  })
+
+  it("shows another player's name as text, never as markup", async () => {
+    const socket = await waiting()
+    const sly = '<img src=x onerror=alert(1)>'
+    invite(socket, 1, { requests: [{ ...BOB, username: sly }] })
+    expect(document.querySelector('img')).toBeNull()
+    expect(screen.getByText(`${sly} wants to join`)).toBeVisible()
+  })
+
+  it('sends only the request id and the choice, and every row waits for the next frame', async () => {
+    const socket = await waiting()
+    invite(socket, 1, { requests: [BOB, CAROL] })
+    await userEvent.click(screen.getByRole('button', { name: 'Accept bob' }))
+    expect(sentFrames(socket)).toEqual([
+      { t: 'join_answer', requestId: BOB.id, accept: true },
+    ])
+    // The word changes; the name of the button does not.
+    const accept = screen.getByRole('button', { name: 'Accept bob' })
+    expect(accept).toHaveTextContent('Accepting…')
+    for (const name of [
+      'Accept bob',
+      'Decline bob',
+      'Accept carol',
+      'Decline carol',
+    ])
+      expect(screen.getByRole('button', { name })).toBeDisabled()
+    // The table's frame (the seat is held for bob) ends the wait.
+    invite(socket, 2, { reservedFor: 'bob' })
+    expect(screen.getByText('bob is joining…')).toBeVisible()
+    expect(screen.queryByRole('button', { name: /^Accept/ })).toBeNull()
+  })
+
+  it('declines in the same way', async () => {
+    const socket = await waiting()
+    invite(socket, 1, { requests: [BOB, CAROL] })
+    await userEvent.click(screen.getByRole('button', { name: 'Decline carol' }))
+    expect(sentFrames(socket)).toEqual([
+      { t: 'join_answer', requestId: CAROL.id, accept: false },
+    ])
+    expect(
+      screen.getByRole('button', { name: 'Decline carol' }),
+    ).toHaveTextContent('Declining…')
+    invite(socket, 2, { requests: [BOB] })
+    expect(screen.queryByText('carol wants to join')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Accept bob' })).toBeEnabled()
+  })
+
+  it('does not answer while the socket is down', async () => {
+    const socket = await waiting()
+    invite(socket, 1, { requests: [BOB] })
+    act(() => socket.drop(1006))
+    // The invite belongs to the socket: gone with it, and so are the buttons.
+    expect(screen.queryByRole('button', { name: 'Accept bob' })).toBeNull()
+    expect(sentFrames(socket)).toEqual([])
+  })
+
+  it('drops a request the table must have lapsed (60 s), though no frame says so', async () => {
+    vi.useFakeTimers()
+    const socket = await waiting()
+    invite(socket, 1, { requests: [BOB] })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(55_000)
+    })
+    expect(screen.getByText('bob wants to join')).toBeVisible()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(screen.queryByText('bob wants to join')).toBeNull()
+  })
+
+  it('says who did not come when the seat is held and they do not arrive', async () => {
+    vi.useFakeTimers()
+    const socket = await waiting()
+    invite(socket, 1, { reservedFor: 'bob' })
+    expect(screen.getByText('bob is joining…')).toBeVisible()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(61_000)
+    })
+    expect(
+      screen.getByText("bob didn't arrive. Your game is open again."),
+    ).toBeVisible()
+    expect(screen.queryByText('bob is joining…')).toBeNull()
+  })
+
+  it('says it too when the table drops the reservation first', async () => {
+    const socket = await waiting()
+    invite(socket, 1, { reservedFor: 'bob' })
+    invite(socket, 2, { requests: [CAROL] })
+    expect(
+      screen.getByText("bob didn't arrive. Your game is open again."),
+    ).toBeVisible()
+    expect(screen.getByText('carol wants to join')).toBeVisible()
+  })
+
+  it('marks the tab title when a request arrives out of sight, and clears it when seen', async () => {
+    const hidden = (state: 'hidden' | 'visible') => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => state,
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    }
+    document.title = 'DeltaDeck'
+    const socket = await waiting()
+    invite(socket, 1)
+    act(() => hidden('hidden'))
+    const vibrate = vi.fn()
+    Object.defineProperty(navigator, 'vibrate', {
+      configurable: true,
+      value: vibrate,
+    })
+    invite(socket, 2, { requests: [BOB] })
+    expect(document.title).toBe('(1) DeltaDeck')
+    expect(vibrate).toHaveBeenCalledWith(30)
+    // The same request again is not news.
+    invite(socket, 3, { requests: [BOB] })
+    expect(vibrate).toHaveBeenCalledTimes(1)
+    act(() => hidden('visible'))
+    expect(document.title).toBe('DeltaDeck')
+    Reflect.deleteProperty(navigator, 'vibrate')
+  })
+
+  it('leaves a request that arrives in sight silent', async () => {
+    document.title = 'DeltaDeck'
+    const socket = await waiting()
+    invite(socket, 1, { requests: [BOB] })
+    expect(document.title).toBe('DeltaDeck')
+  })
+
+  it('shows the guest at seat 1 no code and no requests', async () => {
+    const socket = await waiting(1)
+    invite(socket, 1, { requests: [BOB] }) // not sent to a guest; ignored if it were
+    expect(screen.queryByText('Game code')).toBeNull()
+    expect(screen.queryByRole('region', { name: 'Join requests' })).toBeNull()
+    expect(screen.getByText('The first hand deals in a moment.')).toBeVisible()
+  })
+
+  it('does not replace the table: the hand renders from the snapshot, the invite aside', async () => {
+    const socket = await waiting()
+    invite(socket, 1, { requests: [BOB] })
+    act(() => socket.emit(frame('state', 2, 0, firstHand())))
+    expect(screen.getByText('Hand 1 of 20')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Join requests' })).toBeNull()
+  })
+})
+
+// ---- A move being sent ----------------------------------------------------------
+
+describe('LiveTable: a move being sent', () => {
+  async function inHand() {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    const hand = firstHand()
+    act(() => socket.emit(frame('welcome', 1, 0, hand)))
+    return { socket, hand }
+  }
+  const bar = () => document.querySelector('.action-bar')!
+
+  it('shows Sending at once, keeps the buttons and their names, and ends with the answer', async () => {
+    const { socket, hand } = await inHand()
+    expect(bar()).not.toHaveClass('is-sending')
+    expect(screen.getByText('Your move')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /^Call 10/ }))
+    expect(bar()).toHaveClass('is-sending')
+    expect(bar()).toHaveAttribute('aria-busy', 'true')
+    expect(screen.getByText('Sending Call 10…')).toBeInTheDocument()
+    expect(screen.queryByText('Your move')).toBeNull()
+    expect(screen.queryByText('bob to act')).toBeNull()
+    // Same buttons, same names, none can be pressed again.
+    for (const name of [/^Call 10/, /^Fold/, /^Raise to/])
+      expect(screen.getByRole('button', { name })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /^Call 10/ })).toHaveClass(
+      'act-sent',
+    )
+    const reqId = JSON.parse(socket.sent[0]).reqId as string
+    act(() =>
+      socket.emit(
+        frame('state', 2, 0, engineAct(hand, 0, { type: 'call' }), reqId),
+      ),
+    )
+    expect(bar()).not.toHaveClass('is-sending')
+    expect(bar()).not.toHaveAttribute('aria-busy')
+    expect(screen.queryByText(/Sending/)).toBeNull()
+    expect(screen.getByText('bob to act')).toBeInTheDocument()
+  })
+
+  it('says what was sent for a fold and a raise', async () => {
+    const { socket } = await inHand()
+    await userEvent.click(screen.getByRole('button', { name: /^Fold/ }))
+    expect(screen.getByText('Sending Fold…')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Fold/ })).toHaveClass(
+      'act-sent',
+    )
+    expect(JSON.parse(socket.sent[0]).action).toEqual({ type: 'fold' })
+  })
+
+  it('names a raise by its size', async () => {
+    await inHand()
+    const raise = screen.getByRole('button', { name: /^Raise to/ })
+    const size = raise.textContent!.match(/Raise to ([\d,]+)/)![1]
+    await userEvent.click(raise)
+    expect(screen.getByText(`Sending Raise to ${size}…`)).toBeInTheDocument()
+  })
+
+  it('goes when the server refuses the move, and the buttons are back', async () => {
+    const { socket } = await inHand()
+    await userEvent.click(screen.getByRole('button', { name: /^Call 10/ }))
+    const reqId = JSON.parse(socket.sent[0]).reqId as string
+    act(() =>
+      socket.emit({
+        t: 'error',
+        seq: 2,
+        matchId: MATCH,
+        code: 'illegal',
+        reqId,
+        message: 'Not your turn',
+      }),
+    )
+    expect(screen.queryByText(/Sending/)).toBeNull()
+    expect(screen.getByText('Your move')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Call 10/ })).toBeEnabled()
+  })
+})
+
+// ---- The signal dot -----------------------------------------------------------
+
+describe('LiveTable: the signal dot', () => {
+  it.each([
+    [30, 'good'],
+    [120, 'fair'],
+    [300, 'poor'],
+  ] as const)(
+    'shows a %i ms round trip as %s, with the figure',
+    async (ms, level) => {
+      vi.useFakeTimers()
+      render(<LiveTable matchId={MATCH} identity={alice} />)
+      const socket = await opened()
+      socket.answerPings = false
+      act(() => socket.emit(frame('welcome', 1, 0, firstHand())))
+      expect(screen.queryByRole('img', { name: /^Connection/ })).toBeNull()
+      // To the ping itself (spread by up to 10%), then ms of travel.
+      await act(async () => {
+        while (!socket.pings.length) await vi.advanceTimersToNextTimerAsync()
+        await vi.advanceTimersByTimeAsync(ms)
+      })
+      act(() => socket.pong())
+      const dot = screen.getByRole('img', { name: `Connection ${ms} ms` })
+      expect(dot).toHaveClass(`live-signal-${level}`)
+      expect(dot).toHaveAttribute('title', `${ms} ms`)
+    },
+  )
+
+  it('keeps showing the dot as pings go by', async () => {
+    vi.useFakeTimers()
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    act(() => socket.emit(frame('welcome', 1, 0, firstHand())))
+    expect(screen.queryByRole('img', { name: /^Connection/ })).toBeNull()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6_000)
+    })
+    // Pongs come back at once: a dot, and a connection that stays open.
+    expect(screen.getByRole('img', { name: /^Connection/ })).toBeVisible()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000)
+    })
+    expect(screen.getByRole('img', { name: /^Connection/ })).toBeVisible()
+    expect(screen.queryByText('Reconnecting…')).toBeNull()
+  })
+})
+
+describe('Lobby: Show in open games', () => {
+  const made = () =>
+    vi.fn(async () =>
+      Response.json(
+        { matchId: MATCH, code: 'ABC234', listed: true },
+        { status: 201 },
+      ),
+    )
+
+  it('is off to begin with, and the open games card is on the page', () => {
+    render(<Lobby identity={alice} fetcher={made()} />)
+    expect(
+      screen.getByRole('checkbox', { name: 'Show in open games' }),
+    ).not.toBeChecked()
+    expect(screen.getByRole('heading', { name: 'Open games' })).toBeVisible()
+    expect(screen.getByRole('textbox', { name: 'Game code' })).toBeVisible()
+  })
+
+  it('opens the table unlisted, with the request it always sent, when not ticked', async () => {
+    const fetcher = made()
+    render(<Lobby identity={alice} fetcher={fetcher} />)
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Play a friend by link' }),
+    )
+    expect(fetcher).toHaveBeenCalledWith('/api/matches', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer dev.alice.t' },
+    })
+    expect(window.location.hash).toBe(`#play/${MATCH}`)
+  })
+
+  it('asks for a listed game when ticked, and goes to the table', async () => {
+    const fetcher = made()
+    render(<Lobby identity={alice} fetcher={fetcher} />)
+    await userEvent.click(
+      screen.getByRole('checkbox', { name: 'Show in open games' }),
+    )
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Play a friend by link' }),
+    )
+    expect(fetcher).toHaveBeenCalledWith('/api/matches', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer dev.alice.t',
+        'Content-Type': 'application/json',
+      },
+      body: '{"listed":true}',
+    })
+    expect(window.location.hash).toBe(`#play/${MATCH}`)
+  })
+
+  it('shows why a listed game could not be opened', async () => {
+    const fetcher = vi.fn(async () => new Response('', { status: 503 }))
+    render(<Lobby identity={alice} fetcher={fetcher} />)
+    await userEvent.click(
+      screen.getByRole('checkbox', { name: 'Show in open games' }),
+    )
     await userEvent.click(
       screen.getByRole('button', { name: 'Play a friend by link' }),
     )

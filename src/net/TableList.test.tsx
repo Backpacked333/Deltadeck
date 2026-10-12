@@ -23,7 +23,11 @@ const T3 = '2d9e6c74-8b2a-4f9d-9d77-5e3b4c1a0f23'
 const T4 = '3e0f7d85-9c3b-4a0e-8e88-6f4c5d2b1a34'
 const M = '33333333-3333-4333-8333-333333333333'
 
-const sent = (s: FakeSocket) => s.sent.map((m) => JSON.parse(m))
+// What the page sent, less the open games' poll (GameList asks on its own
+// schedule, with its own tests in GameList.test.tsx): these tests are about
+// the queue, the quick-sit and the six tables.
+const sent = (s: FakeSocket) =>
+  s.sent.map((m) => JSON.parse(m)).filter((m) => m.t !== 'games')
 const lobbyFrame = (msg: object) => ({ seq: 1, ...msg }) as never
 /**
  * Lets a navigation land: jsdom fires hashchange a task later, and runs a

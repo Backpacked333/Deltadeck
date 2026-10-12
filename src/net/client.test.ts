@@ -2,10 +2,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act as engineAct } from '../engine/hand'
 import { CLOSE_ABUSE, CLOSE_GONE, CLOSE_RATE_LIMITED } from '../shared/protocol'
 import type { HandRecordV1, ServerMsg } from '../shared/protocol'
-import { TableConnection } from './client'
-import { FakeSocket, firstHand, frame, MATCH, sixFrame } from './testing'
+import { ANSWER_WAIT_MS, readRequests, TableConnection } from './client'
+import { PING_EVERY_MS, PROBE_MS } from './heartbeat'
+import {
+  FakeSocket,
+  firstHand,
+  frame,
+  inviteFrame,
+  MATCH,
+  sixFrame,
+} from './testing'
+import { PENDING_WATCHDOG_MS, RESYNC_WAIT_MS } from './client'
 
 const flush = () => new Promise((r) => setTimeout(r, 0))
+
+/**
+ * Every connection a test starts, stopped after it: a started connection
+ * listens to the window (online, offline, visibility), and one left running
+ * would answer the next test's events.
+ */
+const started: TableConnection[] = []
 
 function connect(token: string | null = 'jwt', maxAttempts = 8) {
   const getToken = vi.fn(async () => token)
@@ -17,13 +33,17 @@ function connect(token: string | null = 'jwt', maxAttempts = 8) {
     newRequestId: () => `req${++n}`,
   })
   connection.start()
+  started.push(connection)
   return { connection, getToken }
 }
 
 beforeEach(() => {
   FakeSocket.all = []
 })
-afterEach(() => vi.useRealTimers())
+afterEach(() => {
+  for (const connection of started.splice(0)) connection.stop()
+  vi.useRealTimers()
+})
 
 describe('TableConnection', () => {
   it('opens the table socket with the protocol and token as subprotocols', async () => {
@@ -350,6 +370,485 @@ describe('TableConnection', () => {
     expect(connection.getState().ended).toEqual({
       netBySeat: { 0: 120, 1: -120 },
       reason: 'complete',
+    })
+  })
+})
+
+// ---- The link: heartbeat, round trips, and a move that gets no answer -------
+
+/** A welcome stamped with the server's `serverNow`. */
+const welcomeAt = (serverNow: number) =>
+  ({
+    ...frame('welcome', 1, 0, firstHand()),
+    serverNow,
+  }) as Extract<ServerMsg, { t: 'welcome' }>
+
+describe('TableConnection: the link', () => {
+  let clock = 0
+  function link(heartbeatMs = PING_EVERY_MS) {
+    const connection = new TableConnection(MATCH, async () => 'jwt', {
+      origin: 'wss://qp.test',
+      WebSocketImpl: FakeSocket as unknown as typeof WebSocket,
+      newRequestId: () => 'req1',
+      heartbeatMs,
+      now: () => clock,
+      random: () => 0.5,
+    })
+    connection.start()
+    started.push(connection)
+    return connection
+  }
+  /** Opens the first socket of a fresh connection, with fake timers on. */
+  async function opened(heartbeatMs = PING_EVERY_MS) {
+    vi.useFakeTimers()
+    clock = 0
+    const connection = link(heartbeatMs)
+    await vi.advanceTimersByTimeAsync(0)
+    const socket = FakeSocket.last()
+    socket.open()
+    return { connection, socket }
+  }
+  const settle = () => vi.advanceTimersByTimeAsync(0)
+  const emitHidden = (visibilityState: 'visible' | 'hidden') => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => visibilityState,
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+  }
+  afterEach(() => {
+    Reflect.deleteProperty(document, 'visibilityState')
+  })
+
+  it('sends the literal text ping every interval while open, and not before', async () => {
+    vi.useFakeTimers()
+    const connection = link()
+    await settle()
+    const socket = FakeSocket.last()
+    await vi.advanceTimersByTimeAsync(PING_EVERY_MS * 3)
+    expect(socket.pings).toEqual([]) // connecting: nothing to ping yet
+    socket.open()
+    await vi.advanceTimersByTimeAsync(PING_EVERY_MS - 1)
+    expect(socket.pings).toEqual([])
+    await vi.advanceTimersByTimeAsync(1)
+    expect(socket.pings).toEqual(['ping'])
+    await vi.advanceTimersByTimeAsync(PING_EVERY_MS)
+    expect(socket.pings).toHaveLength(2)
+    // Pings are not frames of the protocol: nothing JSON went out.
+    expect(socket.sent).toEqual([])
+    connection.stop()
+  })
+
+  it('does not ping at all by default', async () => {
+    const { connection, socket } = await opened(0)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(socket.pings).toEqual([])
+    expect(connection.getState().status).toBe('open')
+  })
+
+  it('takes the pong before parsing it, and it changes nothing', async () => {
+    const { connection, socket } = await opened()
+    const before = connection.getState()
+    const parse = vi.spyOn(JSON, 'parse')
+    socket.emitRaw('pong')
+    expect(parse).not.toHaveBeenCalled()
+    parse.mockRestore()
+    expect(connection.getState()).toBe(before)
+  })
+
+  it('measures the round trip of each ping, as the median of the last five', async () => {
+    const { connection, socket } = await opened()
+    socket.answerPings = false
+    const roundTrip = async (ms: number) => {
+      await vi.advanceTimersByTimeAsync(PING_EVERY_MS)
+      clock += ms
+      socket.pong()
+    }
+    expect(connection.rtt.getSnapshot()).toBeNull()
+    for (const ms of [300, 20, 40, 60, 80]) await roundTrip(ms)
+    expect(connection.rtt.median()).toBe(60)
+    expect(connection.rtt.getSnapshot()).toBe(60)
+    await roundTrip(100) // 300 falls out: 20 40 60 80 100
+    expect(connection.rtt.median()).toBe(60)
+  })
+
+  it("does not tell the table's subscribers about a ping or its reply", async () => {
+    const { connection, socket } = await opened()
+    const listener = vi.fn()
+    connection.subscribe(listener)
+    await vi.advanceTimersByTimeAsync(PING_EVERY_MS * 4)
+    expect(socket.pings.length).toBeGreaterThanOrEqual(3)
+    // The round trips went to their own store; the table's state is quiet.
+    expect(connection.rtt.getSnapshot()).not.toBeNull()
+    expect(listener).not.toHaveBeenCalled()
+  })
+
+  it('closes a socket that misses two pongs and reconnects as for any drop', async () => {
+    const { connection, socket } = await opened()
+    socket.answerPings = false
+    await vi.advanceTimersByTimeAsync(PING_EVERY_MS * 2)
+    expect(socket.closedWith).toBeNull()
+    await vi.advanceTimersByTimeAsync(PING_EVERY_MS)
+    expect(socket.closedWith).toBe(1000)
+    // At once, without waiting for a close that may never be reported.
+    expect(connection.getState().status).toBe('reconnecting')
+    await vi.advanceTimersByTimeAsync(499)
+    expect(FakeSocket.all).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(FakeSocket.all).toHaveLength(2)
+    const again = FakeSocket.last()
+    again.open()
+    expect(connection.getState().status).toBe('open')
+    await vi.advanceTimersByTimeAsync(PING_EVERY_MS)
+    expect(again.pings).toEqual(['ping'])
+    // The first socket's late close report is not a second drop.
+    socket.drop(1006)
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(FakeSocket.all).toHaveLength(2)
+    connection.stop()
+  })
+
+  it('says it is reconnecting the moment the browser goes offline, and acts on nothing meanwhile', async () => {
+    const { connection, socket } = await opened(0)
+    socket.emit(frame('welcome', 1, 0, firstHand()))
+    window.dispatchEvent(new Event('offline'))
+    expect(connection.getState().status).toBe('reconnecting')
+    expect(connection.act({ type: 'call' })).toBe(false)
+    expect(socket.sent).toEqual([])
+    connection.stop()
+  })
+
+  it('an offline blip that the socket survived is open again at its next frame', async () => {
+    const { connection, socket } = await opened(0)
+    socket.emit(frame('welcome', 1, 0, firstHand()))
+    window.dispatchEvent(new Event('offline'))
+    socket.emit(frame('state', 2, 0, firstHand()))
+    expect(connection.getState().status).toBe('open')
+    connection.stop()
+  })
+
+  it('an offline that no online follows is undone by the next pong', async () => {
+    const { connection, socket } = await opened()
+    socket.emit(frame('welcome', 1, 0, firstHand()))
+    window.dispatchEvent(new Event('offline'))
+    expect(connection.getState().status).toBe('reconnecting')
+    await vi.advanceTimersByTimeAsync(PING_EVERY_MS)
+    expect(connection.getState().status).toBe('open')
+    expect(connection.act({ type: 'call' })).toBe(true)
+    connection.stop()
+  })
+
+  it('a pong from a socket that was replaced does not reopen the new one', async () => {
+    const { connection, socket } = await opened(0)
+    socket.answerPings = false
+    window.dispatchEvent(new Event('offline'))
+    window.dispatchEvent(new Event('online'))
+    await settle()
+    expect(FakeSocket.all).toHaveLength(2)
+    expect(connection.getState().status).toBe('reconnecting')
+    socket.pong()
+    expect(connection.getState().status).toBe('reconnecting')
+    connection.stop()
+  })
+
+  it('starts the round-trip figure again when the network comes back', async () => {
+    const { connection, socket } = await opened()
+    await vi.advanceTimersByTimeAsync(PING_EVERY_MS)
+    expect(connection.rtt.getSnapshot()).not.toBeNull()
+    window.dispatchEvent(new Event('offline'))
+    window.dispatchEvent(new Event('online'))
+    await settle()
+    expect(socket.closedWith).not.toBeNull()
+    expect(connection.rtt.getSnapshot()).toBeNull()
+    connection.stop()
+  })
+
+  it('reconnects at once when the network comes back, with the patience renewed', async () => {
+    const { connection } = await opened(0)
+    FakeSocket.last().drop()
+    expect(connection.getState().status).toBe('reconnecting')
+    window.dispatchEvent(new Event('online'))
+    await settle()
+    expect(FakeSocket.all).toHaveLength(2) // before the 500 ms backoff
+    FakeSocket.last().open()
+    expect(connection.getState().status).toBe('open')
+    // The first socket's backoff timer is gone: no third socket.
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(FakeSocket.all).toHaveLength(2)
+    connection.stop()
+  })
+
+  it('offline then online: a new socket, and the old one is closed', async () => {
+    const { connection, socket } = await opened(0)
+    window.dispatchEvent(new Event('offline'))
+    window.dispatchEvent(new Event('online'))
+    await settle()
+    expect(socket.closedWith).toBe(1000)
+    expect(FakeSocket.all).toHaveLength(2)
+    connection.stop()
+  })
+
+  it('probes a visible tab at once and reconnects if nothing is heard in time', async () => {
+    const { connection, socket } = await opened()
+    socket.answerPings = false
+    emitHidden('hidden')
+    expect(socket.pings).toEqual([])
+    emitHidden('visible')
+    expect(socket.pings).toEqual(['ping'])
+    await vi.advanceTimersByTimeAsync(PROBE_MS - 1)
+    expect(socket.closedWith).toBeNull()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(socket.closedWith).toBe(1000)
+    expect(connection.getState().status).toBe('reconnecting')
+    connection.stop()
+  })
+
+  it('keeps a visible tab whose socket answers the probe', async () => {
+    const { connection, socket } = await opened() // answers pings
+    emitHidden('visible')
+    await vi.advanceTimersByTimeAsync(PROBE_MS + 1)
+    expect(socket.closedWith).toBeNull()
+    expect(connection.getState().status).toBe('open')
+    connection.stop()
+  })
+
+  it('stops listening to the window and clears every timer on stop', async () => {
+    const { connection, socket } = await opened()
+    socket.answerPings = false
+    connection.act({ type: 'call' }) // no hand: nothing sent, nothing pending
+    socket.emit(frame('welcome', 1, 0, firstHand()))
+    expect(connection.act({ type: 'call' })).toBe(true) // watchdog armed
+    emitHidden('visible') // a probe armed
+    expect(vi.getTimerCount()).toBeGreaterThan(1)
+    connection.stop()
+    expect(vi.getTimerCount()).toBe(0)
+    window.dispatchEvent(new Event('online'))
+    window.dispatchEvent(new Event('offline'))
+    emitHidden('visible')
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(FakeSocket.all).toHaveLength(1)
+    expect(connection.getState().status).toBe('open')
+  })
+
+  describe('a move that gets no answer', () => {
+    it('asks for the truth after 3 s, then closes a socket that says nothing more', async () => {
+      const { connection, socket } = await opened(0)
+      socket.emit(frame('welcome', 1, 0, firstHand()))
+      expect(connection.act({ type: 'call' })).toBe(true)
+      await vi.advanceTimersByTimeAsync(PENDING_WATCHDOG_MS - 1)
+      expect(socket.sent).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(socket.sent.map((m) => JSON.parse(m).t)).toEqual(['act', 'resync'])
+      expect(socket.closedWith).toBeNull()
+      await vi.advanceTimersByTimeAsync(RESYNC_WAIT_MS)
+      expect(socket.closedWith).toBe(1000)
+      expect(connection.getState()).toMatchObject({
+        status: 'reconnecting',
+        pending: null,
+      })
+      // The move is never sent again, by the watchdog or the reconnect.
+      await vi.advanceTimersByTimeAsync(500)
+      FakeSocket.last().open()
+      expect(
+        FakeSocket.all.flatMap((s) => s.sent).filter((m) => /"act"/.test(m)),
+      ).toHaveLength(1)
+      connection.stop()
+    })
+
+    it('does not close a socket whose welcome answered the resync', async () => {
+      const { connection, socket } = await opened(0)
+      socket.emit(frame('welcome', 1, 0, firstHand()))
+      connection.act({ type: 'call' })
+      await vi.advanceTimersByTimeAsync(PENDING_WATCHDOG_MS)
+      socket.emit(frame('welcome', 2, 0, firstHand()))
+      expect(connection.getState().pending).toBeNull()
+      await vi.advanceTimersByTimeAsync(RESYNC_WAIT_MS * 2)
+      expect(socket.closedWith).toBeNull()
+      expect(vi.getTimerCount()).toBe(0)
+      connection.stop()
+    })
+
+    it('says nothing when the move is acknowledged in time', async () => {
+      const { connection, socket } = await opened(0)
+      const hand = firstHand()
+      socket.emit(frame('welcome', 1, 0, hand))
+      connection.act({ type: 'call' })
+      await vi.advanceTimersByTimeAsync(PENDING_WATCHDOG_MS - 1)
+      socket.emit(
+        frame('state', 2, 0, engineAct(hand, 0, { type: 'call' }), 'req1'),
+      )
+      expect(vi.getTimerCount()).toBe(0)
+      await vi.advanceTimersByTimeAsync(PENDING_WATCHDOG_MS * 3)
+      expect(socket.sent).toHaveLength(1)
+      expect(socket.closedWith).toBeNull()
+      connection.stop()
+    })
+
+    it('counts the heartbeat as the link, not as the table answering', async () => {
+      const { connection, socket } = await opened() // pongs arrive
+      socket.emit(frame('welcome', 1, 0, firstHand()))
+      connection.act({ type: 'call' })
+      await vi.advanceTimersByTimeAsync(PENDING_WATCHDOG_MS + RESYNC_WAIT_MS)
+      // Pongs came back, yet the table said nothing to the resync.
+      expect(socket.closedWith).toBe(1000)
+      connection.stop()
+    })
+  })
+
+  describe('the clock', () => {
+    it('is the raw difference before a ping has measured the link', async () => {
+      const { connection, socket } = await opened(0)
+      vi.setSystemTime(1_000)
+      socket.emit(welcomeAt(5_000))
+      expect(connection.getState().clockOffset).toBe(4_000)
+      connection.stop()
+    })
+
+    it('adds half the median round trip once there is one', async () => {
+      const { connection, socket } = await opened()
+      socket.answerPings = false
+      await vi.advanceTimersByTimeAsync(PING_EVERY_MS)
+      clock += 40
+      socket.pong()
+      vi.setSystemTime(1_000_000)
+      socket.emit(welcomeAt(5_000))
+      expect(connection.getState().clockOffset).toBe(5_000 + 20 - 1_000_000)
+      connection.stop()
+    })
+  })
+})
+
+// ---- The host's invite frame -------------------------------------------------
+
+describe('TableConnection: the host of an invite table', () => {
+  const REQ = '0123456789abcdef'
+  const asks = [
+    { id: REQ, username: 'bob', ageMs: 1500 },
+    { id: 'fedcba9876543210', username: 'carol', ageMs: 200 },
+  ]
+  async function host() {
+    const { connection } = connect()
+    await flush()
+    const socket = FakeSocket.last()
+    socket.open()
+    socket.emit(frame('welcome', 1, 0, null))
+    return { connection, socket }
+  }
+  afterEach(() => vi.useRealTimers())
+
+  it('keeps the invite apart from the table: a frame never replaces view or table', async () => {
+    const { connection, socket } = await host()
+    const before = connection.getState()
+    socket.emit(inviteFrame(2, { code: 'ABC234', requests: asks }))
+    const state = connection.getState()
+    expect(state.invite).toMatchObject({
+      code: 'ABC234',
+      listed: false,
+      requests: asks,
+      reservedFor: null,
+      answering: null,
+    })
+    expect(state.table).toBe(before.table)
+    expect(state.view).toBe(before.view)
+    expect(state.seat).toBe(0)
+    // The invite is a snapshot: a later one replaces it whole.
+    socket.emit(
+      inviteFrame(3, { code: null, listed: true, reservedFor: 'bob' }),
+    )
+    expect(connection.getState().invite).toMatchObject({
+      code: null,
+      listed: true,
+      requests: [],
+      reservedFor: 'bob',
+    })
+  })
+
+  it('dates a reservation from the first frame that names the account', async () => {
+    const { connection, socket } = await host()
+    vi.useFakeTimers()
+    vi.setSystemTime(10_000)
+    socket.emit(inviteFrame(2, { reservedFor: 'bob' }))
+    expect(connection.getState().invite?.reservedAt).toBe(10_000)
+    vi.setSystemTime(20_000)
+    socket.emit(inviteFrame(3, { reservedFor: 'bob' }))
+    expect(connection.getState().invite?.reservedAt).toBe(10_000)
+    socket.emit(inviteFrame(4, { reservedFor: 'carol' }))
+    expect(connection.getState().invite?.reservedAt).toBe(20_000)
+    socket.emit(inviteFrame(5))
+    expect(connection.getState().invite?.reservedAt).toBeNull()
+  })
+
+  it('rebuilds what it keeps by name and drops what is malformed', () => {
+    expect(
+      readRequests([
+        { id: REQ, username: 'bob', ageMs: 5, userId: 'u-1', matchId: 'm' },
+        { id: 'r1', username: 'bad id', ageMs: 5 },
+        { id: REQ, username: 7, ageMs: 5 },
+        { id: REQ, username: 'x'.repeat(100), ageMs: 5 },
+        { id: REQ, username: 'neg', ageMs: -1 },
+        null,
+        'bob',
+      ]),
+    ).toEqual([
+      { id: REQ, username: 'bob', ageMs: 5 },
+      { id: REQ, username: 'x'.repeat(40), ageMs: 5 },
+    ])
+    expect(readRequests('nope')).toEqual([])
+  })
+
+  it('sends an answer naming only the request, and waits for the next frame', async () => {
+    const { connection, socket } = await host()
+    socket.emit(inviteFrame(2, { requests: asks }))
+    expect(connection.answer(REQ, true)).toBe(true)
+    expect(socket.sent.map((m) => JSON.parse(m))).toEqual([
+      { t: 'join_answer', requestId: REQ, accept: true },
+    ])
+    expect(connection.getState().invite?.answering).toBe(REQ)
+    // One at a time, until the table's frame comes.
+    expect(connection.answer('fedcba9876543210', false)).toBe(false)
+    socket.emit(inviteFrame(3, { reservedFor: 'bob' }))
+    expect(connection.getState().invite?.answering).toBeNull()
+  })
+
+  it('answers only a request it was told of, on an open socket', async () => {
+    const { connection, socket } = await host()
+    expect(connection.answer(REQ, true)).toBe(false) // no invite yet
+    socket.emit(inviteFrame(2, { requests: asks }))
+    expect(connection.answer('0000000000000000', true)).toBe(false)
+    expect(socket.sent).toEqual([])
+  })
+
+  it('gives the buttons back if the frame that should confirm never comes', async () => {
+    const { connection, socket } = await host()
+    vi.useFakeTimers()
+    socket.emit(inviteFrame(2, { requests: asks }))
+    connection.answer(REQ, false)
+    await vi.advanceTimersByTimeAsync(ANSWER_WAIT_MS - 1)
+    expect(connection.getState().invite?.answering).toBe(REQ)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(connection.getState().invite?.answering).toBeNull()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('forgets the invite when the socket goes: the next welcome brings a fresh one', async () => {
+    const { connection, socket } = await host()
+    socket.emit(inviteFrame(2, { requests: asks }))
+    socket.drop(1006)
+    expect(connection.getState().invite).toBeNull()
+  })
+
+  it('tolerates an invite with a wrong shape', async () => {
+    const { connection, socket } = await host()
+    socket.emit({
+      ...inviteFrame(2),
+      code: 'abc',
+      requests: 'x',
+      reservedFor: 5,
+    } as never)
+    expect(connection.getState().invite).toMatchObject({
+      code: null,
+      requests: [],
+      reservedFor: null,
     })
   })
 })

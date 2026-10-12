@@ -114,7 +114,13 @@ export const toBase64 = (data: Uint8Array) =>
 export const fromBase64 = (text: string) =>
   Uint8Array.from(atob(text), (c) => c.charCodeAt(0))
 
-async function salts(secret: Uint8Array) {
+/**
+ * Every slot's salt under `secret`: 52 HMACs. A hand's end needs them for the
+ * commitment and for each opening, so it computes them once and passes them
+ * on (`commitDeck` and `revealSlots` take them as their last argument); the
+ * bytes are the same either way.
+ */
+export async function salts(secret: Uint8Array) {
   const key = await subtle().importKey(
     'raw',
     bytes(secret),
@@ -136,23 +142,34 @@ const leafOf = (salt: Uint8Array, card: number) =>
 
 export type RevealedSlot = { slot: number; card: number; salt: string }
 
-/** Commits to every slot of `deck` under a fresh per-hand secret. */
-export async function commitDeck(deck: number[], secret: Uint8Array) {
+/**
+ * Commits to every slot of `deck` under a fresh per-hand secret. `saltList`:
+ * `salts(secret)` if the caller has it already.
+ */
+export async function commitDeck(
+  deck: number[],
+  secret: Uint8Array,
+  saltList?: Uint8Array[],
+) {
   if (!isValidDeck(deck)) throw new Error('Commitment needs a full deck')
-  const saltList = await salts(secret)
+  saltList ??= await salts(secret)
   const leaves = concat(
     await Promise.all(deck.map((card, i) => leafOf(saltList[i], card))),
   )
   return { commitment: toHex(await sha256(leaves)), leaves }
 }
 
-/** The opening for chosen slots: their cards and salts. */
+/**
+ * The opening for chosen slots: their cards and salts. `saltList`:
+ * `salts(secret)` if the caller has it already.
+ */
 export async function revealSlots(
   deck: number[],
   secret: Uint8Array,
   slots: number[],
+  saltList?: Uint8Array[],
 ): Promise<RevealedSlot[]> {
-  const saltList = await salts(secret)
+  saltList ??= await salts(secret)
   return [...new Set(slots)]
     .sort((a, b) => a - b)
     .map((slot) => ({ slot, card: deck[slot], salt: toHex(saltList[slot]) }))

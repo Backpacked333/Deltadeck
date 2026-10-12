@@ -4,12 +4,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CLOSE_GONE, CLOSE_RATE_LIMITED } from '../shared/protocol'
 import type { Identity } from './api'
 import { Lobby } from './Lobby'
-import { LobbyConnection } from './lobbyClient'
+import { LobbyConnection, readGames } from './lobbyClient'
 import { LiveTable } from './LiveTable'
-import { FakeSocket, MATCH, tableInfo } from './testing'
+import {
+  FakeSocket,
+  gameId,
+  gameRow,
+  gamesFrame,
+  joinStatusFrame,
+  MATCH,
+  tableInfo,
+} from './testing'
 
 const flush = () => new Promise((r) => setTimeout(r, 0))
-const sent = (s: FakeSocket) => s.sent.map((m) => JSON.parse(m))
+// What the page sent, less the open games' poll (GameList asks on its own
+// schedule, with its own tests in GameList.test.tsx): these tests are about
+// the queue, the quick-sit and the six tables.
+const sent = (s: FakeSocket) =>
+  s.sent.map((m) => JSON.parse(m)).filter((m) => m.t !== 'games')
 const lobbyFrame = (msg: object) => ({ seq: 1, ...msg }) as never
 
 const alice: Identity = {
@@ -460,6 +472,58 @@ describe('Lobby: Play 1v1', () => {
     expect(window.location.hash).toBe(`#play/${MATCH}`)
   })
 
+  it('says nothing more when a listed game is listed, and notes it when it was not', async () => {
+    for (const listed of [true, false]) {
+      window.location.hash = '#lobby'
+      window.sessionStorage.clear()
+      const fetcher = vi.fn(async (url: string) =>
+        url.endsWith('/api/matches')
+          ? Response.json(
+              { matchId: MATCH, code: 'ABC234', listed },
+              { status: 201 },
+            )
+          : Response.json({ activeMatch: null }),
+      ) as unknown as typeof fetch
+      const view = render(<Lobby identity={alice} fetcher={fetcher} />)
+      await act(async () => {})
+      act(() => FakeSocket.last().open())
+      await userEvent.click(screen.getByLabelText('Show in open games'))
+      await userEvent.click(
+        screen.getByRole('button', { name: 'Play a friend by link' }),
+      )
+      await vi.waitFor(() =>
+        expect(window.location.hash).toBe(`#play/${MATCH}`),
+      )
+      expect(window.sessionStorage.getItem(`qp-unlisted-${MATCH}`)).toBe(
+        listed ? null : '1',
+      )
+      view.unmount()
+    }
+  })
+
+  it('does not note a game the host never asked to list', async () => {
+    window.sessionStorage.clear()
+    const fetcher = vi.fn(async (url: string) =>
+      url.endsWith('/api/matches')
+        ? Response.json(
+            { matchId: MATCH, code: 'ABC234', listed: false },
+            { status: 201 },
+          )
+        : Response.json({ activeMatch: null }),
+    ) as unknown as typeof fetch
+    await lobbyPage({ fetcher })
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Play a friend by link' }),
+    )
+    await vi.waitFor(() => expect(window.location.hash).toBe(`#play/${MATCH}`))
+    expect(window.sessionStorage.getItem(`qp-unlisted-${MATCH}`)).toBeNull()
+  })
+
+  it('words the help so that an unlisted game is expected', async () => {
+    await lobbyPage()
+    expect(screen.getByText(/or the game stays unlisted/)).toBeVisible()
+  })
+
   it('cancels', async () => {
     const socket = await lobbyPage()
     await userEvent.click(screen.getByRole('button', { name: 'Find a match' }))
@@ -627,5 +691,383 @@ describe('LiveApp routes', () => {
     ])
     expect(window.location.hash).toBe('#lobby')
     sessionStorage.removeItem('qp.devToken')
+  })
+})
+
+describe('LobbyConnection: open games', () => {
+  function connect(heartbeatMs = 0) {
+    const connection = new LobbyConnection(async () => 'jwt', {
+      origin: 'wss://qp.test',
+      WebSocketImpl: FakeSocket as unknown as typeof WebSocket,
+      heartbeatMs,
+      random: () => 0.5,
+    })
+    connection.start()
+    return connection
+  }
+  async function opened(heartbeatMs = 0) {
+    const connection = connect(heartbeatMs)
+    await flush()
+    const socket = FakeSocket.last()
+    socket.open()
+    return { connection, socket }
+  }
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('sends nothing as the socket opens: the list is asked for, never pushed', async () => {
+    const { socket } = await opened()
+    expect(socket.sent).toEqual([])
+  })
+
+  it('asks for the list only on an open socket, and keeps what comes back', async () => {
+    const connection = connect()
+    await flush()
+    const socket = FakeSocket.last()
+    connection.listGames()
+    expect(socket.sent).toEqual([])
+    socket.open()
+    connection.listGames()
+    expect(socket.sent).toEqual(['{"t":"games"}'])
+    expect(connection.getState().games).toBeNull()
+    socket.emitLobby(gamesFrame([gameRow(1), gameRow(2, 'dave', 61_000)]))
+    expect(connection.getState().games).toEqual([
+      { gameId: gameId(1), host: 'carol', openForMs: 180_000 },
+      { gameId: gameId(2), host: 'dave', openForMs: 61_000 },
+    ])
+    expect(connection.getState().gamesAt).not.toBeNull()
+  })
+
+  it('keeps only the rows it can use, rebuilt by name', () => {
+    const good = gameRow(1)
+    expect(
+      readGames([
+        { ...good, matchId: MATCH },
+        { ...good, code: 'ABC234' },
+        { ...good, gameId: gameId(10).toUpperCase() },
+        { ...good, gameId: 'short' },
+        { ...good, openForMs: -1 },
+        { ...good, openForMs: '5' },
+        { gameId: good.gameId, host: good.host },
+        { ...good, host: 'h'.repeat(100) },
+        null,
+        'row',
+      ]),
+    ).toEqual([{ ...good, host: 'h'.repeat(40) }])
+    expect(readGames({ games: [] })).toEqual([])
+    const many = Array.from({ length: 50 }, (_, n) => gameRow(n + 1))
+    expect(readGames(many)).toHaveLength(30)
+    expect(readGames(many)[29].gameId).toBe(gameId(30))
+  })
+
+  it('takes a matched frame from any state, including idle, and clears a request', async () => {
+    const { connection, socket } = await opened()
+    expect(connection.getState().looking).toBe(false)
+    connection.requestJoin(gameId(1))
+    socket.emitLobby({ t: 'matched', matchId: MATCH, resumed: false })
+    expect(connection.getState()).toMatchObject({
+      looking: false,
+      matched: { matchId: MATCH, resumed: false },
+      joinRequest: null,
+    })
+  })
+
+  describe('a join request', () => {
+    it('is sent at once, shows pending, and takes the host deadline from the lobby', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(1_000)
+      const connection = connect()
+      await vi.advanceTimersByTimeAsync(0)
+      const socket = FakeSocket.last()
+      expect(connection.requestJoin(gameId(1))).toBe(false) // not open yet
+      socket.open()
+      expect(connection.requestJoin(gameId(1))).toBe(true)
+      expect(sent(socket)).toEqual([{ t: 'join_request', gameId: gameId(1) }])
+      expect(connection.getState().joinRequest).toEqual({
+        gameId: gameId(1),
+        state: 'pending',
+        expiresAt: null,
+      })
+      socket.emitLobby(joinStatusFrame('pending', 60_000))
+      expect(connection.getState().joinRequest).toEqual({
+        gameId: gameId(1),
+        state: 'pending',
+        expiresAt: 61_000,
+      })
+    })
+
+    it('ends declined or unavailable, with nothing more expected', async () => {
+      const { connection, socket } = await opened()
+      connection.requestJoin(gameId(1))
+      socket.emitLobby(joinStatusFrame('declined'))
+      expect(connection.getState().joinRequest).toMatchObject({
+        state: 'declined',
+        expiresAt: null,
+      })
+      // A late frame with no request waiting changes nothing.
+      connection.cancelRequest()
+      socket.emitLobby(joinStatusFrame('unavailable'))
+      expect(connection.getState().joinRequest).toBeNull()
+      expect(connection.getState().codeFailed).toBe(false)
+    })
+
+    it('is withdrawn with a cancel, sent only while it is pending', async () => {
+      const { connection, socket } = await opened()
+      connection.requestJoin(gameId(1))
+      connection.cancelRequest()
+      expect(sent(socket).at(-1)).toEqual({ t: 'cancel_request' })
+      expect(connection.getState().joinRequest).toBeNull()
+      const before = socket.sent.length
+      connection.requestJoin(gameId(2))
+      socket.emitLobby(joinStatusFrame('declined'))
+      connection.cancelRequest() // nothing pending at the lobby to cancel
+      expect(socket.sent.length).toBe(before + 1)
+    })
+
+    it('ends a search, as the lobby does', async () => {
+      const { connection, socket } = await opened()
+      connection.find()
+      connection.requestJoin(gameId(1))
+      expect(sent(socket)).toEqual([
+        { t: 'queue', kind: 'hu-casual' },
+        { t: 'dequeue' },
+        { t: 'join_request', gameId: gameId(1) },
+      ])
+      expect(connection.getState()).toMatchObject({
+        looking: false,
+        queued: null,
+      })
+      connection.quickSit()
+      connection.requestJoin(gameId(1))
+      expect(connection.getState().seating).toBe(false)
+    })
+
+    it('says it was refused for asking too often, in the list and not as a banner', async () => {
+      const { connection, socket } = await opened()
+      connection.requestJoin(gameId(1))
+      socket.emitLobby({
+        t: 'error',
+        code: 'rate_limited',
+        message: 'Slow down',
+      } as never)
+      expect(connection.getState()).toMatchObject({
+        joinLimited: 'request',
+        joinRequest: null,
+        error: null,
+      })
+    })
+  })
+
+  describe('a game code', () => {
+    it('is cleaned, then sent as the code alone', async () => {
+      const { connection, socket } = await opened()
+      expect(connection.joinByCode(' abc-234 ')).toBe(true)
+      expect(sent(socket)).toEqual([{ t: 'join_code', code: 'ABC234' }])
+    })
+
+    it('fails on the spot for what can not be a code, as the lobby would for a miss', async () => {
+      const { connection, socket } = await opened()
+      for (const typed of ['', 'ABC', 'ABC0IL', 'a'.repeat(30)]) {
+        connection.joinByCode(typed)
+        expect(connection.getState().codeFailed).toBe(true)
+      }
+      expect(socket.sent).toEqual([])
+    })
+
+    it("fails on the lobby's unavailable, and tries again clean", async () => {
+      const { connection, socket } = await opened()
+      connection.joinByCode('ABC234')
+      socket.emitLobby(joinStatusFrame('unavailable'))
+      expect(connection.getState().codeFailed).toBe(true)
+      connection.joinByCode('ABC235')
+      expect(connection.getState().codeFailed).toBe(false)
+    })
+
+    it('goes to the table the lobby names', async () => {
+      const { connection, socket } = await opened()
+      connection.joinByCode('ABC234')
+      socket.emitLobby({ t: 'matched', matchId: MATCH, resumed: false })
+      expect(connection.getState().matched).toEqual({
+        matchId: MATCH,
+        resumed: false,
+      })
+      expect(connection.getState().codeFailed).toBe(false)
+    })
+
+    it('is refused for asking too often', async () => {
+      const { connection, socket } = await opened()
+      connection.joinByCode('ABC234')
+      socket.emitLobby({
+        t: 'error',
+        code: 'rate_limited',
+        message: 'Slow down',
+      } as never)
+      expect(connection.getState()).toMatchObject({
+        joinLimited: 'code',
+        error: null,
+      })
+    })
+
+    it('gives up a request in flight first, and ends a search', async () => {
+      const { connection, socket } = await opened()
+      connection.requestJoin(gameId(1))
+      connection.joinByCode('ABC234')
+      expect(sent(socket).map((m) => m.t)).toEqual([
+        'join_request',
+        'cancel_request',
+        'join_code',
+      ])
+      // The next join_status answers the code, not the request.
+      socket.emitLobby(joinStatusFrame('unavailable'))
+      expect(connection.getState()).toMatchObject({
+        codeFailed: true,
+        joinRequest: null,
+      })
+    })
+  })
+
+  it('forgets the list and any request when the socket drops, and asks nothing on reopening', async () => {
+    vi.useFakeTimers()
+    const connection = connect()
+    await vi.advanceTimersByTimeAsync(0)
+    const socket = FakeSocket.last()
+    socket.open()
+    socket.emitLobby(gamesFrame([gameRow(1)]))
+    connection.requestJoin(gameId(1))
+    connection.joinByCode('xxx')
+    socket.drop(1006)
+    expect(connection.getState()).toMatchObject({
+      status: 'reconnecting',
+      games: null,
+      gamesAt: null,
+      joinRequest: null,
+      codeFailed: false,
+    })
+    await vi.advanceTimersByTimeAsync(500)
+    FakeSocket.last().open()
+    expect(FakeSocket.last().sent).toEqual([])
+    expect(connection.getState().games).toBeNull()
+  })
+
+  describe('the heartbeat', () => {
+    it('pings the lobby socket too, and a pong is not a frame to parse', async () => {
+      vi.useFakeTimers()
+      const connection = connect(5000)
+      await vi.advanceTimersByTimeAsync(0)
+      const socket = FakeSocket.last()
+      socket.open()
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(socket.pings).toEqual(['ping'])
+      expect(socket.sent).toEqual([])
+      expect(connection.getState().status).toBe('open')
+      connection.stop()
+      expect(vi.getTimerCount()).toBe(0)
+    })
+
+    it('closes a lobby socket that stops answering and reconnects', async () => {
+      vi.useFakeTimers()
+      const connection = connect(5000)
+      await vi.advanceTimersByTimeAsync(0)
+      const socket = FakeSocket.last()
+      socket.open()
+      socket.answerPings = false
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(socket.closedWith).toBe(1000)
+      expect(connection.getState().status).toBe('reconnecting')
+      await vi.advanceTimersByTimeAsync(500)
+      expect(FakeSocket.all).toHaveLength(2)
+      connection.stop()
+    })
+  })
+})
+
+describe('LiveApp: #join/CODE', () => {
+  async function app(hash: string) {
+    const { default: LiveApp } = await import('./LiveApp')
+    sessionStorage.setItem('qp.devToken', 'dev.alice.t')
+    window.location.hash = hash
+    render(<LiveApp />)
+    await act(async () => {})
+  }
+  afterEach(() => sessionStorage.removeItem('qp.devToken'))
+
+  it('sends the cleaned code once the lobby is open, and goes to the table it names', async () => {
+    await app('#join/abc-234')
+    const socket = FakeSocket.last()
+    expect(socket.url).toContain('/ws/lobby')
+    expect(screen.getByText('Joining the game…')).toBeVisible()
+    act(() => socket.open())
+    expect(sent(socket)).toEqual([{ t: 'join_code', code: 'ABC234' }])
+    act(() =>
+      socket.emitLobby({ t: 'matched', matchId: MATCH, resumed: false }),
+    )
+    expect(window.location.hash).toBe(`#play/${MATCH}`)
+    await act(async () => {})
+    expect(FakeSocket.last().url).toContain('/ws/table/')
+  })
+
+  it('takes the code out of the address bar and gives one answer for a miss', async () => {
+    await app('#join/ABC234')
+    const socket = FakeSocket.last()
+    act(() => socket.open())
+    act(() => socket.emitLobby(joinStatusFrame('unavailable')))
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      "That code doesn't match an open game. Check it and try again.",
+    )
+    expect(screen.getByRole('link', { name: 'Back to lobby' })).toHaveAttribute(
+      'href',
+      '#lobby',
+    )
+    expect(window.location.hash).toBe('#join')
+  })
+
+  it('says to wait when the lobby has had too many tries', async () => {
+    await app('#join/ABC234')
+    const socket = FakeSocket.last()
+    act(() => socket.open())
+    act(() =>
+      socket.emitLobby({
+        t: 'error',
+        code: 'rate_limited',
+        message: 'Slow down',
+      } as never),
+    )
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Too many tries. Wait a few minutes.',
+    )
+    expect(window.location.hash).toBe('#join')
+  })
+
+  it('asks the lobby nothing for a code that cannot be one, and says the same', async () => {
+    await app('#join/ABC0IL')
+    expect(FakeSocket.all).toHaveLength(0)
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      "That code doesn't match an open game",
+    )
+    expect(window.location.hash).toBe('#join')
+  })
+
+  it('a spent link, reloaded, is the same answer and tries nothing', async () => {
+    await app('#join')
+    expect(FakeSocket.all).toHaveLength(0)
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      "That code doesn't match an open game",
+    )
+  })
+
+  it('tries again over a new socket if the first dropped before an answer', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    await app('#join/ABC234')
+    const socket = FakeSocket.last()
+    act(() => socket.open())
+    act(() => socket.drop(1006))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500)
+    })
+    const again = FakeSocket.last()
+    expect(again).not.toBe(socket)
+    act(() => again.open())
+    expect(sent(again)).toEqual([{ t: 'join_code', code: 'ABC234' }])
   })
 })

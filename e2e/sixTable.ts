@@ -12,6 +12,7 @@ import type {
 import type {
   ClientMsg,
   ErrorCode,
+  GameRow,
   LobbyMsg,
   MatchInfo,
   ServerMsg,
@@ -19,6 +20,21 @@ import type {
 } from '../src/shared/protocol'
 
 export const SIX_TABLE = '66666666-6666-4666-8666-666666666666'
+
+/**
+ * The page's heartbeat (src/net/heartbeat.ts) sends the text `ping` every few
+ * seconds and closes a socket that does not answer `pong`, as the Worker's
+ * auto-response does. True when `data` was one and has been answered; every
+ * mocked socket starts its handler with this.
+ */
+function answerPing(
+  ws: { send: (data: string) => void },
+  data: string | Buffer,
+) {
+  if (String(data) !== 'ping') return false
+  ws.send('pong')
+  return true
+}
 
 /**
  * Long names and wide stacks, so the plates are as wide as they get
@@ -318,6 +334,7 @@ export async function fakeSixTable(
     }
     send(frame('welcome'))
     ws.onMessage((data) => {
+      if (answerPing(ws, data)) return
       const msg = JSON.parse(String(data)) as ClientMsg
       received.push(msg)
       if (msg.t === 'rebuy') {
@@ -460,9 +477,18 @@ export async function fakeLobby(
   {
     tables = [],
     answer,
+    games = [],
+    onJoinRequest,
+    onJoinCode,
   }: {
     tables?: TableRow[]
     answer: (tried: string[]) => LobbyAnswer | null
+    /** The open games a `games` frame is answered with. */
+    games?: GameRow[]
+    /** What a `join_request` for this handle is answered with, if anything. */
+    onJoinRequest?: (gameId: string) => LobbyAnswer | null
+    /** What a `join_code` (cleaned) is answered with, if anything. */
+    onJoinCode?: (code: string) => LobbyAnswer | null
   },
 ) {
   const received: ClientMsg[][] = []
@@ -473,13 +499,22 @@ export async function fakeLobby(
       ws.send(JSON.stringify({ seq: 1, ...msg }))
     send({ t: 'presence', online: 1, queued: 0, rated: 0 })
     ws.onMessage((data) => {
+      if (answerPing(ws, data)) return
       const msg = JSON.parse(String(data)) as ClientMsg
       mine.push(msg)
       if (msg.t === 'tables') send({ t: 'tables', tables })
+      if (msg.t === 'games') send({ t: 'games', games })
       if (msg.t === 'quick_sit') {
         const reply = answer(msg.tried ?? [])
         if (reply) send(reply)
       }
+      const reply =
+        msg.t === 'join_request'
+          ? onJoinRequest?.(msg.gameId)
+          : msg.t === 'join_code'
+            ? onJoinCode?.(msg.code)
+            : null
+      if (reply) send(reply)
     })
   })
   return { received }
@@ -525,6 +560,7 @@ export async function fakeSitTables(
     })
     ws.send(JSON.stringify(welcome(null)))
     ws.onMessage((data) => {
+      if (answerPing(ws, data)) return
       const msg = JSON.parse(String(data)) as ClientMsg
       mine.push(msg)
       if (msg.t !== 'sit') return

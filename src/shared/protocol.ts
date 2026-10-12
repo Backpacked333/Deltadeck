@@ -11,6 +11,12 @@ import type {
   SeatId,
   Street,
 } from '../engine/types'
+import {
+  GAME_CODE_RE,
+  GAME_ID_RE,
+  normaliseCode,
+  REQUEST_ID_RE,
+} from './gameCode'
 
 export const PROTOCOL = 'qp.v1'
 /** Largest client frame the server will parse. */
@@ -129,6 +135,26 @@ export type ClientMsg =
   | { t: 'quick_sit'; tried?: string[] }
   /** In the lobby: the list of six tables, answered with a `tables` frame. */
   | { t: 'tables' }
+  /**
+   * At an invite table, from its host: answer one join request. The request
+   * is named by the id the `invite` frame gave; the frame names no account.
+   */
+  | { t: 'join_answer'; requestId: string; accept: boolean }
+  /** In the lobby: the open games, answered with a `games` frame. */
+  | { t: 'games' }
+  /**
+   * In the lobby: ask the host of a listed game for the other seat. The
+   * handle is the list's, which can only ask, never sit.
+   */
+  | { t: 'join_request'; gameId: string }
+  /** In the lobby: withdraw the pending join request. */
+  | { t: 'cancel_request' }
+  /**
+   * In the lobby: the game with this code, if it is open. `code` is the
+   * normalised one (normaliseCode); the lobby answers `matched`, or
+   * `join_status` unavailable.
+   */
+  | { t: 'join_code'; code: string }
 
 /**
  * A seated six-casual player: dealt in from the next hand, or sitting out
@@ -408,6 +434,19 @@ export type ServerMsg = { seq: number; matchId: string } & (
       /** The new table, once starting. */
       next?: string
     }
+  /**
+   * Host only, while their invite table waits: the code and who has asked to
+   * join. A whole snapshot (ages are relative), so any frame replaces the
+   * last. Never part of a SeatView, and never sent to the other seat.
+   */
+  | {
+      t: 'invite'
+      code: string | null
+      listed: boolean
+      requests: InviteRequest[]
+      /** The username holding the other seat for a moment after Accept. */
+      reservedFor: string | null
+    }
 )
 
 /**
@@ -422,6 +461,25 @@ export type TableRow = {
   playersPerHour: number
 }
 
+/** Rows the client keeps of a `games` frame, and the longest host name. */
+export const GAMES_RETURNED = 30
+export const GAME_HOST_MAX = 40
+
+/**
+ * An open game in the lobby's list: a handle that can only ask the host for
+ * a seat, a name that is public already, and how long it has waited. Never
+ * the table's id or its code, which would seat without asking.
+ */
+export type GameRow = { gameId: string; host: string; openForMs: number }
+/**
+ * `pending`: the host has the request. `declined`: they said no. `unavailable`:
+ * the game, or a code, is not open (no reason is given, so a code cannot be
+ * probed for why).
+ */
+export type JoinStatusState = 'pending' | 'declined' | 'unavailable'
+/** One join request as the host sees it: a name and its age, never an id. */
+export type InviteRequest = { id: string; username: string; ageMs: number }
+
 export type LobbyMsg = { seq: number } & (
   | { t: 'queued'; position: number; since: number }
   /** A table to go to: a new pairing, or (resumed) one already in play. */
@@ -433,6 +491,10 @@ export type LobbyMsg = { seq: number } & (
   | { t: 'sit_at'; tableId: string }
   /** The six tables, answering `tables`, in quick-sit's order. */
   | { t: 'tables'; tables: TableRow[] }
+  /** The open games, answering `games`: longest waiting first. */
+  | { t: 'games'; games: GameRow[] }
+  /** Where the asker's join request or code stands. */
+  | { t: 'join_status'; state: JoinStatusState; expiresInMs?: number }
 )
 
 // ---- Validation ---------------------------------------------------------------
@@ -515,7 +577,27 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
     case 'sit_out':
     case 'sit_in':
     case 'tables':
+    case 'games':
+    case 'cancel_request':
       return onlyKeys(v, ['t']) ? { t: v.t } : null
+    case 'join_answer':
+      return onlyKeys(v, ['t', 'requestId', 'accept']) &&
+        typeof v.requestId === 'string' &&
+        REQUEST_ID_RE.test(v.requestId) &&
+        typeof v.accept === 'boolean'
+        ? { t: 'join_answer', requestId: v.requestId, accept: v.accept }
+        : null
+    case 'join_request':
+      return onlyKeys(v, ['t', 'gameId']) &&
+        typeof v.gameId === 'string' &&
+        GAME_ID_RE.test(v.gameId)
+        ? { t: 'join_request', gameId: v.gameId }
+        : null
+    case 'join_code': {
+      if (!onlyKeys(v, ['t', 'code']) || typeof v.code !== 'string') return null
+      const code = normaliseCode(v.code)
+      return code && GAME_CODE_RE.test(code) ? { t: 'join_code', code } : null
+    }
     case 'quick_sit': {
       // The account is the socket's, and the lobby picks the table: the
       // frame names only tables this quick-sit was refused at.

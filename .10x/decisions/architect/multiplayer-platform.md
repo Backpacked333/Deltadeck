@@ -867,3 +867,10 @@ Questions for the user:
 ## Out of scope for Phase 0
 
 Rating, Glicko-2, accuracy grading and the population opponent model (Phase 1; the queue, `project.ts` and `bench.test.ts` are the seams). Duplicate segments (Phase 1; `DuplicateController`, `deck:<n>` retention and fresh secrets are the seams). Review → curriculum deep links beyond the street-level link (Phase 1). 6-max, dead-button rule, bots, arenas, `sit`/`stand`, table lists (Phase 2; same `TableDO`, `n` and `players` already generic). Spectating, preset chat, regional selection (P1). Muck at showdown. A normalised `actions` table. Cloud sync of Atlas practice through `SyncAdapter` (P2; `localAdapter` untouched). Anonymous sign-in. Tickets for WebSocket auth (only needed when public live links or spectating arrive). Delta protocol (the `seq` + `welcome` contract already permits it). Supabase local Docker stack and automated `db push`. Real money, tournaments, native apps, free-text chat, friends/clubs, multiway grading, KYC, auto-bans, multi-region.
+
+## Amendment 2026-10-12: Live games
+
+Decision: an invite table (hu-casual) may be listed, joined by a short code, and joined by request. Three independent ids: the table's UUID and a 6-character code each seat their holder; a 32-hex `gameId` is the list's handle and can only ask the host. The list is a pull of the global lobby (`games`, cached, rate limited), never a push, as the six-table list. The table remains the only place seat 1 is decided (`join()`); an Accept reserves it for the requester for 60 s, checked before and after the lobby claim. Hosts report presence by the existing `report` deadline every 30 s; a row unheard of for 90 s is not offered and its code dies. Nothing is added to `applyActionNow`.
+
+Accepted risks: a 6-character code is about 29.7 bits, so a lucky guess seats a stranger in a started play-money game; mitigated by presence-bound life, per-account and global failure buckets and uniform answers, and backstopped by the WAF rule the README names. Out of scope: spectating, listing rated or quick-match tables, six-max codes, a host-confirm delay, region hints for paired tables.
+

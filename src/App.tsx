@@ -118,7 +118,7 @@ const Lab = lazy(() => labModule.then((module) => ({ default: module.Lab })))
 /**
  * Hash routes: the landing page (the bare URL, #start, or #c/<receipt> for a
  * friend's challenge), #table (default), #progress, #lobby[/find],
- * #play/<id>, #ladder[/month], #u/<username> and #match/<id> (online play),
+ * #play/<id>, #join[/CODE], #ladder[/month], #u/<username> and #match/<id> (online play),
  * #me (Your profile), #signup and #signin, #fair-play, #terms, #privacy and #method, #learn/...
  * and #learn/quick[/id]. A return from a sign-in provider (?code=…) opens the
  * online area, which finishes the sign-in, whatever the hash.
@@ -143,6 +143,7 @@ function parseRoute(hash: string, search = ''): Route {
   if (
     /^#lobby(?:\/find)?$/.test(hash) ||
     /^#play\/[0-9a-f-]{36}$/.test(hash) ||
+    /^#join(?:\/[0-9A-Za-z-]{6,8})?$/.test(hash) ||
     /^#ladder(?:\/month)?$/.test(hash) ||
     /^#u\/[a-z0-9_]{3,20}$/.test(hash) ||
     /^#match\/[0-9a-f-]{36}$/.test(hash) ||

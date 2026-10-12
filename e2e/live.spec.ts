@@ -34,7 +34,11 @@ async function player(browser: Browser, name: string) {
   })
   const frames: Frame[] = []
   page.on('websocket', (ws) =>
-    ws.on('framereceived', (f) => frames.push(JSON.parse(String(f.payload)))),
+    ws.on('framereceived', (f) => {
+      // The page's heartbeat is answered with the bare text `pong`.
+      if (String(f.payload) !== 'pong')
+        frames.push(JSON.parse(String(f.payload)))
+    }),
   )
   return { page, frames, close: () => context.close() }
 }

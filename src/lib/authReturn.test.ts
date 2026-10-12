@@ -29,6 +29,18 @@ describe('auth return', () => {
     expect(window.location.hash).toBe(table)
   })
 
+  it('brings a visitor with a game code back to the join link after signing in', () => {
+    // The link is `#join/CODE` (no hyphen); a hyphenated one is as safe.
+    for (const join of ['#join/ABC234', '#join/abc-234']) {
+      rememberAuthReturn(join)
+      restoreAuthReturn(at('/?code=abc'))
+      expect(window.location.hash).toBe(join)
+      expect(window.location.search).toBe('?code=abc')
+    }
+    rememberAuthReturn('#join/ABC234')
+    expect(takeAuthReturn()).toBe('#join/ABC234')
+  })
+
   it('also restores after a provider error so the lobby can show it', () => {
     rememberAuthReturn('#lobby')
     restoreAuthReturn(at('/?error_description=denied'))

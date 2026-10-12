@@ -12,15 +12,35 @@ import { seatView } from '../engine/redact'
 import { config, deckWith } from '../engine/testing'
 import type { HandConfig, HandState, SeatId } from '../engine/types'
 import type {
+  GameRow,
   HandRecordV1,
+  InviteRequest,
+  JoinStatusState,
+  LobbyMsg,
   MatchInfo,
   Reveal,
   ServerMsg,
 } from '../shared/protocol'
 
+/** A lobby frame without its `seq`, which only counts them. */
+export type LobbyBody = LobbyMsg extends infer M
+  ? M extends unknown
+    ? Omit<M, 'seq'>
+    : never
+  : never
+
 export class FakeSocket {
   static all: FakeSocket[] = []
+  /** Frames sent, as the client wrote them. Heartbeat pings are not here. */
   sent: string[] = []
+  /**
+   * Heartbeat pings, apart from `sent`: a ping is not JSON, so every test
+   * that parses what the client wrote would trip on one, and none of them is
+   * about the heartbeat.
+   */
+  pings: string[] = []
+  /** Answer each ping with a pong at once, as the Worker's auto-response does. */
+  answerPings = true
   readyState = 0
   onopen: (() => void) | null = null
   onmessage: ((e: { data: string }) => void) | null = null
@@ -33,6 +53,11 @@ export class FakeSocket {
     FakeSocket.all.push(this)
   }
   send(data: string) {
+    if (data === 'ping') {
+      this.pings.push(data)
+      if (this.answerPings && this.readyState === 1) this.pong()
+      return
+    }
     this.sent.push(data)
   }
   close(code = 1000) {
@@ -45,6 +70,17 @@ export class FakeSocket {
   }
   emit(msg: ServerMsg) {
     this.onmessage?.({ data: JSON.stringify(msg) })
+  }
+  /** A frame as the lobby sends it (`seq` is the lobby's own count). */
+  emitLobby(msg: LobbyBody) {
+    this.onmessage?.({ data: JSON.stringify({ seq: 1, ...msg }) })
+  }
+  /** Text exactly as given: the heartbeat's reply is not JSON. */
+  emitRaw(data: string) {
+    this.onmessage?.({ data })
+  }
+  pong() {
+    this.emitRaw('pong')
   }
   drop(code = 1006, reason = '') {
     this.readyState = 3
@@ -259,3 +295,52 @@ export function sixFrame(
     ? { ...base, t: 'welcome', seat }
     : { ...base, t: 'state' }
 }
+
+// ---- Live games ---------------------------------------------------------------
+
+/** A 32-hex list handle: `n` picks which. */
+export const gameId = (n = 1) => n.toString(16).padStart(32, '0')
+
+export const gameRow = (
+  n = 1,
+  host = 'carol',
+  openForMs = 180_000,
+): GameRow => ({ gameId: gameId(n), host, openForMs })
+
+export const gamesFrame = (games: GameRow[]): LobbyBody => ({
+  t: 'games',
+  games,
+})
+
+export const joinStatusFrame = (
+  state: JoinStatusState,
+  expiresInMs?: number,
+): LobbyBody => ({
+  t: 'join_status',
+  state,
+  ...(expiresInMs === undefined ? {} : { expiresInMs }),
+})
+
+/** The host-only invite frame, as the table sends it while it waits. */
+export const inviteFrame = (
+  seq: number,
+  {
+    code = 'ABC234',
+    listed = false,
+    requests = [],
+    reservedFor = null,
+  }: {
+    code?: string | null
+    listed?: boolean
+    requests?: InviteRequest[]
+    reservedFor?: string | null
+  } = {},
+): ServerMsg => ({
+  t: 'invite',
+  seq,
+  matchId: MATCH,
+  code,
+  listed,
+  requests,
+  reservedFor,
+})

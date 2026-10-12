@@ -17,6 +17,11 @@ export type SmokeResult = {
   hands: number
   target: number
   acks: number[]
+  /**
+   * Heartbeat round trips (ms), where the run measured them: the network leg
+   * of an ack, to read the table's own time off it.
+   */
+  pings?: number[]
   /** Broken invariants (chips, sequence, missing frames, errors), as text. */
   failures: string[]
   /** Frames that showed a seat a card it must not see. */

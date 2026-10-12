@@ -11,7 +11,9 @@
 // harmless: an object only hibernates after it has been quiet, and a quiet
 // bucket is full again within WINDOW_MS. The lobby's quick-sit buckets are
 // the exception: their window is a minute, longer than the lobby stays
-// awake when quiet, so the lobby keeps those in storage (spendToken).
+// awake when quiet, so the lobby keeps those in storage (spendToken). So are
+// the buckets of live games (code tries, join requests, list reads): codes
+// are guessed over minutes.
 
 import { QUICK_SIT_TABLES } from '../../src/shared/protocol'
 
@@ -37,6 +39,41 @@ export const MATCH_CREATES_PER_DAY = 30
  */
 export const QUICK_SITS = 2 * (QUICK_SIT_TABLES + 1)
 export const QUICK_SIT_WINDOW_MS = 60_000
+/**
+ * Failed code lookups one account may make (ADR amendment 2026-10-12, "Live
+ * games"): a burst of CODE_FAILS, refilled at that many per
+ * CODE_FAIL_WINDOW_MS. Only a code that opens no game spends from it, and a
+ * hit costs nothing. A code is a seat capability of about 30 bits, so the
+ * allowance is what a guesser may try: five misses, then one more every two
+ * minutes, per account.
+ */
+export const CODE_FAILS = 5
+export const CODE_FAIL_WINDOW_MS = 600_000
+/**
+ * Failed code lookups the whole lobby tolerates: CODE_FAILS_GLOBAL per
+ * CODE_FAIL_WINDOW_GLOBAL_MS. Accounts are cheap, so the per-account bucket
+ * alone does not stop a scan from many; this one trips on the scan's volume,
+ * not its sources. Past it a miss is answered as rate limited, and a hit is
+ * still served, so an honest friend is not locked out by a stranger's scan.
+ */
+export const CODE_FAILS_GLOBAL = 60
+export const CODE_FAIL_WINDOW_GLOBAL_MS = 60_000
+/**
+ * Join requests one account may send: a burst of JOIN_REQUESTS, refilled at
+ * that many per JOIN_REQUEST_WINDOW_MS. A request wakes a host and a table,
+ * and a host who declined does not hear again, so six in five minutes is
+ * generous for anyone looking for a game.
+ */
+export const JOIN_REQUESTS = 6
+export const JOIN_REQUEST_WINDOW_MS = 300_000
+/**
+ * Reads of the open games one account may ask for: a burst of GAME_LISTS,
+ * refilled at that many per GAME_LIST_WINDOW_MS (so 20 a minute). A client
+ * polls every 5 s (12 a minute); the burst lets a page open and refresh
+ * without being cut off. The frame budget alone allows 240 a minute.
+ */
+export const GAME_LISTS = 10
+export const GAME_LIST_WINDOW_MS = 30_000
 /**
  * Signed-in requests (socket upgrades, /api/matches, /api/me) per client
  * address per minute. Must equal `ratelimits[IP_LIMITER].simple.limit` in
