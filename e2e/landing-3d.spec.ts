@@ -21,7 +21,7 @@ test('the 3D table deals, plays every beat and reaches the score card', async ({
   test.setTimeout(180_000)
   const errors: string[] = []
   page.on('pageerror', (e) => errors.push(String(e)))
-  await page.goto('/')
+  await page.goto('/?stage=3d')
   await expect(page.locator('.landing.is-3d .stage-canvas')).toBeVisible()
   const decision = page.getByRole('group', { name: /Your decision/ })
   await expect(decision).toBeVisible({ timeout: 60_000 })

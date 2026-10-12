@@ -1,5 +1,7 @@
-// Whether the landing page draws the 3D stage: WebGL is there, motion is
-// wanted, and this is not a test or a ?motion=off run. Entry-light: no three.
+// Whether the landing page draws the 3D stage. The hero is the neon table
+// (the trainer's 2D Table) by default; the 3D stage is opt-in with
+// ?stage=3d, and then still needs WebGL, wanted motion, and not a test or a
+// ?motion=off run. Entry-light: no three.
 import { motionOff } from '../../env'
 
 export function webglAvailable() {
@@ -13,6 +15,8 @@ export function webglAvailable() {
 
 export function want3d() {
   if (motionOff || typeof window === 'undefined') return false
+  if (new URLSearchParams(window.location.search).get('stage') !== '3d')
+    return false
   // jsdom (unit tests) has no canvas: the 2D table, without probing.
   if (navigator.userAgent.includes('jsdom')) return false
   if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)
