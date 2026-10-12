@@ -1,4 +1,5 @@
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { emptyProgress } from '../lib/storage'
 import type { HandRecord } from '../lib/storage'
@@ -7,9 +8,22 @@ import type { AccountHistory } from './account'
 const online = vi.hoisted(() => ({
   history: null as AccountHistory | null,
   fail: false,
+  client: {} as Record<string, unknown>,
 }))
 vi.mock('../net/supabase', () => ({
-  loadOnline: async () => ({ client: {} }),
+  loadOnline: async () => ({
+    client: online.client,
+    url: 'https://x.supabase.co',
+  }),
+}))
+// The canvas work is avatar.test.ts's; here a photo resizes to this.
+const resized = vi.hoisted(() => ({ fail: null as string | null }))
+vi.mock('../lib/avatar', async (original) => ({
+  ...(await original<typeof import('../lib/avatar')>()),
+  resizeToWebp: async () => {
+    if (resized.fail) throw new Error(resized.fail)
+    return new Blob(['webp'], { type: 'image/webp' })
+  },
 }))
 vi.mock('./account', () => ({
   loadAccountHistory: async () => {
@@ -44,6 +58,8 @@ const history: AccountHistory = {
       country: null,
       bio: '',
       createdAt: '2026-09-01T00:00:00Z',
+      avatar: null,
+      school: null,
     },
     rating: {
       rating: 1612,
@@ -78,6 +94,125 @@ const history: AccountHistory = {
 afterEach(() => {
   online.history = null
   online.fail = false
+  online.client = {}
+  resized.fail = null
+})
+
+const USER = '0c0c0c0c-0c0c-4c0c-8c0c-0c0c0c0c0c0c'
+
+/** A client that records uploads, removals and RPCs. */
+function pictureClient({ uploadError = false } = {}) {
+  const calls: unknown[][] = []
+  const bucket = {
+    upload: async (...args: unknown[]) => {
+      calls.push(['upload', ...args])
+      return { data: {}, error: uploadError ? new Error('denied') : null }
+    },
+    remove: async (...args: unknown[]) => {
+      calls.push(['remove', ...args])
+      return { data: [], error: null }
+    },
+  }
+  online.client = {
+    auth: {
+      getSession: async () => ({
+        data: { session: { user: { id: USER } } },
+      }),
+    },
+    storage: {
+      from: (name: string) => {
+        calls.push(['bucket', name])
+        return bucket
+      },
+    },
+    rpc: async (...args: unknown[]) => {
+      calls.push(['rpc', ...args])
+      return { data: null, error: null }
+    },
+  }
+  return calls
+}
+
+describe('Your profile picture', () => {
+  const photo = new File(['jpeg'], 'me.jpg', { type: 'image/jpeg' })
+
+  it('uploads a resized picture as your own file, then points your row at it', async () => {
+    const calls = pictureClient()
+    online.history = history
+    render(<MyProfile progress={emptyProgress()} username="carol" />)
+    const region = await screen.findByRole('region', {
+      name: 'Profile picture',
+    })
+    expect(
+      within(region).queryByRole('button', { name: 'Remove picture' }),
+    ).toBeNull()
+    await userEvent.upload(
+      within(region).getByLabelText('Choose a picture'),
+      photo,
+    )
+    await within(region).findByRole('button', { name: 'Remove picture' })
+    expect(calls[0]).toEqual(['bucket', 'avatars'])
+    expect(calls[1]).toEqual([
+      'upload',
+      `${USER}.webp`,
+      expect.any(Blob),
+      { upsert: true, contentType: 'image/webp' },
+    ])
+    expect(calls[2]).toEqual([
+      'rpc',
+      'set_avatar',
+      { p_version: expect.any(Number) },
+    ])
+    const version = (calls[2][2] as { p_version: number }).p_version
+    expect(region.querySelector('.player-avatar img')).toHaveAttribute(
+      'src',
+      `https://x.supabase.co/storage/v1/object/public/avatars/${USER}.webp?v=${version}`,
+    )
+    expect(
+      within(region).getByRole('button', { name: 'Change picture' }),
+    ).toBeVisible()
+  })
+
+  it('removes it: the row first, then the file', async () => {
+    const calls = pictureClient()
+    online.history = {
+      ...history,
+      profile: {
+        ...history.profile,
+        player: { ...history.profile.player, avatar: `${USER}.webp?v=4` },
+      },
+    }
+    render(<MyProfile progress={emptyProgress()} username="carol" />)
+    const remove = await screen.findByRole('button', { name: 'Remove picture' })
+    await userEvent.click(remove)
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: 'Remove picture' }),
+      ).toBeNull(),
+    )
+    expect(calls).toEqual([
+      ['rpc', 'remove_avatar'],
+      ['bucket', 'avatars'],
+      ['remove', [`${USER}.webp`]],
+    ])
+  })
+
+  it('says what went wrong, inline', async () => {
+    const calls = pictureClient({ uploadError: true })
+    online.history = history
+    render(<MyProfile progress={emptyProgress()} username="carol" />)
+    const input = await screen.findByLabelText('Choose a picture')
+    await userEvent.upload(input, photo)
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The picture could not be uploaded.',
+    )
+    expect(calls.some((c) => c[0] === 'rpc')).toBe(false)
+    resized.fail = 'That image is over 5 MB. Choose a smaller one.'
+    await userEvent.upload(input, photo)
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent('over 5 MB'),
+    )
+  })
 })
 
 describe('Your profile', () => {

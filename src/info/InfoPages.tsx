@@ -204,6 +204,12 @@ function Privacy() {
             the code is used or expires, never with your account.
           </li>
           <li>
+            <b>Your profile picture,</b> if you add one: a small square copy
+            your browser makes of the photo you choose, stored with Supabase and
+            public. Removing it deletes it. If someone reports it, we keep who
+            reported it and when.
+          </li>
+          <li>
             <b>Your practice:</b> hands against Atlas, trainer settings and
             lesson progress, while you are signed in.
           </li>
@@ -233,8 +239,8 @@ function Privacy() {
       <Section id="p-where" title="Where it is kept">
         <ul>
           <li>
-            <b>Supabase,</b> in the United States (us-east-1): accounts, hands,
-            practice, ratings and claimed scores.
+            <b>Supabase,</b> in the United States (us-east-1): accounts, profile
+            pictures, hands, practice, ratings and claimed scores.
           </li>
           <li>
             <b>Cloudflare:</b> runs the site and the tables, and keeps challenge
@@ -251,12 +257,12 @@ function Privacy() {
 
       <Section id="p-who" title="Who can see it">
         <p>
-          Everyone can see your username, your school badge, your rating and the
-          online hands you play (your folded cards never; see{' '}
-          <a href="#terms">Terms</a>). Only you can see your email address, your
-          practice and your lesson progress. The people who run DeltaDeck can
-          read the database to keep it working and to look into fair-play
-          reports.
+          Everyone can see your username, your profile picture, your school
+          badge, your rating and the online hands you play (your folded cards
+          never; see <a href="#terms">Terms</a>). Only you can see your email
+          address, your practice and your lesson progress. The people who run
+          DeltaDeck can read the database to keep it working and to look into
+          fair-play reports.
         </p>
       </Section>
 
