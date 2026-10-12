@@ -6,7 +6,7 @@ import { cachedUsername, hadAccount, signedIn } from '../lib/account'
 import { emptyProgress } from '../lib/storage'
 import type { HandRecord, Progress } from '../lib/storage'
 import { seedSession, TEST_SESSION_KEY } from '../test/session'
-import { fakeAccount } from './fakeAccount'
+import { revisionService } from './syncTestHarness'
 import SessionKeeper from './Session'
 
 const loadOnline = vi.fn<() => Promise<Online | null>>()
@@ -20,7 +20,7 @@ vi.mock('./supabase', () => ({ loadOnline: () => loadOnline() }))
 function service(
   session: { user: { id: string } } | null,
   username = 'alice',
-  account = fakeAccount(),
+  account = revisionService(),
 ) {
   const players = {
     select: () => ({
@@ -39,8 +39,8 @@ function service(
         return { data: { subscription: { unsubscribe: vi.fn() } } }
       }),
     },
-    from: (table: string) =>
-      table === 'players' ? players : account.client.from(table),
+    from: () => players,
+    rpc: account.client.rpc,
   }
   return {
     client,
@@ -129,14 +129,14 @@ describe('SessionKeeper', () => {
 describe('practice history', () => {
   it("brings the account's hands into this browser and sends this browser's", async () => {
     seedSession()
-    const account = fakeAccount({ hands: [hand('on-account', 1)] })
+    const account = revisionService({ hands: [hand('on-account', 1)] })
     loadOnline.mockResolvedValue(
       service({ user: { id: 'u1' } }, 'alice', account),
     )
     const ready = vi.fn()
     render(
       <Host
-        initial={{ ...emptyProgress(), hands: [hand('here', 2)] }}
+        initial={{ ...emptyProgress(), owner: 'u1', hands: [hand('here', 2)] }}
         onReady={ready}
       />,
     )
@@ -153,5 +153,15 @@ describe('practice history', () => {
     const ready = vi.fn()
     render(<Host onReady={ready} />)
     await waitFor(() => expect(ready).toHaveBeenCalled())
+  })
+
+  it('F10 failed first pull never calls ready and exposes unverified state', async () => {
+    seedSession()
+    const account = revisionService(); account.state.readError = true
+    loadOnline.mockResolvedValue(service({ user: { id: 'u1' } }, 'alice', account))
+    const ready = vi.fn()
+    render(<Host onReady={ready} />)
+    await screen.findByText(/Unable to verify account history/)
+    expect(ready).not.toHaveBeenCalled()
   })
 })
