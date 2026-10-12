@@ -603,14 +603,27 @@ function VolatilityCurve({ volatility }: { volatility: number }) {
       role="img"
       aria-label="Black–Scholes call premium rises as annualized volatility increases from 10% to 100%, holding other inputs fixed"
     >
-      <path d="M36 20V155H370" fill="none" stroke="#cbd8d2" />
-      <path d="M36 65H370M36 110H370" stroke="#e4eae5" strokeDasharray="3 5" />
-      <polyline points={points} stroke="#1c7663" strokeWidth="3" fill="none" />
+      <path
+        d="M36 20V155H370"
+        fill="none"
+        style={{ stroke: 'var(--border-strong)' }}
+      />
+      <path
+        d="M36 65H370M36 110H370"
+        style={{ stroke: 'var(--border)' }}
+        strokeDasharray="3 5"
+      />
+      <polyline
+        points={points}
+        style={{ stroke: 'var(--brand)' }}
+        strokeWidth="3"
+        fill="none"
+      />
       <circle
         cx={x}
         cy={y}
         r="6"
-        fill="#e9a477"
+        style={{ fill: 'var(--warning)' }}
         stroke="white"
         strokeWidth="3"
       />

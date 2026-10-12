@@ -244,9 +244,10 @@
   --ring-bad: #8a4bb0;
 }
 
-/* The curriculum ships light-only styles. Pin the light tokens inside it so
-   app-wide dark-theme rules (headings, labels, buttons) stay legible. */
-.curriculum-workspace {
+/* The curriculum's light theme: pin the pearl tokens inside it so its own
+   palette (src/curriculum/palette.css) and the app's rules agree. In the
+   dark theme it takes the app's void tokens. */
+:root[data-theme='light'] .curriculum-workspace {
   color-scheme: light;
   --bg: #ece9f6;
   --bg-glow:
@@ -311,6 +312,74 @@
   --radius-sm: 12px;
   --radius-lg: 26px;
   color: var(--text);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) .curriculum-workspace {
+    color-scheme: light;
+    --bg: #ece9f6;
+    --bg-glow:
+      radial-gradient(
+        1100px 620px at 50% -10%,
+        rgb(143 140 255 / 0.22),
+        transparent 70%
+      ),
+      radial-gradient(
+        700px 480px at 100% 30%,
+        rgb(224 122 168 / 0.12),
+        transparent 70%
+      );
+    --surface: #fbfaff;
+    --surface-2: #f4f2fb;
+    --surface-3: #ebe8f3;
+    --border: #e0dcee;
+    --border-strong: #cbc6e0;
+    --text: #16132b;
+    --text-2: #4b4768;
+    --text-3: #6b6788;
+    --brand: #5b4bd0;
+    --brand-2: #6f5fe0;
+    --brand-ink: #ffffff;
+    --accent: #ffe49a;
+    --accent-strong: #ffd970;
+    --accent-ink: #17142a;
+    --positive: #1f9a63;
+    --negative: #8a4bb0;
+    --positive-soft: #e3f4ec;
+    --negative-soft: #f1e8f7;
+    --warning: #a86b0c;
+    --focus: #5b4bd0;
+    --glass: linear-gradient(
+      145deg,
+      rgb(255 255 255 / 0.9),
+      rgb(255 255 255 / 0.6)
+    );
+    --glass-edge: rgb(255 255 255 / 0.9);
+    --glass-shine: inset 0 1px 0 rgb(255 255 255 / 1);
+    --card-sheen: radial-gradient(
+      120% 90% at 0% 0%,
+      rgb(143 140 255 / 0.08),
+      transparent 60%
+    );
+    --shadow-sm: 0 1px 2px rgb(40 30 90 / 0.06);
+    --shadow: 0 14px 40px rgb(60 45 130 / 0.1);
+    --shadow-lg: 0 30px 70px rgb(50 35 120 / 0.18);
+    --heat-low: #9a76c9;
+    --heat-mid: #ebe8f3;
+    --heat-high: #2f9670;
+    --heat-line: #16132b;
+    --grade-best: #13895f;
+    --grade-good: #4f9e74;
+    --grade-inaccuracy: #b78a12;
+    --grade-mistake: #cf6a2b;
+    --grade-blunder: #c23a4a;
+    --grade-ink: #ffffff;
+    --ring-good: #1f9a63;
+    --ring-bad: #8a4bb0;
+    --radius: 18px;
+    --radius-sm: 12px;
+    --radius-lg: 26px;
+    color: var(--text);
+  }
 }
 
 /* ============================================================
