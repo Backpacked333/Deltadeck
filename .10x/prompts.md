@@ -1,6 +1,6 @@
 # 10x prompts for what is left
 
-Rewritten 2026-10-10 against `main` at `a3b9aed` (PR #26), refreshed the same day at `13fe865` (PR #39) and again at `a91da97` (PR #45) `0920e4a` (PR #51) `c56cd5b` (PR #54) `a194c55` (PR #55) `615e2db` (PR #63), `b975a15` (PR #65) and `efdacb1` (PR #71). It replaces the 2026-10-09 version that lived only on the branch `claude/amazing-ride-4vip4x`. That version's Prompts 1–5 are done, its Prompt 6 was written for the same-deck duplicate format that Q1 = B dropped, and most of its Prompts 7 and 8 is built.
+Rewritten 2026-10-10 against `main` at `a3b9aed` (PR #26), refreshed the same day at `13fe865` (PR #39) and again at `a91da97` (PR #45) `0920e4a` (PR #51) `c56cd5b` (PR #54) `a194c55` (PR #55) `615e2db` (PR #63), `b975a15` (PR #65), `efdacb1` (PR #71) and `86952ec` (PR #73). It replaces the 2026-10-09 version that lived only on the branch `claude/amazing-ride-4vip4x`. That version's Prompts 1–5 are done, its Prompt 6 was written for the same-deck duplicate format that Q1 = B dropped, and most of its Prompts 7 and 8 is built.
 
 Order: **finish Phase 0 → Phase 1 → Phase 2 → Later.** One prompt per fresh Claude Code session, top to bottom, except where "Runs after" allows two at once. Each prompt names the tickets it closes; the acceptance tests under those tickets in `.10x/tickets.md` are the definition of done.
 
@@ -40,7 +40,7 @@ P2-16 (the trainer onto `src/engine`) stays cut, as the tickets recommend.
 - P1-11 Glicko-2; P1-12 the rating update at match end; P1-13 pairing near your rating.
 - P1-14 the ladder (`#ladder`, `#ladder/month`) and the rating metrics query; P1-15 the public profile at `/u/<username>`; most of P1-16 (share card, `#method`, Share button); the public match review at `#match/<id>` (showdown cards only); hands of a live match closed to every client (PRs #27, #29, #31).
 - Phase 2: the casual 6-max rules (ADR amendment) and the PR plan; P2-01 the 6-max engine gate (PR-01, PR-02); P2-02a explicit blind seats and the dead button (PR-04); every frame type checked against its allowlist, with leak tests by seat (PR-07, PR-08) (PRs #32, #34, #35, #36, #39).
-- Outside the multiplayer plan: the landing page, onboarding, share links and school codes (PR #30), the 3D landing (PR #37), and accounts with email, Google or Apple sign-in, the account header, and practice hands and lessons saved to the account (PRs #56, #57, #59–#63); practice, lessons and progress behind an account (PR #64); the DeltaDeck name, a privacy page and one address at deltadeck.net (PR #67); the private profile page `#me` (PR #68); the film-quality 3D table and school banners on the landing (PR #70).
+- Outside the multiplayer plan: the landing page, onboarding, share links and school codes (PR #30), the 3D landing (PR #37), and accounts with email, Google or Apple sign-in, the account header, and practice hands and lessons saved to the account (PRs #56, #57, #59–#63); practice, lessons and progress behind an account (PR #64); the DeltaDeck name, a privacy page and one address at deltadeck.net (PR #67); the private profile page `#me` (PR #68); the film-quality 3D table and school banners on the landing (PR #70); profile pictures and school crests at online tables, with picture reports (PR #73).
 
 **Not prompts, yours to do or decide:**
 
