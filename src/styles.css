@@ -397,7 +397,8 @@ body {
   margin: 0;
   min-width: 320px;
   background: var(--bg-glow), var(--bg);
-  background-attachment: fixed;
+  background-repeat: no-repeat;
+  background-color: var(--bg);
   color: var(--text);
 }
 h1,
@@ -567,7 +568,6 @@ kbd {
   border-color: var(--glass-edge);
   background: var(--glass);
   box-shadow: var(--glass-shine);
-  backdrop-filter: blur(16px);
 }
 .btn-outline:hover {
   border-color: var(--border-strong);
@@ -654,7 +654,7 @@ kbd {
   height: 68px;
   padding: 0 28px;
   background: color-mix(in srgb, var(--bg) 72%, transparent);
-  backdrop-filter: blur(20px) saturate(140%);
+  backdrop-filter: blur(14px);
   border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
 }
 .brand {
@@ -695,7 +695,6 @@ kbd {
   background: var(--glass);
   border: 1px solid var(--glass-edge);
   box-shadow: var(--glass-shine);
-  backdrop-filter: blur(20px);
 }
 .nav button {
   display: flex;
@@ -1043,26 +1042,18 @@ main {
     #000 calc(var(--rail-a) - 1deg),
     transparent var(--rail-a)
   );
-  --rail-drain-soft: conic-gradient(
-    from var(--rail-from),
-    transparent 0deg,
-    #000 14deg,
-    #000 calc(var(--rail-a) - 6deg),
-    transparent calc(var(--rail-a) + 4deg)
-  );
   position: absolute;
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%) scale(var(--k, 1)) perspective(1400px)
     rotateX(var(--tilt, 40deg));
-  transform-style: preserve-3d;
-  transition: --rail-a 0.25s linear;
-  animation: rail-flow 22s linear infinite;
-}
-@keyframes rail-flow {
-  to {
-    --rail-phase: 360deg;
-  }
+  /* Flat: the plane is drawn as one layer and tilted as one. With
+     preserve-3d every ring was its own composited layer, which a software
+     GPU could not keep up with (e2e/motion.spec.ts). */
+  transform-style: flat;
+  /* The light steps with the clock (four times a second) rather than
+     animating: its blurred, masked layers are costly to repaint (the
+     frame-time checks in e2e/motion.spec.ts). */
 }
 /* A ring drawn as the border of an oval box: the border's background
    shows, the padding box is masked away. */
@@ -1079,19 +1070,15 @@ main {
     linear-gradient(#000 0 0);
   mask-composite: exclude;
 }
-.scene-under {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  background: #030206;
-  transform: translateZ(-28px);
-}
 .scene-rail {
   position: absolute;
   inset: 0;
   border-radius: 50%;
   background: linear-gradient(180deg, #24212f 0%, #15131d 45%, #0b0a11 100%);
-  box-shadow: inset 0 2px 0 rgb(255 255 255 / 0.09);
+  /* The table's edge, seen below the rail. */
+  box-shadow:
+    inset 0 2px 0 rgb(255 255 255 / 0.09),
+    0 24px 0 -2px var(--scene-edge, #030206);
 }
 .scene-sheen {
   inset: 0;
@@ -1105,18 +1092,21 @@ main {
     )
     border-box;
 }
+/* The halo is the costliest paint on the table (a wide blur), so it is
+   painted once: a full ring that never drains, faded in and out by
+   opacity alone, which the compositor does without repainting it. */
 .rail-halo {
   position: absolute;
   inset: -70px;
-  -webkit-mask: var(--rail-drain-soft);
-  mask: var(--rail-drain-soft);
+  opacity: 0.75;
+  will-change: opacity;
+  transition: opacity 0.4s;
 }
 .rail-halo .loop {
   inset: 40px;
   border-width: 34px;
   background: var(--rail-flow) border-box;
   filter: blur(34px);
-  opacity: 0.75;
 }
 .scene-lip {
   inset: -1px;
@@ -1148,12 +1138,13 @@ main {
   -webkit-mask: var(--rail-drain);
   mask: var(--rail-drain);
 }
+/* The lit band repaints as the clock steps, so it carries no filter: a
+   wide, faint band under the line reads as its glow. */
 .rail-glow {
-  inset: 9px;
-  border-width: 12px;
+  inset: 7px;
+  border-width: 16px;
   background: var(--rail-flow) border-box;
-  filter: blur(7px);
-  opacity: 0.95;
+  opacity: 0.32;
 }
 .rail-line {
   inset: 13.5px;
@@ -1176,35 +1167,26 @@ main {
     0 0 6px 2px #fff,
     0 0 20px 7px rgb(255 214 170 / 0.75),
     0 0 48px 16px rgb(232 137 180 / 0.4);
-  transition:
-    left 0.25s linear,
-    top 0.25s linear;
 }
 /* Untimed: lit all round, no seam. */
 .rail-full .rail-lit,
-.rail-full .rail-halo,
-.rail-win .rail-lit,
-.rail-win .rail-halo {
+.rail-win .rail-lit {
   -webkit-mask: none;
   mask: none;
 }
-.rail-off .rail-lit,
+.rail-off .rail-lit {
+  display: none;
+}
 .rail-off .rail-halo {
   opacity: 0;
 }
-.rail-thinking {
-  animation:
-    rail-flow 22s linear infinite,
-    rail-orbit 2.6s linear infinite;
+/* Draining, the halo dims so the lit band leads. */
+.rail-clock .rail-halo,
+.rail-thinking .rail-halo {
+  opacity: 0.45;
 }
-@keyframes rail-orbit {
-  from {
-    --rail-from: 0deg;
-  }
-  to {
-    --rail-from: 360deg;
-  }
-}
+/* While the other side decides, a short arc of light rests at their seat
+   (still: anything moving in the rail repaints the whole table). */
 /* Into the bank: the light runs hot. */
 .rail-tone-bank {
   --rail-flow: conic-gradient(
@@ -1387,13 +1369,6 @@ main {
   opacity: 0.4;
 }
 @media (prefers-reduced-motion: reduce) {
-  .scene-plane,
-  .rail-thinking {
-    animation: none;
-  }
-  .scene-plane {
-    transition: none;
-  }
 }
 
 /* Seats: glass pills on the rail. Atlas (or the opponent) sits at the top
@@ -1463,7 +1438,6 @@ main {
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 0.08),
     0 14px 34px rgb(0 0 0 / 0.45);
-  backdrop-filter: blur(12px);
   z-index: 2;
   transition:
     box-shadow 0.25s,
@@ -1476,7 +1450,6 @@ main {
     rgb(255 255 255 / 0.08),
     rgb(255 255 255 / 0.02)
   );
-  backdrop-filter: blur(20px);
 }
 .seat-active .seat-plate {
   border-color: rgb(255 228 154 / 0.55);
@@ -2281,30 +2254,6 @@ main {
 .act-raise .act-sub {
   color: rgb(255 255 255 / 0.85);
 }
-/* A slow sheen across the lit button. */
-.act-raise::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    105deg,
-    transparent 35%,
-    rgb(255 255 255 / 0.22) 50%,
-    transparent 65%
-  );
-  transform: translateX(-120%);
-  animation: act-sheen 5s ease-in-out infinite 1s;
-  pointer-events: none;
-}
-.act-raise:disabled::before {
-  animation: none;
-}
-@keyframes act-sheen {
-  30%,
-  100% {
-    transform: translateX(120%);
-  }
-}
 .act kbd {
   background: rgb(255 255 255 / 0.1);
   border-color: rgb(255 255 255 / 0.16);
@@ -2325,9 +2274,6 @@ main {
 }
 .act-raise.act-best {
   overflow: visible;
-}
-.act-raise.act-best::before {
-  border-radius: inherit;
 }
 .ring {
   position: relative;
@@ -5723,4 +5669,53 @@ html.resizing * {
 }
 .live-card {
   border-radius: var(--radius-lg);
+}
+
+/* ---- The lite table (software renderers, src/env.ts renderTier): the same
+   table without what costs a frame there: perspective (a flat squash
+   instead), the halo and floor blurs, the felt's weave and inner shadows,
+   blurs behind glass, and the masked rings (TableScene draws them as SVG
+   strokes). Measured by e2e/motion.spec.ts. ---- */
+:root[data-render='lite'] .scene-plane {
+  transform: translate(-50%, -50%) scale(var(--k, 1)) scaleY(0.82);
+}
+:root[data-render='lite'] .rail-halo,
+:root[data-render='lite'] .scene-floor,
+:root[data-render='lite'] .scene-weave,
+:root[data-render='lite'] .scene-blush {
+  display: none;
+}
+:root[data-render='lite'] .scene-rail,
+:root[data-render='lite'] .scene-felt,
+:root[data-render='lite'] .scene-inlay {
+  box-shadow: none;
+}
+:root[data-render='lite'] .seat-hero .seat-cards,
+:root[data-render='lite'] .six-hole {
+  filter: none;
+}
+:root[data-render='lite'] body {
+  background: var(--bg);
+}
+:root[data-render='lite'] .header {
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
+}
+:root[data-render='lite'] .header,
+:root[data-render='lite'] .runout,
+:root[data-render='lite'] .paused {
+  backdrop-filter: none;
+}
+.lite-rail {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+}
+.lite-lip {
+  stroke: rgb(255 255 255 / 0.22);
+}
+.lite-channel {
+  stroke: rgb(0 0 0 / 0.5);
+}
+.lite-core {
+  stroke: rgb(255 255 255 / 0.9);
 }

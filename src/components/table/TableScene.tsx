@@ -4,8 +4,9 @@
 // clock: it drains from the seat that is acting (Rail). Shared by the
 // heads-up Table and the six-seat ring; both lay their seats, cards and
 // chips flat on top of it, so nothing that must be read is foreshortened.
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
+import { renderTier } from '../../env'
 
 /** The plane's own size; the scene scales it to fit its box. */
 const W = 1080
@@ -91,7 +92,7 @@ export type ArcReading = {
 }
 
 export function TableScene({
-  mode,
+  mode: asked,
   from = 180,
   clock,
   arc,
@@ -109,6 +110,12 @@ export function TableScene({
   deck?: boolean
   children?: ReactNode
 }) {
+  // The lite table (a software renderer) repaints the rail only for a win:
+  // each change of the light redraws the whole table there, and one landing
+  // as chips start to fly stalls them. It stays lit; the seconds are on the
+  // plate and in the dock.
+  const mode: RailMode =
+    renderTier === 'lite' && asked !== 'win' ? 'full' : asked
   const box = useRef<HTMLDivElement>(null)
   const [scale, setScale] = useState(0)
   useLayoutEffect(() => {
@@ -142,37 +149,47 @@ export function TableScene({
       ? { left: 540 + radius * Math.sin(th), top: 320 - radius * Math.cos(th) }
       : null
 
+  const toneClass = tone ? `rail-tone-${tone}` : ''
+  const plane = {
+    width: W,
+    height: H,
+    '--k': scale,
+    '--tilt': `${TILT}deg`,
+    visibility: scale ? undefined : 'hidden',
+  } as CSSProperties
+
   return (
     <div className="scene" ref={box} aria-hidden="true">
       <div className="scene-floor" />
       <div
-        className={`scene-plane rail-${mode} ${tone ? `rail-tone-${tone}` : ''}`}
+        className={`scene-plane rail-${mode} ${toneClass}`}
         style={
           {
-            width: W,
-            height: H,
-            '--k': scale,
-            '--tilt': `${TILT}deg`,
+            ...plane,
             '--rail-from': `${from}deg`,
             '--rail-a': `${angle}deg`,
-            visibility: scale ? undefined : 'hidden',
           } as CSSProperties
         }
       >
-        <div className="scene-under" />
         <div className="scene-rail" />
-        <div className="scene-sheen loop" />
-        <div className="rail-halo">
-          <i className="loop" />
-        </div>
-        <div className="scene-lip loop" />
-        <div className="scene-channel loop" />
-        <div className="rail-track loop" />
-        <div className="rail-lit">
-          <i className="rail-glow loop" />
-          <i className="rail-line loop" />
-          <i className="rail-core loop" />
-        </div>
+        {renderTier === 'lite' ? (
+          <LiteRail win={mode === 'win'} />
+        ) : (
+          <>
+            <div className="scene-sheen loop" />
+            <div className="rail-halo">
+              <i className="loop" />
+            </div>
+            <div className="scene-lip loop" />
+            <div className="scene-channel loop" />
+            <div className="rail-track loop" />
+            <div className="rail-lit">
+              <i className="rail-glow loop" />
+              <i className="rail-line loop" />
+              <i className="rail-core loop" />
+            </div>
+          </>
+        )}
         {head && (
           <span
             className="rail-head"
@@ -199,6 +216,54 @@ export function TableScene({
       </div>
       {children}
     </div>
+  )
+}
+
+/**
+ * The lite rail (a software renderer): the same rings as SVG strokes, lit
+ * all round. The full rail draws each ring as a masked box, which is costly
+ * to paint without a GPU.
+ */
+function LiteRail({ win }: { win: boolean }) {
+  const id = useId().replace(/:/g, '')
+  // A ring drawn by a box at inset i with a border b, as an ellipse.
+  const ring = (i: number, b: number) => ({
+    cx: 540,
+    cy: 320,
+    rx: 540 - i - b / 2,
+    ry: 320 - i - b / 2,
+    strokeWidth: b,
+    fill: 'none',
+  })
+  const flow = win
+    ? ['#fff3c4', '#ffe49a', '#e2b158', '#ffe49a', '#fff3c4']
+    : ['#7f9bff', '#a98bf0', '#e889b4', '#f7b98a', '#ffe49a']
+  return (
+    <svg className="lite-rail" viewBox={`0 0 ${W} ${H}`} width={W} height={H}>
+      <defs>
+        <linearGradient id={`${id}f`} x1="0" x2="1">
+          {flow.map((c, i) => (
+            <stop key={i} offset={i / (flow.length - 1)} stopColor={c} />
+          ))}
+        </linearGradient>
+        <linearGradient id={`${id}s`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#fff" stopOpacity="0.1" />
+          <stop offset="0.28" stopColor="#fff" stopOpacity="0" />
+          <stop offset="0.8" stopColor="#fff" stopOpacity="0" />
+          <stop offset="1" stopColor="#fff" stopOpacity="0.04" />
+        </linearGradient>
+      </defs>
+      <ellipse
+        className="lite-sheen"
+        {...ring(0, 32)}
+        stroke={`url(#${id}s)`}
+      />
+      <ellipse className="lite-lip" {...ring(-1, 1.5)} />
+      <ellipse className="lite-channel" {...ring(8, 13)} />
+      <ellipse {...ring(7, 16)} stroke={`url(#${id}f)`} strokeOpacity="0.32" />
+      <ellipse {...ring(13.5, 3.5)} stroke={`url(#${id}f)`} />
+      <ellipse className="lite-core" {...ring(14.6, 1.2)} />
+    </svg>
   )
 }
 
