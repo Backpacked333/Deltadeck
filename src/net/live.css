@@ -539,36 +539,22 @@
     's1 mid s5'
     '.  s0  .';
   align-items: center;
-  gap: 6px 16px;
-  padding: 18px 28px;
+  gap: 10px 16px;
+  min-height: 520px;
+  padding: 22px 28px;
   border-radius: var(--radius-lg);
   background: var(--table-bg);
+  border: 1px solid rgb(255 255 255 / 0.06);
   color: var(--on-felt);
   box-shadow: var(--shadow-lg);
+  overflow: hidden;
   isolation: isolate;
 }
-/* The felt and rail, drawn like the heads-up table's but without noise. */
-.six-ring::before {
-  content: '';
-  position: absolute;
-  inset: 34px 40px;
-  border-radius: 999px;
-  border: 12px solid transparent;
-  background:
-    radial-gradient(
-        ellipse at 50% 40%,
-        var(--felt-1),
-        var(--felt-2) 60%,
-        var(--felt-3)
-      )
-      padding-box,
-    linear-gradient(180deg, var(--rail-1), var(--rail-2) 45%, var(--rail-3))
-      border-box;
-  box-shadow: inset 0 14px 40px rgb(0 0 0 / 0.35);
-  z-index: -1;
+/* The same scene as the heads-up table (TableScene), behind the seats. */
+.six-ring > .scene {
+  inset: 58px 70px 64px;
 }
 .six-ring :focus-visible {
-  /* The app's focus blue is too dark against the felt. */
   outline-color: var(--accent);
 }
 .six-mid {
@@ -591,8 +577,9 @@
   flex-direction: column;
   gap: 4px;
   justify-self: center;
-  width: min(100%, 168px);
+  width: min(100%, 210px);
   min-width: 0;
+  transition: opacity 0.25s;
 }
 .six-seat[data-slot='0'] {
   grid-area: s0;
@@ -618,25 +605,58 @@
 .six-seat[data-slot='5'] {
   flex-direction: column-reverse;
 }
+/* A glass pill: the face in its ring, then name, school and stack. */
 .six-plate {
   position: relative;
   display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 10px;
+  row-gap: 2px;
   align-content: center;
   min-height: 62px;
   min-width: 0;
-  padding: 6px 10px;
-  border-radius: 12px;
-  background: rgb(8 24 18 / 0.78);
-  border: 1px solid rgb(255 255 255 / 0.1);
-  box-shadow: 0 8px 18px rgb(0 0 0 / 0.28);
+  padding: 5px 14px 5px 5px;
+  border-radius: 999px;
+  background: rgb(17 15 30 / 0.88);
+  border: 1px solid rgb(255 255 255 / 0.09);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.07),
+    0 14px 34px rgb(0 0 0 / 0.45);
+  backdrop-filter: blur(12px);
   font-size: 12px;
-  line-height: 1.3;
+  line-height: 1.2;
   transition:
     border-color 0.25s,
     box-shadow 0.25s,
     opacity 0.25s;
 }
-/* The name's line: picture, name and crest; the name is what shortens. */
+.six-plate > :not(.six-face) {
+  grid-column: 2;
+}
+.six-face {
+  grid-row: 1 / span 4;
+  align-self: center;
+  display: grid;
+  place-items: center;
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 2.5px rgb(255 255 255 / 0.14);
+}
+.six-face .player-avatar,
+.six-initial {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+}
+.six-initial {
+  display: grid;
+  place-items: center;
+  background: linear-gradient(145deg, #3a3460, #221e38);
+  color: #d6d3ea;
+  font: 700 16px var(--font-display);
+}
+/* The name's line; the name is what shortens. */
 .six-who {
   display: flex;
   gap: 4px;
@@ -646,14 +666,47 @@
 .six-name {
   min-width: 0;
   overflow: hidden;
-  font-size: 13px;
-  font-weight: 700;
+  font-size: 14px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.six-school {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: 6px;
+  max-width: 100%;
+  padding: 2px 9px 2px 3px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.06);
+  border: 1px solid rgb(255 255 255 / 0.08);
+  color: #d6d3ea;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+}
 .six-stack {
   color: var(--on-felt-2);
+  font: 500 13px var(--font-display);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.six-folded {
+  margin-left: 6px;
+  font:
+    600 11px 'DM Sans',
+    system-ui,
+    sans-serif;
+  font-style: normal;
+  color: #8d89ab;
+}
+.six-seat[data-folded] {
+  opacity: 0.5;
+}
+.six-seat[data-folded] .six-face {
+  filter: grayscale(1);
 }
 .six-line {
   display: flex;
@@ -667,7 +720,7 @@
   font-style: italic;
 }
 .six-seat[data-state='sitting-out'] .six-plate {
-  opacity: 0.7;
+  opacity: 0.55;
 }
 /* A player whose socket closed: words and an icon, not colour alone. */
 .six-away {
@@ -678,19 +731,24 @@
   font-weight: 600;
 }
 .six-seat[data-active] .six-plate {
-  border-color: var(--accent);
-  /* Mixed from the token, not a fixed rgb, so the halo follows the theme
-     (the dark accent is #b2e08c, not the light #c4e6a8). */
+  border-color: rgb(255 228 154 / 0.55);
   box-shadow:
-    0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent),
-    0 8px 18px rgb(0 0 0 / 0.28);
+    inset 0 1px 0 rgb(255 255 255 / 0.1),
+    0 0 0 3px rgb(255 228 154 / 0.12),
+    0 0 26px rgb(255 214 140 / 0.28),
+    0 14px 34px rgb(0 0 0 / 0.45);
+}
+.six-seat[data-active] .six-face {
+  box-shadow:
+    inset 0 0 0 2.5px #ffe49a,
+    0 0 14px rgb(255 228 154 / 0.45);
 }
 /* A slow glow on the seat to act; it stops under reduced motion below. */
 .six-seat[data-active] .six-plate::after {
   content: '';
   position: absolute;
   inset: -5px;
-  border-radius: 16px;
+  border-radius: 999px;
   border: 2px solid var(--accent);
   opacity: 0;
   pointer-events: none;
@@ -702,10 +760,10 @@
   }
 }
 .six-clock {
-  padding: 0 6px;
+  padding: 0 7px;
   border-radius: 999px;
-  background: var(--accent);
-  color: var(--accent-ink);
+  background: #ffe49a;
+  color: #17142a;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
@@ -715,9 +773,12 @@
 }
 .six-sit,
 .six-empty {
+  display: grid;
+  grid-template-columns: 1fr;
   place-items: center;
-  border: 1px dashed rgb(255 255 255 / 0.28);
-  background: rgb(0 0 0 / 0.18);
+  padding: 6px 14px;
+  border: 1px dashed rgb(255 255 255 / 0.2);
+  background: rgb(17 15 30 / 0.5);
   box-shadow: none;
   color: var(--on-felt-2);
   font-size: 13px;
@@ -730,6 +791,10 @@
 .six-sit:hover {
   border-color: var(--accent);
   background: rgb(255 255 255 / 0.06);
+}
+.six-sit > *,
+.six-empty > * {
+  grid-column: 1;
 }
 .six-chips {
   display: flex;
@@ -745,16 +810,17 @@
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: var(--card-face);
-  color: var(--card-ink);
+  background: #f6f2e3;
+  color: #1d2a24;
   font: 800 11px var(--font-display);
   box-shadow: 0 3px 8px rgb(0 0 0 / 0.35);
 }
 .six-blind,
 .six-bet {
-  padding: 1px 7px;
+  padding: 2px 9px;
   border-radius: 999px;
-  background: rgb(0 0 0 / 0.32);
+  background: rgb(17 15 30 / 0.72);
+  border: 1px solid rgb(255 255 255 / 0.08);
   color: var(--on-felt);
   font-size: 11px;
   font-weight: 700;
@@ -774,10 +840,11 @@
     gap: 10px 6px;
     padding: 16px 10px;
   }
-  .six-ring::before {
-    inset: 8px;
-    border-width: 8px;
-    border-radius: 56px;
+  .six-ring {
+    min-height: 0;
+  }
+  .six-ring > .scene {
+    inset: 40px 0;
   }
   .six-seat {
     width: 100%;
@@ -796,7 +863,34 @@
     align-self: end;
   }
   .six-plate {
-    padding: 6px 8px;
+    column-gap: 6px;
+    min-height: 52px;
+    padding: 4px 8px 4px 4px;
+  }
+  .six-face {
+    width: 36px;
+    height: 36px;
+  }
+  .six-face .player-avatar,
+  .six-initial {
+    width: 30px;
+    height: 30px;
+    font-size: 13px;
+  }
+  .six-name {
+    font-size: 12px;
+  }
+  /* The crest alone; its name is in its title and accessible name. */
+  .six-school {
+    padding: 0;
+    border: 0;
+    background: none;
+  }
+  .six-school > span {
+    display: none;
+  }
+  .six-stack {
+    font-size: 12px;
   }
 }
 /* Chip flights (P2-06b): a seat's bet to the pot as a street closes, and
@@ -868,12 +962,18 @@
    cards; .six-mid sizes them to fit its width (P2-05a). */
 .six-pot {
   margin: 0;
-  color: var(--on-felt-2);
-  font-size: 13px;
+  color: #8d89ab;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
   font-variant-numeric: tabular-nums;
 }
 .six-pot b {
+  margin-left: 8px;
   color: var(--on-felt);
+  font: 600 24px var(--font-display);
+  letter-spacing: 0;
 }
 /* Side pots (P2-06a): one pill per pot, like the bets on the plates. A
    row of them wraps inside the middle rather than widen it on a phone;
@@ -889,9 +989,10 @@
   list-style: none;
 }
 .six-pots li {
-  padding: 1px 8px;
+  padding: 2px 10px;
   border-radius: 999px;
-  background: rgb(0 0 0 / 0.32);
+  background: rgb(17 15 30 / 0.72);
+  border: 1px solid rgb(255 255 255 / 0.08);
   color: var(--on-felt-2);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -922,11 +1023,13 @@
 .six-wait {
   display: grid;
   gap: 8px;
-  padding: 14px 16px;
+  padding: 16px 18px;
   border-radius: var(--radius-lg);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  box-shadow: var(--shadow);
+  background: linear-gradient(180deg, #110f1d, #0a0912);
+  border: 1px solid rgb(255 255 255 / 0.08);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.06),
+    var(--shadow);
 }
 .six-wait .action-caption {
   margin: 0;

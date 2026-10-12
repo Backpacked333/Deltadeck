@@ -395,6 +395,7 @@ function plates(
       // Sitting out takes effect from the next hand: a player who sat out
       // during this one still plays it, and shows as playing until it ends.
       status: inHand ? 'playing' : (p.status ?? 'playing'),
+      ...(inHand?.folded ? { folded: true } : {}),
       connected: seated ? p.connected : undefined,
     }
   })

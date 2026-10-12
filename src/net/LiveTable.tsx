@@ -390,6 +390,18 @@ function LiveHand({
   rematch: () => void
 }) {
   const game = useMemo(() => toHeroGame(view, opponent), [view, opponent])
+  // The rail light drains the clock of whoever is to act.
+  const { clockOffset } = state
+  const clock = useMemo(
+    () =>
+      view.clock && !view.result && view.toAct !== null
+        ? {
+            clock: { ...view.clock, offset: clockOffset },
+            hero: view.toAct === view.you,
+          }
+        : null,
+    [view.clock, view.result, view.toAct, view.you, clockOffset],
+  )
   const runout = useRunout(game)
   const yourTurn =
     !game.result && view.toAct === view.you && state.status === 'open'
@@ -475,6 +487,7 @@ function LiveHand({
         onSkipGuided={noop}
         runout={runout}
         versus={{ opponent }}
+        clock={clock}
       />
       <ActionBar
         game={game}

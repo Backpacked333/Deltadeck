@@ -1026,6 +1026,21 @@ export default function App() {
                 onSettings={() => setDialog('settings')}
                 onSkipGuided={skipGuided}
                 runout={runout}
+                arc={
+                  game.result
+                    ? null
+                    : {
+                        equity:
+                          actionMath.revealed && actionMath.ready
+                            ? actionMath.equity
+                            : undefined,
+                        breakEven: actionMath.breakEven,
+                        guess:
+                          typeof guessEntry === 'number'
+                            ? guessEntry
+                            : undefined,
+                      }
+                }
               />
               <ActionBar
                 game={game}
