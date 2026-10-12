@@ -41,6 +41,7 @@ import type {
   SeatStatus,
   ServerMsg,
 } from '../../src/shared/protocol'
+import { avatarVersion, schoolDomain } from './auth'
 import { now } from './clock'
 import { CashController, LocalController } from './controller'
 import type { Roster, TableController } from './controller'
@@ -140,6 +141,13 @@ type Player = {
   seat: SeatId
   userId: string
   username: string
+  /**
+   * The player's picture in the avatars bucket, `<userId>.webp?v=<n>`, and
+   * their verified school's domain: as of their last connect, and left out
+   * when they have none. Shown beside the name, never archived.
+   */
+  avatar?: string
+  school?: string
   /**
    * Time bank left: for the match (casual heads-up), for its half (rated),
    * or until the next orbit starts (six-casual, where a player who sits
@@ -294,7 +302,25 @@ type Ended = {
  * A socket knows only its account. Its seat, in the hand on the table or at
  * the table, is looked up for every frame (Dealt, Match.players).
  */
-type Attachment = { userId: string; username: string }
+type Attachment = { userId: string; username: string } & Looks
+/** The picture and school a socket's account shows (Player.avatar, .school). */
+type Looks = { avatar?: string; school?: string }
+
+/**
+ * Looks from the Worker's x-avatar and x-school headers. Each value is
+ * checked as strictly as auth.ts reads it from Postgres; one that fails is
+ * dropped, so the frame carries only an object path and a domain.
+ */
+function looksFrom(headers: Headers, userId: string): Looks {
+  const version = avatarVersion(headers.get('x-avatar'))
+  const school = schoolDomain(headers.get('x-school'))
+  return {
+    ...(version !== null && /^[0-9a-f-]{36}$/.test(userId)
+      ? { avatar: `${userId}.webp?v=${version}` }
+      : {}),
+    ...(school !== null ? { school } : {}),
+  }
+}
 type Ack = { reqId: string; seq: number }
 /**
  * A queued call: an archive function, or a hand for the verify queue. Hands
@@ -426,7 +452,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
       const userId = request.headers.get('x-user-id')
       const username = request.headers.get('x-username')
       if (!userId || !username) return json({ error: 'unauthorized' }, 401)
-      return this.join(userId, username)
+      return this.join(userId, username, looksFrom(request.headers, userId))
     }
     return json({ error: 'not found' }, 404)
   }
@@ -509,10 +535,18 @@ export class TableDO extends DurableObject<WorkerEnv> {
     seat: SeatId,
     who: { userId: string; username: string },
   ): Player {
-    return { seat, ...who, bankMs: this.match!.config.bankMs, timeouts: 0 }
+    // Only these two: InitBody comes as JSON, and a Player holds no more.
+    const { userId, username } = who
+    return {
+      seat,
+      userId,
+      username,
+      bankMs: this.match!.config.bankMs,
+      timeouts: 0,
+    }
   }
 
-  private async join(userId: string, username: string) {
+  private async join(userId: string, username: string, looks: Looks) {
     const match = this.match
     // Cleaned up (or never existed): say so, and store nothing.
     if (!match) return this.refuse(CLOSE_GONE, 'closed')
@@ -545,10 +579,21 @@ export class TableDO extends DurableObject<WorkerEnv> {
           await lobbyStub(this.env).release([userId], match.id)
           return json({ error: 'table full' }, 403)
         }
-        player = this.newPlayer(1, { userId, username })
+        player = { ...this.newPlayer(1, { userId, username }), ...looks }
         match.players.push(player)
         await this.ctx.storage.put('match', match)
       }
+    }
+    // A seat the lobby or the creator's request made, or an earlier
+    // connect: it shows the picture and school this connect brought.
+    if (
+      player &&
+      (player.avatar !== looks.avatar || player.school !== looks.school)
+    ) {
+      delete player.avatar
+      delete player.school
+      Object.assign(player, looks)
+      await this.ctx.storage.put('match', match)
     }
     if (player) await this.back(player)
     // One socket per account: a second tab replaces the first.
@@ -557,7 +602,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const pair = new WebSocketPair()
     const [client, server] = [pair[0], pair[1]]
     this.ctx.acceptWebSocket(server, [userId])
-    server.serializeAttachment({ userId, username } satisfies Attachment)
+    server.serializeAttachment({
+      userId,
+      username,
+      ...looks,
+    } satisfies Attachment)
     // Six-casual: after a restart the first socket back starts the grace
     // of every player still away (the restart closed their sockets unseen),
     // rather than leaving it to the next alarm, which at a waiting table
@@ -688,7 +737,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
    */
   private async sit(ws: WebSocket, wanted?: SeatId) {
     const match = this.match!
-    const { userId, username } = ws.deserializeAttachment() as Attachment
+    const { userId, username, avatar, school } =
+      ws.deserializeAttachment() as Attachment
     if (!this.seatable())
       return this.illegal(ws, userId, 'There is no seat to take here')
     // Already seated: nothing changes, and the welcome says where.
@@ -740,6 +790,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
       return this.claiming.has(userId) ? undefined : this.releaseSeats([userId])
     const player: Player = {
       ...this.newPlayer(seat, { userId, username }),
+      ...(avatar ? { avatar } : {}),
+      ...(school ? { school } : {}),
       // The buy-in is the server's: the frame carries no amount.
       stack: match.config.startingStack,
       status: 'playing',
@@ -3225,6 +3277,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
       players: match.players.map((p) => ({
         seat: p.seat,
         username: p.username,
+        ...(p.avatar ? { avatar: p.avatar } : {}),
+        ...(p.school ? { school: p.school } : {}),
         connected: this.connected(p.userId, exclude),
         consecutiveTimeouts: p.timeouts,
         // Between hands, the stack the hand left: the one the next hand
