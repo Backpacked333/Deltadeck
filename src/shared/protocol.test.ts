@@ -159,6 +159,10 @@ describe('parseClientMsg', () => {
           'sit_out',
           'quick_sit',
           'tables',
+          'join_answer',
+          'games',
+          'join_code',
+          'ABC234',
           T1,
           'r1',
           5,
@@ -179,6 +183,10 @@ describe('parseClientMsg', () => {
         'seat',
         'amount',
         'tried',
+        'requestId',
+        'accept',
+        'gameId',
+        'code',
         'x',
       ]
       return Object.fromEntries(
@@ -205,9 +213,14 @@ describe('parseClientMsg', () => {
           'sit_out',
           'quick_sit',
           'tables',
+          'join_answer',
+          'games',
+          'join_request',
+          'cancel_request',
+          'join_code',
         ]).toContain(msg.t)
     }
-  })
+  }, 30_000)
 
   it('accepts a sit only as a seat 0..5 or none, whatever else it carries', () => {
     const random = lcg(9)
@@ -350,5 +363,62 @@ describe('parseClientMsg', () => {
       { t: 'tables', tableId: T1 },
     ])
       expect(parseClientMsg(frame(bad)), JSON.stringify(bad)).toBeNull()
+  })
+})
+
+describe('live game frames', () => {
+  const GAME = 'a'.repeat(32)
+  const REQ = '0123456789abcdef'
+
+  it('parses the lobby and host frames, and nothing extra', () => {
+    expect(parseClientMsg(frame({ t: 'games' }))).toEqual({ t: 'games' })
+    expect(parseClientMsg(frame({ t: 'cancel_request' }))).toEqual({
+      t: 'cancel_request',
+    })
+    expect(parseClientMsg(frame({ t: 'join_request', gameId: GAME }))).toEqual({
+      t: 'join_request',
+      gameId: GAME,
+    })
+    expect(
+      parseClientMsg(
+        frame({ t: 'join_answer', requestId: REQ, accept: false }),
+      ),
+    ).toEqual({ t: 'join_answer', requestId: REQ, accept: false })
+  })
+
+  it('refuses a malformed handle, request id or answer', () => {
+    for (const bad of [
+      { t: 'join_request', gameId: GAME.toUpperCase() },
+      { t: 'join_request', gameId: GAME.slice(1) },
+      { t: 'join_request', gameId: GAME, x: 1 },
+      { t: 'join_request' },
+      { t: 'games', x: 1 },
+      { t: 'cancel_request', gameId: GAME },
+      { t: 'join_answer', requestId: REQ, accept: 'yes' },
+      { t: 'join_answer', requestId: REQ },
+      { t: 'join_answer', requestId: 'r1', accept: true },
+      { t: 'join_answer', requestId: REQ, accept: true, userId: 'u' },
+    ])
+      expect(parseClientMsg(frame(bad))).toBeNull()
+  })
+
+  it('takes a code only as the cleaned one', () => {
+    expect(parseClientMsg(frame({ t: 'join_code', code: 'abc-234' }))).toEqual({
+      t: 'join_code',
+      code: 'ABC234',
+    })
+    for (const bad of [
+      'ABC23',
+      'ABC2345',
+      'ABC230',
+      'ABCIL2',
+      '',
+      'x'.repeat(17),
+    ])
+      expect(parseClientMsg(frame({ t: 'join_code', code: bad }))).toBeNull()
+    expect(parseClientMsg(frame({ t: 'join_code', code: 234567 }))).toBeNull()
+    expect(
+      parseClientMsg(frame({ t: 'join_code', code: 'ABC234', x: 1 })),
+    ).toBeNull()
   })
 })
