@@ -27,8 +27,9 @@ only, never production. No production setup is required for unit/SQL/Worker test
 
 See [release evidence, F01–F17, compatibility and runbooks](docs/trust-release-evidence.md)
 for actual checks and release boundaries. This branch is **not a production
-release or a completed human pilot**. Recorded app acceptance, deployed schema
-parity and staged cutover remain required; passing local tests does not prove
+release or a completed human pilot**. Primary Chromium flows have recorded local
+acceptance; the broader browser/device matrix, deployed schema parity and staged
+cutover remain required. Passing local tests does not prove
 production correctness, real-device smoothness/recovery or learning efficacy.
 
 - Live tables own decision deadlines, membership generations, immutable hand
@@ -137,7 +138,7 @@ The build is static: host `dist/` anywhere. There are no server routes or client
    - **Simple:** an equity meter against the price, a plain-language verdict, the EV of every action, how Atlas’s actions shifted its likely range, and next-card what-ifs.
    - **Analyst:** adds a 13×13 range grid of Atlas’s likely holdings, a 2D decision map (3D terrain on demand), quant metrics, a fold-probability override, and the optionality and protection lenses.
 4. **Review the hand.** Each decision gets a grade (Best, Good, Inaccuracy, Mistake, Blunder). You can replay any decision with the lab frozen at that moment. The review shows result versus model expectation, a face-up equity-by-street graph after a showdown, and Atlas’s reasoning, revealed only once the hand is over.
-5. **Track improvement.** The progress page charts luck versus skill (cumulative result against cumulative expectation), decision accuracy, grade distribution, read calibration with blind spots by hand type, and recent hands. You can export and import your progress.
+5. **Track improvement.** The progress page compares realized results with modeled EV over the same covered hands, explicitly showing missing/pending model coverage, decision accuracy, grade distribution, read calibration and recent hands. These are model-based practice metrics, not demonstrated learning. You can export and import your progress.
 
 New visitors get a welcome screen, a short spotlight tour, three **guided hands** (a big draw, a price-sensitive straight draw, a river bluff-catch) and then shuffled practice. **Learn** opens the full curriculum (below). Six short **quick lessons** with interactive widgets and quizzes (expected value, outs and pot odds, variance, ranges, options and insurance) sit inside it at `#learn/quick`.
 

@@ -417,5 +417,52 @@ original account, and reject a replacement account/epoch. Three new component
 regressions cover late-ready retry, late-ready export without premature exit,
 and rejection of another account. The changed AccountPage, Session and bootstrap
 suites passed **36 tests**; both typechecks, lint, build and whitespace checks
-passed. Entry remains **146.1 kB gzip**. Recorded browser acceptance and CI follow
-on the combined revision; no production changes have been made.
+passed. Entry remains **146.1 kB gzip**. No production changes have been made.
+
+## Recorded local browser procedure and CI
+
+The parent testing agent exercised `d1fc4bf` in Chromium **137** at
+**1366×768**, two isolated synthetic contexts on one Linux VM. Live gameplay
+used the real local Worker. Account/learning RPCs were explicitly mocked while
+using the real app and IndexedDB; this is not hosted account/SQL integration.
+
+- Eight real check/call actions reached showdown (Bob +20, Alice −20).
+  Hand 2 controls coexisted with unchanged Hand 1 cards/results, and the review
+  showed Deck verified. Offline disabled decisions; reconnect restored the
+  authoritative current actor/hand. Reduced-motion reload was exercised.
+- Qualified fixed/manual/shadow learning, ledger → unaided poker → business
+  transfer, repeat-family exclusion, unknown retention/future review date,
+  pilot consent/withdrawal, explanation/evidence/feedback/focus controls worked.
+- A mocked outage blocked sign-out. Retry retained auth; downloaded recovery
+  JSON contained unsaved rationale. First discard retained auth; second explicit
+  confirmation removed auth and returned to the signed-out homepage. The fixture
+  also had unclaimed guest work: the combined guard was tested, not each reason
+  in isolation.
+- Local timing sanity only: 51 instrumentation events, five intent→send samples
+  of 0–0.1 ms and 18 matched frame→render samples of 0.5–29.8 ms. Localhost/VM,
+  no packet-loss/load envelope, no ACK RTT distribution, no production p95/p99
+  claim. The recording/report are linked from the parent session and PR.
+
+No app correctness blocker was observed in these executed flows. Harness
+interruptions included a disabled-action timeout, detached heading and incorrect
+expected route; subsequent checks verified the relevant final state. No captured
+page errors. The learning workspace is long, text-heavy and diagnostic rather
+than evidence of polished laptop UX; raw IDs/JSON and repeated caveats remain a
+usability limitation.
+
+Unexecuted in the recorded procedure: six-max/rebuy, exhaustive keyboard/IME/
+repeat boundaries, late-sync/account-epoch races, explicit not-due assessment
+RPC path, Firefox/WebKit, physical two-device behavior, hosted persistence/rating
+and genuine delayed retention. Some are covered by automated suites, not this
+recording. Gate A's full matrix and Gate B remain open.
+
+All four CI checks passed on `d1fc4bf`: quality, e2e, soak and Supabase Preview.
+The e2e run had 61 first-pass successes and one landing sign-in-link assertion
+that passed on retry (62 eventual successes, including all 19 live cases).
+That retry is disclosed, not represented as a clean first-pass run. An earlier
+sync unit failure was reproduced deterministically: the test transport corrupted
+only the first ACK, but returned a correct cached receipt on retry while the
+fault flag remained set. The fixture now corrupts every receipt until disabled;
+the strengthened two-retry test and 76 focused regressions pass. Runtime behavior
+and security gates were not weakened. Supabase Preview reports migrations
+applied in its isolated preview branch; production parity remains unverified.
