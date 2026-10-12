@@ -1034,8 +1034,8 @@
 .live-row-tight {
   flex-direction: row;
 }
-.live-code-input {
-  max-width: 11ch;
+.live-row .live-code-input {
+  max-width: 14ch;
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 1.1rem;
   letter-spacing: 0.12em;

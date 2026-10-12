@@ -459,6 +459,9 @@ export class TableConnection {
     const old = this.socket
     this.socket = null
     this.heartbeat.stop()
+    // A new socket is a new path: its figure starts again, even when the
+    // old socket never got to say it closed.
+    this.rtt.reset()
     old?.close(1000, 'reconnecting')
     this.attempts = 0
     this.set({ status: 'reconnecting', pending: null })
@@ -503,7 +506,15 @@ export class TableConnection {
       this.heartbeat.heard()
       // The heartbeat's reply is not JSON: taken before the parse, so it
       // costs nothing and cannot be mistaken for a snapshot.
-      if (event.data === 'pong') return this.heartbeat.pong()
+      if (event.data === 'pong') {
+        this.heartbeat.pong()
+        // A pong is proof of life too: an `offline` that no `online` ever
+        // followed must not leave a socket that answers stuck disabled.
+        // Only this socket's: a replaced one says nothing of the new path.
+        if (this.socket === socket && this.state.status === 'reconnecting')
+          this.set({ status: 'open' })
+        return
+      }
       // Only the table's own frames count for the watchdog: a pong shows
       // the link is up, not that the table answered.
       this.heard++

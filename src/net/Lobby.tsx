@@ -6,6 +6,7 @@ import { AccuracyPanel } from './AccuracyPanel'
 import { createGame, createMatch, fetchActiveMatch } from './api'
 import type { Identity } from './api'
 import { GameList } from './GameList'
+import { noteUnlisted } from './gameText'
 import type { LobbyState } from './lobbyClient'
 import { TableList } from './TableList'
 import type { QuickSit } from './TableList'
@@ -103,8 +104,12 @@ export function Lobby({
       ? await createGame(identity.getToken, { listed: true }, fetcher)
       : await createMatch(identity.getToken, fetcher)
     setBusy(false)
-    if (result.ok) window.location.hash = `#play/${result.matchId}`
-    else {
+    if (result.ok) {
+      // Asked to be listed and not: the waiting room says so.
+      if (listed && 'listed' in result && !result.listed)
+        noteUnlisted(result.matchId)
+      window.location.hash = `#play/${result.matchId}`
+    } else {
       setError(result.reason)
       if (result.activeMatch) setActive(result.activeMatch)
     }
@@ -185,7 +190,8 @@ export function Lobby({
             Show in open games
           </label>
           <p id="listed-help" className="live-muted">
-            Others can then ask to join. Needs a confirmed email.
+            Others can then ask to join. Needs a confirmed email, or the game
+            stays unlisted.
           </p>
           {error && (
             <p className="live-error" role="alert">

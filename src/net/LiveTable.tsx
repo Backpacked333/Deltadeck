@@ -352,7 +352,12 @@ function WaitingRoom({
               {copied ? 'Copied' : 'Copy link'}
             </button>
           </div>
-          <HostInvite invite={invite} answer={answer} open={open} />
+          <HostInvite
+            invite={invite}
+            answer={answer}
+            open={open}
+            matchId={matchId}
+          />
         </>
       ) : (
         <p className="live-muted">The first hand deals in a moment.</p>

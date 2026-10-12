@@ -2399,6 +2399,48 @@ describe('LiveTable: hosting an invite table', () => {
     )
   })
 
+  it('moves focus to the requests and says what was pressed, without renaming the buttons', async () => {
+    const socket = await waiting()
+    invite(socket, 1, { requests: [BOB, CAROL] })
+    const region = screen.getByRole('region', { name: 'Join requests' })
+    const before = within(region).getAllByRole('status')[0]
+    expect(before).toBeEmptyDOMElement()
+    await userEvent.click(screen.getByRole('button', { name: 'Accept bob' }))
+    expect(
+      within(region).getByRole('heading', { name: 'Join requests' }),
+    ).toHaveFocus()
+    expect(before).toHaveTextContent('Accepting bob…')
+    expect(screen.getByRole('button', { name: 'Accept bob' })).toBeDisabled()
+    invite(socket, 2, { reservedFor: 'bob' })
+    expect(within(region).getByText('bob is joining…')).toBeVisible()
+  })
+
+  it('tells a host who asked to be listed that the game is not, and that the code and link work', async () => {
+    window.sessionStorage.setItem(`qp-unlisted-${MATCH}`, '1')
+    try {
+      const socket = await waiting()
+      invite(socket, 1, { code: 'ABC234' })
+      expect(screen.getByText(/not listed in open games/)).toHaveTextContent(
+        'Your code and link still work',
+      )
+    } finally {
+      window.sessionStorage.clear()
+    }
+  })
+
+  it('says nothing of listing to a host who did not ask, or whose game is listed', async () => {
+    const socket = await waiting()
+    invite(socket, 1, { code: 'ABC234' })
+    expect(screen.queryByText(/not listed in open games/)).toBeNull()
+    window.sessionStorage.setItem(`qp-unlisted-${MATCH}`, '1')
+    try {
+      invite(socket, 2, { code: 'ABC234', listed: true })
+      expect(screen.queryByText(/not listed in open games/)).toBeNull()
+    } finally {
+      window.sessionStorage.clear()
+    }
+  })
+
   it("shows another player's name as text, never as markup", async () => {
     const socket = await waiting()
     const sly = '<img src=x onerror=alert(1)>'

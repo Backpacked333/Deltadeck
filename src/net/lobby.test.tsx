@@ -472,6 +472,58 @@ describe('Lobby: Play 1v1', () => {
     expect(window.location.hash).toBe(`#play/${MATCH}`)
   })
 
+  it('says nothing more when a listed game is listed, and notes it when it was not', async () => {
+    for (const listed of [true, false]) {
+      window.location.hash = '#lobby'
+      window.sessionStorage.clear()
+      const fetcher = vi.fn(async (url: string) =>
+        url.endsWith('/api/matches')
+          ? Response.json(
+              { matchId: MATCH, code: 'ABC234', listed },
+              { status: 201 },
+            )
+          : Response.json({ activeMatch: null }),
+      ) as unknown as typeof fetch
+      const view = render(<Lobby identity={alice} fetcher={fetcher} />)
+      await act(async () => {})
+      act(() => FakeSocket.last().open())
+      await userEvent.click(screen.getByLabelText('Show in open games'))
+      await userEvent.click(
+        screen.getByRole('button', { name: 'Play a friend by link' }),
+      )
+      await vi.waitFor(() =>
+        expect(window.location.hash).toBe(`#play/${MATCH}`),
+      )
+      expect(window.sessionStorage.getItem(`qp-unlisted-${MATCH}`)).toBe(
+        listed ? null : '1',
+      )
+      view.unmount()
+    }
+  })
+
+  it('does not note a game the host never asked to list', async () => {
+    window.sessionStorage.clear()
+    const fetcher = vi.fn(async (url: string) =>
+      url.endsWith('/api/matches')
+        ? Response.json(
+            { matchId: MATCH, code: 'ABC234', listed: false },
+            { status: 201 },
+          )
+        : Response.json({ activeMatch: null }),
+    ) as unknown as typeof fetch
+    await lobbyPage({ fetcher })
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Play a friend by link' }),
+    )
+    await vi.waitFor(() => expect(window.location.hash).toBe(`#play/${MATCH}`))
+    expect(window.sessionStorage.getItem(`qp-unlisted-${MATCH}`)).toBeNull()
+  })
+
+  it('words the help so that an unlisted game is expected', async () => {
+    await lobbyPage()
+    expect(screen.getByText(/or the game stays unlisted/)).toBeVisible()
+  })
+
   it('cancels', async () => {
     const socket = await lobbyPage()
     await userEvent.click(screen.getByRole('button', { name: 'Find a match' }))

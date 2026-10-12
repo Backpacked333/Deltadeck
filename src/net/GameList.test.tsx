@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -234,6 +236,53 @@ describe('GameList: a request to join', () => {
     expect(screen.getByText('Waiting for host…')).toBeVisible()
   })
 
+  it('keeps keyboard focus: Cancel takes it from Request, Request takes it back', async () => {
+    const socket = await page()
+    rows(socket)
+    const request = screen.getByRole('button', {
+      name: 'Request to join carol',
+    })
+    request.focus()
+    await userEvent.keyboard('{Enter}')
+    expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus()
+    await userEvent.keyboard('{Enter}')
+    expect(
+      screen.getByRole('button', { name: 'Request to join carol' }),
+    ).toHaveFocus()
+  })
+
+  it('leaves focus alone when the person has moved on', async () => {
+    const socket = await page()
+    rows(socket)
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Request to join carol' }),
+    )
+    const field = screen.getByLabelText('Game code')
+    field.focus()
+    act(() => socket.emitLobby(joinStatusFrame('declined')))
+    expect(field).toHaveFocus()
+  })
+
+  it('announces from a region that was there before the words', async () => {
+    const socket = await page()
+    rows(socket)
+    const region = () =>
+      within(
+        screen
+          .getByRole('button', { name: 'Request to join carol' })
+          .closest('td')!,
+      ).getByRole('status')
+    const before = region()
+    expect(before).toBeEmptyDOMElement()
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Request to join carol' }),
+    )
+    expect(before).toHaveTextContent('Waiting for host…')
+    act(() => socket.emitLobby(joinStatusFrame('declined')))
+    expect(before).toHaveTextContent('Not this time')
+    expect(before.isConnected).toBe(true)
+  })
+
   it('can be cancelled, and the rows come back', async () => {
     const socket = await page()
     rows(socket)
@@ -323,6 +372,15 @@ describe('GameList: a request to join', () => {
       } as never),
     )
     expect(screen.getByRole('alert')).toHaveTextContent(TOO_MANY)
+  })
+})
+
+describe('GameList: the code field style', () => {
+  it('outranks the generic row input, so its font and width apply', () => {
+    const css = readFileSync(resolve(__dirname, 'live.css'), 'utf8')
+    expect(css).toMatch(/\n\.live-row \.live-code-input \{/)
+    expect(css).not.toMatch(/\n\.live-code-input \{/)
+    expect(css).toMatch(/max-width: 14ch/)
   })
 })
 

@@ -527,6 +527,42 @@ describe('TableConnection: the link', () => {
     connection.stop()
   })
 
+  it('an offline that no online follows is undone by the next pong', async () => {
+    const { connection, socket } = await opened()
+    socket.emit(frame('welcome', 1, 0, firstHand()))
+    window.dispatchEvent(new Event('offline'))
+    expect(connection.getState().status).toBe('reconnecting')
+    await vi.advanceTimersByTimeAsync(PING_EVERY_MS)
+    expect(connection.getState().status).toBe('open')
+    expect(connection.act({ type: 'call' })).toBe(true)
+    connection.stop()
+  })
+
+  it('a pong from a socket that was replaced does not reopen the new one', async () => {
+    const { connection, socket } = await opened(0)
+    socket.answerPings = false
+    window.dispatchEvent(new Event('offline'))
+    window.dispatchEvent(new Event('online'))
+    await settle()
+    expect(FakeSocket.all).toHaveLength(2)
+    expect(connection.getState().status).toBe('reconnecting')
+    socket.pong()
+    expect(connection.getState().status).toBe('reconnecting')
+    connection.stop()
+  })
+
+  it('starts the round-trip figure again when the network comes back', async () => {
+    const { connection, socket } = await opened()
+    await vi.advanceTimersByTimeAsync(PING_EVERY_MS)
+    expect(connection.rtt.getSnapshot()).not.toBeNull()
+    window.dispatchEvent(new Event('offline'))
+    window.dispatchEvent(new Event('online'))
+    await settle()
+    expect(socket.closedWith).not.toBeNull()
+    expect(connection.rtt.getSnapshot()).toBeNull()
+    connection.stop()
+  })
+
   it('reconnects at once when the network comes back, with the patience renewed', async () => {
     const { connection } = await opened(0)
     FakeSocket.last().drop()

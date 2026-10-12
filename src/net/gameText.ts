@@ -40,3 +40,27 @@ export function readLink(
   const code = join ? normaliseCode(join[1]) : null
   return code ? { code } : null
 }
+
+const UNLISTED_KEY = 'qp-unlisted-'
+
+/**
+ * The host asked for a listed game and was given an unlisted one: kept for
+ * the waiting room, which the page reaches by a hash and so cannot be told
+ * directly. Per tab, and best effort: without storage, only the notice is lost.
+ */
+export function noteUnlisted(matchId: string) {
+  try {
+    window.sessionStorage.setItem(UNLISTED_KEY + matchId, '1')
+  } catch {
+    // Storage blocked: the game is as unlisted as before, and still works.
+  }
+}
+
+/** Whether `noteUnlisted` was called for this game in this tab. */
+export function wasUnlisted(matchId: string) {
+  try {
+    return window.sessionStorage.getItem(UNLISTED_KEY + matchId) === '1'
+  } catch {
+    return false
+  }
+}

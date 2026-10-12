@@ -5,7 +5,7 @@
 // arrival, every GAMES_EVERY_MS while the tab is seen, and as it comes back
 // into view. A row is a name and an age; the table's id and its code are
 // never in a list, so nothing here can seat anyone but the host's answer.
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ClipboardEvent, FormEvent } from 'react'
 import type { GameRow } from '../shared/protocol'
 import { codeFieldText, openFor, readLink } from './gameText'
@@ -157,19 +157,33 @@ function GameRowView({
   onLapse: (request: LobbyState['joinRequest']) => void
 }) {
   const waiting = request?.state === 'pending' && said === null
+  const cell = useRef<HTMLTableCellElement>(null)
+  const ask = useRef<HTMLButtonElement>(null)
+  // The button that was pressed goes with the state it began: when the wait
+  // ends, focus is taken back to this row (the Request button, or the cell
+  // when the row says why there is none), unless the person has moved on.
+  const was = useRef(waiting)
+  useEffect(() => {
+    if (was.current && !waiting && lost(cell.current))
+      (ask.current ?? cell.current)?.focus()
+    was.current = waiting
+  }, [waiting])
   return (
     <tr>
       <td className="live-host" title={game.host}>
         {game.host}
       </td>
       <td>{openFor(game.openForMs)}</td>
-      <td className="live-answer">
+      <td className="live-answer" ref={cell} tabIndex={-1}>
+        {/* Always here, so that what it comes to say is announced. */}
+        <span role="status" className={waiting || said ? undefined : 'sr-only'}>
+          {waiting ? 'Waiting for host…' : (said ?? '')}
+        </span>
         {waiting ? (
           <Waiting request={request} onCancel={onCancel} onLapse={onLapse} />
-        ) : said ? (
-          <span role="status">{said}</span>
-        ) : (
+        ) : said ? null : (
           <button
+            ref={ask}
             className="btn btn-outline"
             aria-label={`Request to join ${game.host}`}
             disabled={blocked}
@@ -181,6 +195,15 @@ function GameRowView({
       </td>
     </tr>
   )
+}
+
+/**
+ * Focus has been lost to the page (its button went away) or is still inside
+ * `cell`: safe to move. Anywhere else it is the person's choice, and stays.
+ */
+function lost(cell: HTMLElement | null) {
+  const at = document.activeElement
+  return !at || at === document.body || !!cell?.contains(at)
 }
 
 function Waiting({
@@ -201,13 +224,17 @@ function Waiting({
   useEffect(() => {
     if (lapsed) onLapse(request)
   }, [lapsed, request, onLapse])
+  // The pressed button is gone: Cancel is where the person's focus goes.
+  const cancel = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    if (lost(cancel.current?.closest('td') ?? null)) cancel.current?.focus()
+  }, [])
   return (
     <span className="live-waiting">
-      <span role="status">Waiting for host…</span>
       <span className="live-clock" aria-hidden>
         {`${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`}
       </span>
-      <button className="btn btn-quiet" onClick={onCancel}>
+      <button className="btn btn-quiet" ref={cancel} onClick={onCancel}>
         Cancel
       </button>
     </span>

@@ -9,6 +9,7 @@ import { formatCode } from '../shared/gameCode'
 import { joinCodeLink } from './api'
 import type { InviteState } from './client'
 import { REQUEST_WAIT_MS } from './GameList'
+import { wasUnlisted } from './gameText'
 import { useNow } from './useNow'
 
 /**
@@ -22,15 +23,26 @@ export function HostInvite({
   invite,
   answer,
   open,
+  matchId,
 }: {
   invite: InviteState | null
   answer: (requestId: string, accept: boolean) => boolean
   /** The table socket is open: answers can be sent. */
   open: boolean
+  /** The table's id, to know whether the host asked to be listed. */
+  matchId?: string
 }) {
+  // Read once: the host's wish does not change while the page is here.
+  const [asked] = useState(() => (matchId ? wasUnlisted(matchId) : false))
   if (!invite) return null
   return (
     <>
+      {asked && !invite.listed && (
+        <p className="live-muted">
+          This game is not listed in open games, so nobody will ask to join.
+          Your code and link still work: share them.
+        </p>
+      )}
       <GameCode code={invite.code} listed={invite.listed} />
       <JoinRequests invite={invite} answer={answer} open={open} />
     </>
@@ -123,9 +135,21 @@ function JoinRequests({
   useEffect(() => {
     if (!answering) setPressed(null)
   }, [answering])
+  const title = useRef<HTMLHeadingElement>(null)
   const press = (id: string, accept: boolean) => {
-    if (answer(id, accept)) setPressed({ id, accept })
+    if (!answer(id, accept)) return
+    setPressed({ id, accept })
+    // The pressed button is about to be disabled and its row to go: focus
+    // moves to the section, where the next row or the outcome is read on.
+    title.current?.focus()
   }
+  // Heard once, from a region that was there before the words: the label
+  // of a button is its name, and does not change with "Accepting…".
+  const pending = pressed
+    ? `${pressed.accept ? 'Accepting' : 'Declining'} ${
+        requests.find((r) => r.id === pressed.id)?.username ?? ''
+      }…`
+    : ''
 
   // A reservation that ran out: the seat is open again, and the host is told
   // who did not come.
@@ -142,18 +166,26 @@ function JoinRequests({
     before.current = reservedFor
   }, [reservedFor, holding])
 
+  const outcome = holding
+    ? `${reservedFor} is joining…`
+    : missed
+      ? `${missed} didn't arrive. Your game is open again.`
+      : ''
+
   return (
     <section className="live-requests" aria-labelledby="requests-title">
-      <h3 id="requests-title">Join requests</h3>
-      {holding ? (
-        <p role="status">{`${reservedFor} is joining…`}</p>
-      ) : (
+      <h3 id="requests-title" ref={title} tabIndex={-1}>
+        Join requests
+      </h3>
+      <p className="sr-only" role="status">
+        {pending}
+      </p>
+      {/* One region for the outcome, there before the words are. */}
+      <p role="status" className={outcome ? undefined : 'sr-only'}>
+        {outcome}
+      </p>
+      {holding ? null : (
         <>
-          {missed && (
-            <p role="status">
-              {`${missed} didn't arrive. Your game is open again.`}
-            </p>
-          )}
           <ul aria-live="polite" className="live-request-list">
             {live.map((r) => (
               <li key={r.id}>
