@@ -27,9 +27,8 @@ export type RateCall = {
   matchId: string
   players: { seat: SeatId; userId: string; outcome: Outcome }[]
   /**
-   * When the match finished (the table's clock). Inactivity is counted up to
-   * here, and stored as the players' last match, however late the rating
-   * applies. Absent on calls queued before it existed: the time of rating.
+   * Outbox compatibility hint. The verified terminal certificate supplies
+   * the authoritative played time, including for delayed applications.
    */
   finishedAt?: number
 }

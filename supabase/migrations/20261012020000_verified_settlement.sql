@@ -150,6 +150,12 @@ begin
      or c->'finishedAt' is distinct from s->'terminal'->'proof'->'finishedAt'
      or s->>'kind' is distinct from 'hu-rated' then return false; end if;
   if proof->>'v' is distinct from '1' or proof->>'policyVersion' is distinct from 'terminal.v1'
+     or c->>'format' is distinct from 'hu-duplicate'
+     or c->>'terminalPolicyVersion' is distinct from 'terminal.v1'
+     or c->>'terminalProofId' is distinct from proof->>'id'
+     or c->>'tableId' is distinct from proof->>'tableId'
+     or c->>'activationId' is distinct from proof->>'activationId'
+     or c->>'configDigest' is distinct from proof->>'configDigest'
      or proof->>'rulesVersion' is distinct from 'hu-rated.v1'
      or proof->>'matchId' is distinct from s->>'matchId'
      or (select jsonb_agg(jsonb_build_object('seat',x->'seat','userId',x->'userId') order by (x->>'seat')::int) from jsonb_array_elements(proof->'participants') x)
@@ -161,7 +167,8 @@ begin
   if c->>'reason'='complete' and jsonb_array_length(c->'manifest')<>40 then return false; end if;
   if (c->>'reason'='complete' and proof->>'cause' is distinct from 'hand_limit')
      or (c->>'reason'='forfeit' and (proof->>'cause' is distinct from 'timeout_streak' or coalesce((proof->>'forfeitingSeat')::int,-1) not in (0,1) or coalesce(jsonb_array_length(proof->'timeoutEvidence'),0)<3))
-     or (c->>'reason'='no_show' and (proof->>'cause' is distinct from 'start_deadline' or jsonb_array_length(c->'manifest')<>0))
+     or (c->>'reason'='no_show' and (coalesce(proof->>'cause','') not in ('start_deadline','cancelled_before_deal') or jsonb_array_length(c->'manifest')<>0
+       or (proof->>'cause'='cancelled_before_deal' and coalesce(proof->>'voluntaryCommandId','')='')))
      or (c->>'reason'='abandoned' and proof->>'cause' is distinct from 'mutual_absence')
      or (c->>'reason'='engine_fault' and proof->>'cause' is distinct from 'engine_fault') then return false; end if;
   if jsonb_array_length(c->'manifest')<>jsonb_array_length(s->'hands') then return false; end if;
@@ -258,9 +265,9 @@ begin
   -- Re-delivery returns the historical result, never a second application,
   -- even if an operator subsequently quarantined the evidence.
   if exists(select 1 from public.rating_history where match_id=m and kind='match') then
-    if jsonb_array_length(p->'players') is distinct from 2 or
+    if p->>'format' is distinct from 'hu-duplicate' or jsonb_array_length(p->'players') is distinct from 2 or
       (select count(distinct x->>'userId') from jsonb_array_elements(p->'players') x)<>2 or exists(
-        select 1 from jsonb_array_elements(p->'players') x where not exists(select 1 from public.rating_history h where h.match_id=m and h.kind='match' and h.user_id=(x->>'userId')::uuid and h.outcome=x->>'outcome')) then
+        select 1 from jsonb_array_elements(p->'players') x where not exists(select 1 from public.rating_history h join public.match_players mp on mp.match_id=h.match_id and mp.user_id=h.user_id where h.match_id=m and h.kind='match' and h.user_id=(x->>'userId')::uuid and h.outcome=x->>'outcome' and mp.seat::text=x->>'seat')) then
       raise exception 'duplicate identity mismatch' using errcode='23514'; end if;
     return private.rating_change(m);
   end if;
@@ -274,7 +281,7 @@ begin
       or jsonb_array_length(p->'players') is distinct from 2
       or (select count(distinct x->>'userId') from jsonb_array_elements(p->'players') x)<>2
       or exists(select 1 from jsonb_array_elements(p->'players') x where not exists(
-        select 1 from jsonb_array_elements(c->'players') a where a->>'userId'=x->>'userId' and a->>'outcome'=x->>'outcome')) then
+        select 1 from jsonb_array_elements(c->'players') a where a->>'userId'=x->>'userId' and a->>'outcome'=x->>'outcome' and a->>'seat'=x->>'seat')) then
     raise exception 'rating identity/outcome mismatch' using errcode='23514'; end if;
   result:=private.apply_rating_pre_certificate(p);
   update private.settlement_jobs set state='rated',updated_at=now() where match_id=m;

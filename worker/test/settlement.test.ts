@@ -101,6 +101,43 @@ describe('F07 rated evidence', () => {
     s.terminal = null
     expect((await inspectSettlement(s)).state).toBe('legacy-insufficient')
   })
+  it('quarantines failed hand evidence during catch-up without attempting a rating', async () => {
+    const s = await settlementFixture(undefined, 'forfeit')
+    const h = s.hands[0]
+    h.verification = null
+    h.verified = false
+    h.record.luck!.adjustedBySeat[0]++
+    const writes: { fn: string; p: Record<string, unknown> }[] = []
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const fn = String(input).split('/').at(-1)!
+        const p = JSON.parse(String(init?.body)).p
+        writes.push({ fn, p })
+        if (fn === 'settlement_candidates')
+          return Response.json([{ matchId: s.matchId, hands: [1] }])
+        if (fn === 'audit_hand') return Response.json(h)
+        if (fn === 'audit_settlement') return Response.json(s)
+        return new Response(null, { status: 204 })
+      },
+    )
+    try {
+      await catchUpSettlements(env, s.terminal!.proof.finishedAt)
+      expect(
+        writes.find((x) => x.fn === 'record_settlement_verdict')?.p,
+      ).toMatchObject({
+        matchId: s.matchId,
+        state: 'quarantined',
+        reasons: ['hand_verification_failed'],
+      })
+      expect(writes.some((x) => x.fn === 'apply_rating')).toBe(false)
+      expect(writes.find((x) => x.fn === 'settlement_candidates')?.p).toEqual({
+        limit: 4,
+      })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
   it('shadow defaults read-only; bounded catchup uses durable lease scan', async () => {
     const s = await settlementFixture(undefined, 'no_show')
     const calls: string[] = []

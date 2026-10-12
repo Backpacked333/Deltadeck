@@ -51,8 +51,10 @@ beforeEach(() => {
 
 async function seed(
   reason: 'complete' | 'forfeit' | 'no_show' | 'abandoned' = 'forfeit',
+  alter?: (source: SettlementSource) => void,
 ) {
   const s = await settlementFixture(matchId(), reason)
+  alter?.(s)
   const start = {
     id: s.matchId,
     kind: s.kind,
@@ -124,6 +126,72 @@ async function rating(
 }
 
 describe('F07 SQL certificate fence', () => {
+  it.each(['cancelled_before_deal', 'engine_fault'] as const)(
+    'preserves %s as a void, never a winner',
+    async (cause) => {
+      const s = await seed('no_show', (source) => {
+        const p = source.terminal!.proof
+        p.cause = cause
+        if (cause === 'cancelled_before_deal') {
+          p.voluntaryCommandId = 'cancel-command'
+          p.finishedAt = p.startDeadlineAt! - 1
+        } else {
+          p.reason = 'engine_fault'
+          source.result.reason = 'engine_fault'
+        }
+      })
+      const c = await certify(s)
+      expect(c.disposition).toBe('void')
+      await expect(rating(c)).rejects.toMatchObject({ code: 'P0002' })
+    },
+  )
+  it.each([
+    'manifest_duplicate',
+    'manifest_missing',
+    'participant',
+    'terminal_reason',
+    'private_cards',
+  ] as const)(
+    'invalidates the current certificate on %s source corruption',
+    async (corruption) => {
+      const s = await seed()
+      await verify(s)
+      const c = await certify(s)
+      if (corruption === 'participant')
+        await db.query(
+          'update public.match_players set seat=4 where match_id=$1 and seat=1',
+          [s.matchId],
+        )
+      else if (corruption === 'private_cards')
+        await db.query(
+          "update public.hands_private set holes=jsonb_set(holes,'{0}','[1,2]') where hand_id=$1",
+          [s.hands[0].id],
+        )
+      else {
+        const body = structuredClone(s.terminal)!
+        if (corruption === 'manifest_duplicate')
+          body.proof.completedHands[1] = body.proof.completedHands[0]
+        if (corruption === 'manifest_missing') body.proof.completedHands.pop()
+        if (corruption === 'terminal_reason') body.proof.reason = 'complete'
+        await db.query(
+          'update private.terminal_proofs set body=$2::jsonb where match_id=$1',
+          [s.matchId, JSON.stringify(body)],
+        )
+      }
+      await expect(rating(c)).rejects.toMatchObject({ code: 'P0002' })
+      const audit = await rpc<SettlementSource>('audit_settlement', {
+        matchId: s.matchId,
+      })
+      await expect(
+        rpc('record_settlement_verdict', {
+          matchId: s.matchId,
+          sourceToken: audit.sourceToken,
+          state: 'verified',
+          certificate: c,
+        }),
+      ).rejects.toMatchObject({ code: '23514' })
+    },
+  )
   it('requires current hand.v2 evidence; rates exactly once, with returned historical result', async () => {
     const s = await seed()
     await expect(

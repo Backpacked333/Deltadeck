@@ -7,6 +7,7 @@ import type {
   TerminalProofV1,
 } from '../../src/shared/protocol'
 import { canonicalJSON, evidenceDigest } from './live-evidence'
+import { timeoutAction } from './deadlines'
 import { GRACE_MS, outcomes, RATED_CONFIG } from './rated'
 import type { AuditedHand } from './verify'
 
@@ -33,6 +34,12 @@ export type SettlementCertificate = {
   matchId: string
   sourceToken: string
   evidenceDigest: string
+  format: 'hu-duplicate'
+  tableId: string
+  activationId: string
+  terminalProofId: string
+  terminalPolicyVersion: 'terminal.v1'
+  configDigest: string
   rulesVersion: 'hu-rated.v1'
   verifierVersion: 'hand.v2'
   drawBandVersion: 'draw-band.v1'
@@ -215,6 +222,14 @@ async function inspect(s: SettlementSource): Promise<SettlementVerdict> {
     )
     const final = states.at(-1)!
     if (
+      raw.hand.actions.some(
+        (a, i) =>
+          raw.current.timing[i]?.source === 'timeout' &&
+          !equal(a.action, timeoutAction(states[i])),
+      )
+    )
+      return quarantine('interrupted_timeout_action')
+    if (
       isOver(final) ||
       !equal(final, raw.hand) ||
       ref.actionIndex !== final.actions.length ||
@@ -384,6 +399,12 @@ async function inspect(s: SettlementSource): Promise<SettlementVerdict> {
     certificate: {
       version: SETTLEMENT_VERSION,
       matchId: s.matchId,
+      format: 'hu-duplicate',
+      tableId: p.tableId,
+      activationId: p.activationId,
+      terminalProofId: p.id,
+      terminalPolicyVersion: p.policyVersion,
+      configDigest: p.configDigest,
       sourceToken: s.sourceToken,
       evidenceDigest: await evidenceDigest({
         terminal: s.terminal,

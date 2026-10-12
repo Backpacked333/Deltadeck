@@ -129,6 +129,15 @@ async function inspectHand(
       a.leaves !== hand.leaves ||
       canonicalJSON(a.holes) !== canonicalJSON(hand.holes) ||
       canonicalJSON(a.reveal) !== canonicalJSON(hand.reveal) ||
+      !same(
+        a.netByUser,
+        Object.fromEntries(
+          record.seats.map(({ userId, seat }) => [
+            userId,
+            record.netBySeat[seat],
+          ]),
+        ),
+      ) ||
       a.id !== hand.id ||
       a.matchId !== hand.matchId ||
       a.handNo !== hand.handNo
