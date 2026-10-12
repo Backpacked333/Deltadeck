@@ -63,6 +63,7 @@ describe('F08 exact snapshot acknowledgement', () => {
     service.state.badAck = true
     await sync.start()
     expect((await sync.flush(1000)).status).not.toBe('saved')
+    expect((await sync.flush(1000)).status).not.toBe('saved')
     service.state.badAck = false
     expect((await sync.flush(1000)).status).toBe('saved')
     const writes = service.rpc.mock.calls.filter(([name]) => name === 'write_learning_revision_v1')

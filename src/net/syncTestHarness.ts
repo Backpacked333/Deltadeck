@@ -2,7 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { vi } from 'vitest'
 import type { HandRecord } from '../lib/storage'
 import { digest, canonical } from './syncRevision'
-import type { RemoteRevision, RevisionWrite } from './syncRevision'
+import type { RemoteRevision, RevisionResult, RevisionWrite } from './syncRevision'
 
 export function deferred<T = void>() {
   let resolve!: (value: T) => void
@@ -14,7 +14,7 @@ export function revisionService({ accountId = 'u1', hands = [], curriculum = nul
   const docs = new Map<string, RemoteRevision>()
   for (const h of hands) docs.set(`practice_hand:${h.id}`, { payload: h, serialized: canonical(h), revision: 1, digest: '', lifecycle: h.graded === false ? 'provisional' : 'final' })
   if (curriculum !== null) docs.set('curriculum:curriculum', { payload: curriculum, serialized: canonical(curriculum), revision: 1, digest: '', lifecycle: 'final' })
-  const receipts = new Map<string, unknown>()
+  const receipts = new Map<string, RevisionResult>()
   const state = { docs, hands: new Map(hands.map((h) => [h.id, h])), offline: false, readError: false,
     practice: 0, learning: 0, beforeRead: async () => {}, beforeWrite: async (p: RevisionWrite) => { void p },
     afterWrite: async (p: RevisionWrite) => { void p }, badAck: false, badRead: false }
@@ -39,13 +39,14 @@ export function revisionService({ accountId = 'u1', hands = [], curriculum = nul
     await state.beforeWrite(p)
     const key = `${p.kind}:${p.id}`, existing = docs.get(key), generation = p.kind === 'practice_hand' ? state.practice : state.learning
     if (p.deletionGeneration !== generation) return { data: { status: 'deleted', reason: 'generation_changed' }, error: null }
-    if (receipts.has(p.mutationId)) return { data: receipts.get(p.mutationId), error: null }
+    const receipt = receipts.get(p.mutationId)
+    if (receipt) return { data: state.badAck ? { ...receipt, digest: 'incorrect' } : receipt, error: null }
     if ((existing?.revision ?? 0) !== p.baseRevision) return { data: { status: 'conflict', current: existing?.payload ?? null, serialized: existing?.serialized ?? null, revision: existing?.revision ?? 0, digest: existing?.digest ?? '', lifecycle: existing?.lifecycle ?? 'provisional', deletionGeneration: generation }, error: null }
     if (await digest(p.serialized) !== p.digest || canonical(JSON.parse(p.serialized)) !== canonical(p.payload)) throw new Error('bad payload')
     const revision = p.baseRevision + 1
     docs.set(key, { payload: p.payload, serialized: p.serialized, revision, digest: p.digest, lifecycle: p.lifecycle })
     if (p.kind === 'practice_hand') state.hands.set(p.id, p.payload as HandRecord)
-    const result = { status: 'accepted', mutationId: p.mutationId, digest: p.digest, revision, deletionGeneration: generation }
+    const result: RevisionResult = { status: 'accepted', mutationId: p.mutationId, digest: p.digest, revision, deletionGeneration: generation }
     receipts.set(p.mutationId, result)
     await state.afterWrite(p)
     return { data: state.badAck ? { ...result, digest: 'incorrect' } : result, error: null }
