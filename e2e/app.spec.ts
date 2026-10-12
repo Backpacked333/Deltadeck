@@ -205,3 +205,39 @@ test('fair play and terms open from the lobby and are accessible', async ({
     expect(serious.map((v) => `${v.id}: ${v.help}`)).toEqual([])
   }
 })
+
+test('grade chips and bars meet contrast in the light theme', async ({
+  page,
+}) => {
+  await page.emulateMedia({ colorScheme: 'light' })
+  await onboard(page, 'rules')
+  await playHand(page)
+  await expect(page.locator('.review .grade').first()).toBeVisible({
+    timeout: 15_000,
+  })
+  // Check settled colours, not frames of a fade-in.
+  const contrast = async () => {
+    await page.waitForFunction(() =>
+      document
+        .getAnimations()
+        .every(
+          (a) =>
+            a.playState !== 'running' ||
+            a.effect?.getTiming().iterations === Infinity,
+        ),
+    )
+    // axe misreads the accuracy badge's span as sitting on the page
+    // background; it is on --brand and is not part of the grade palette.
+    const results = await new AxeBuilder({ page })
+      .withRules(['color-contrast'])
+      .exclude('.accuracy-badge')
+      .analyze()
+    return results.violations.flatMap((v) =>
+      v.nodes.map((n) => `${n.target}: ${n.failureSummary}`),
+    )
+  }
+  expect(await contrast()).toEqual([])
+  await page.getByRole('button', { name: /Progress/ }).click()
+  await expect(page.locator('.grade-bars .grade').first()).toBeVisible()
+  expect(await contrast()).toEqual([])
+})
