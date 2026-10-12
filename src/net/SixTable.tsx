@@ -388,6 +388,8 @@ function plates(
     return {
       seat: p.seat,
       username: p.username,
+      ...(p.avatar ? { avatar: p.avatar } : {}),
+      ...(p.school ? { school: p.school } : {}),
       stack: inHand?.stack ?? p.stack ?? 0,
       bet: inHand?.bet ?? 0,
       // Sitting out takes effect from the next hand: a player who sat out
