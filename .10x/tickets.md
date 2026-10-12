@@ -14,7 +14,7 @@ Inputs read: `.10x/status.md`; ADR `.10x/decisions/architect/multiplayer-platfor
 
 ## How a session uses this file
 
-1. Pick the first ticket in §Critical path whose dependencies are merged, or any ticket in a free lane. Prepend the operating contract from `.10x/prompts.md` §0 (branch `claude/amazing-ride-4vip4x` until merged).
+1. Pick the first ticket in §Critical path whose dependencies are merged, or any ticket in a free lane. Prepend the operating contract from `.10x/prompts.md` §0. Since 2026-10-10 that file lives on `main` and covers only the open tickets; the older version on `claude/amazing-ride-4vip4x` is superseded.
 2. **The acceptance tests are the definition of done.** Write each one red first under the exact file and test name given, then make it green. Extra tests are welcome. Renaming a listed test needs a line in the SDE log.
 3. **Respect the cut line.** If time runs out, ship what is above it, green, and list the rest as next steps.
 4. **Fold in reviews first.** Before starting any S7 or P1 ticket, read the security and DBA reviews (Prompts 3 and 4) and apply anything they attached to that ticket id (§Review fold-in).

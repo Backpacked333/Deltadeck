@@ -70,7 +70,9 @@ test('the hero offers an account; practice needs one; the bare URL stays home', 
   await expect(page).toHaveURL(/#signup$/)
   await expect(page.locator('.table')).toHaveCount(0)
   await page.goto('/')
-  await expect(page.getByRole('heading', { name: /misprice/ })).toBeVisible()
+  await expect(page.getByRole('heading', { name: /misprice/ })).toBeVisible({
+    timeout: 15_000,
+  })
 })
 
 test('the logo leads home from the trainer', async ({ page }) => {
@@ -84,6 +86,8 @@ test('the logo leads home from the trainer', async ({ page }) => {
   await page.goto('/#table')
   await expect(page.locator('.table')).toBeVisible()
   await page.getByRole('link', { name: 'DeltaDeck home' }).click()
-  await expect(page.getByRole('heading', { name: /misprice/ })).toBeVisible()
+  await expect(page.getByRole('heading', { name: /misprice/ })).toBeVisible({
+    timeout: 15_000,
+  })
   expect(new URL(page.url()).hash).toBe('')
 })

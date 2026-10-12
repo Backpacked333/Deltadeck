@@ -279,3 +279,4 @@ Site + game server: one Cloudflare Worker `quantpoker` (Workers Paid, Git-connec
 - [ ] Next in Phase 1: P1-12 ratings (`ratings` migration, Glicko-2 at match end), S7-05 telemetry
 - [ ] User: decide the open rematch-link finding on PR #19 (recommendation: leave it; it only undercounts rematches during an archive outage of about 15 minutes or more)
 - [ ] SDE: a build marker in `/api/health` so `verify-deploy` sees Worker-only changes
+- [x] Prompts rewritten for what is left (`.10x/prompts.md` on `main`, 2026-10-10): 16 prompts covering every open ticket (S7-05, S7-11, P1-05…P1-07, the rest of P1-16, P1-17…P1-22, the casual 6-max PR plan from PR-05, P2-07, P2-09…P2-15) plus the two Later prompts; refreshed at `13fe865` after PRs #27–#39; supersedes the 2026-10-09 version on `claude/amazing-ride-4vip4x`

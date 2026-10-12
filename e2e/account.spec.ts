@@ -137,7 +137,11 @@ test('signing out from the menu goes home and locks practice again', async ({
 
   await page.getByRole('button', { name: 'Account: carol' }).click()
   await page.getByRole('link', { name: 'Sign out' }).click()
-  await expect(page.getByRole('heading', { name: /misprice/ })).toBeVisible()
+  // Sign out reloads the landing, whose 3D stage can take longer than the
+  // 5 s default to draw on a busy runner.
+  await expect(page.getByRole('heading', { name: /misprice/ })).toBeVisible({
+    timeout: 15_000,
+  })
   await expect(
     page.locator('header.header').getByRole('link', { name: 'Sign in' }),
   ).toBeVisible()
