@@ -1,6 +1,7 @@
 // Your profile (#me): one private page with everything the account holds
-// about this player — practice against Atlas, online rating and matches,
-// lessons and challenge scores. A lazy chunk; the account parts load from
+// about this player — the portrait read from every hand they have played,
+// practice against Atlas, online rating and matches, lessons and challenge
+// scores. A lazy chunk; the account parts load from
 // the online service, the rest is already in this browser.
 import { useEffect, useMemo, useState } from 'react'
 import {
@@ -24,6 +25,7 @@ import { loadOnline } from '../net/supabase'
 import type { Online as OnlineService } from '../net/supabase'
 import { loadAccountHistory } from './account'
 import type { AccountHistory } from './account'
+import { Portrait } from './portrait/Portrait'
 import { ProfilePicture } from './ProfilePicture'
 
 type Online =
@@ -170,6 +172,16 @@ export default function MyProfile({
           </small>
         </div>
       </div>
+
+      {online.status !== 'loading' && (
+        <Portrait
+          client={
+            account && online.status === 'ready' ? online.service.client : null
+          }
+          userId={account?.profile.player.userId ?? null}
+          local={progress.hands}
+        />
+      )}
 
       <section className="panel" aria-labelledby="me-practice">
         <div className="panel-head">

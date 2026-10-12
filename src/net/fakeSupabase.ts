@@ -1,5 +1,5 @@
 // Test-only: an in-memory stand-in for the Supabase client's table reads
-// (select with eq, neq, in, order, limit, maybeSingle) and RPCs, over rows
+// (select with eq, neq, in, order, limit, range, maybeSingle) and RPCs, over rows
 // the test provides. Every read is recorded so a test can check what was
 // asked. Columns are not projected: a row comes back whole.
 import type { SupabaseClient } from '@supabase/supabase-js'
@@ -26,6 +26,7 @@ export function fakeSupabase({
     const asked: string[] = []
     let order: { column: string; ascending: boolean } | null = null
     let limit = Infinity
+    let offset = 0
     const result = () => {
       reads.push({ table, filters: asked })
       if (fail.includes(table))
@@ -39,7 +40,7 @@ export function fakeSupabase({
             (ascending ? 1 : -1),
         )
       }
-      return { data: rows.slice(0, limit), error: null }
+      return { data: rows.slice(offset, offset + limit), error: null }
     }
     const query = {
       select: () => query,
@@ -64,6 +65,12 @@ export function fakeSupabase({
       },
       limit: (n: number) => {
         limit = n
+        return query
+      },
+      range: (from: number, to: number) => {
+        asked.push(`range ${from}-${to}`)
+        offset = from
+        limit = to - from + 1
         return query
       },
       maybeSingle: async () => {
