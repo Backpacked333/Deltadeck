@@ -7,6 +7,10 @@ Last updated: 2026-10-11 by SDE (casual 6-max: PR-01 to PR-25 live in #34 to #69
 - **Merge when green.** Open a PR for each finished piece and merge it to `main` once CI passes. A merge deploys to production, so verify the deploy after each one.
 - **Q1 is answered: B.** Rated heads-up uses fresh decks every hand, with the result luck-adjusted by settling all-in pots at equity.
 
+## Live games (2026-10-12)
+
+Built on `claude/eloquent-feynman-fgkjdx`: open-games list, request to join (host Accept/Decline, 60 s seat reservation), 6-character game codes and `#join/CODE` links, a ping/RTT dot in the match bar, a table placed near its creator, and pressed-state feedback on the action bar. Decision: the ADR amendment "Live games" in `.10x/decisions/architect/multiplayer-platform.md`. Deploy the Worker before the site (the host-only `invite` frame reaches old clients). To measure: `scripts/smoke-ws.mjs` before and after.
+
 ## Accounts first (2026-10-11)
 
 Accounts, the gate, and history on the account. Six of seven PRs are merged, each green, and each deploy was verified (`verify-deploy`):
