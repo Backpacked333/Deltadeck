@@ -120,7 +120,7 @@ export function HandReview({
     ready && last >= 0
       ? grades[last]!.chosen.ev - decisions[last].snapshot.invested[0]
       : null
-  const luck = expectedNet === null ? null : result.net - expectedNet
+  const modelGap = expectedNet === null ? null : result.net - expectedNet
   const notes = game.history.filter((h) => h.player === 1 && h.note)
   const grade = grades[selected]
   const decision = decisions[selected]
@@ -135,10 +135,10 @@ export function HandReview({
           <div
             className="accuracy-badge"
             role="img"
-            aria-label={`Accuracy ${Math.round(accuracy)}`}
+            aria-label={`Modeled accuracy ${Math.round(accuracy)}`}
           >
             <strong>{Math.round(accuracy)}</strong>
-            <span>accuracy</span>
+            <span>modeled accuracy</span>
           </div>
         )}
       </div>
@@ -163,10 +163,14 @@ export function HandReview({
               </strong>
             </div>
             <div>
-              <span className="label">Variance</span>
-              <strong>{luck === null ? '…' : signed(luck)}</strong>
+              <span className="label">Actual − modeled</span>
+              <strong>{modelGap === null ? '…' : signed(modelGap)}</strong>
             </div>
           </div>
+          <p className="muted">
+            This gap includes outcome variation and model limitations, not just
+            luck. Model grades are not an unaided learning assessment.
+          </p>
           <ol className="timeline">
             {decisions.map((d, i) => (
               <li key={i}>

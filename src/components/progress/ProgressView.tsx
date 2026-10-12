@@ -48,9 +48,9 @@ export function ProgressView({
           <Sparkles size={26} />
           <h3>Your first insight is one hand away.</h3>
           <p>
-            Play a few hands and this page will separate skill from luck: how
-            accurate your decisions are, how well calibrated your reads are, and
-            how much of your result was variance.
+            Play a few hands to compare your decisions and reads with the
+            practice model. Results and modeled expectations are shown
+            separately, with their coverage and limits.
           </p>
           <button className="btn btn-primary" onClick={onPlay}>
             Go to the table
@@ -73,12 +73,12 @@ export function ProgressView({
       <div className="tiles">
         <div className="tile">
           <Gauge size={18} />
-          <span className="label">Decision accuracy</span>
+          <span className="label">Modeled decision accuracy</span>
           <strong>
             {stats.accuracy === null ? '—' : Math.round(stats.accuracy)}
           </strong>
           <small>
-            {stats.decisions.length} graded decisions ·{' '}
+            {stats.decisions.length} nonguided graded decisions ·{' '}
             {stats.evLost.toFixed(0)} chips of EV given up
           </small>
         </div>
@@ -98,57 +98,84 @@ export function ProgressView({
           </small>
         </div>
         <div className="tile">
-          {stats.net >= 0 ? (
+          {stats.actualAll >= 0 ? (
             <ArrowUpRight size={18} />
           ) : (
             <ArrowDownRight size={18} />
           )}
-          <span className="label">Chips won</span>
-          <strong className={stats.net >= 0 ? 'positive' : 'negative'}>
-            {signed(stats.net)}
+          <span className="label">Actual result · all hands</span>
+          <strong className={stats.actualAll >= 0 ? 'positive' : 'negative'}>
+            {signed(stats.actualAll)}
           </strong>
-          <small>model expected {signed(stats.expected)}</small>
+          <small>{stats.hands.length} hands, including unmodeled results</small>
         </div>
         <div className="tile">
           <Waves size={18} />
-          <span className="label">Variance so far</span>
-          <strong>{signed(stats.net - stats.expected)}</strong>
-          <small>result minus expectation: luck, not skill</small>
+          <span className="label">Actual − modeled · covered hands</span>
+          <strong>
+            {stats.modelGap === null ? '—' : signed(stats.modelGap)}
+          </strong>
+          <small>
+            {stats.coverage.evaluated} matched hands · not a pure luck measure
+          </small>
         </div>
       </div>
 
       <section className="panel">
         <div className="panel-head">
           <div>
-            <h2>Luck versus skill</h2>
+            <h2>Results and model coverage</h2>
             <p>
-              Your real chip result against what the model expected from your
-              decisions. The gap between the lines is variance; it shrinks
-              relative to the total as you play more hands.
+              Modeled result available for {stats.coverage.evaluated} of{' '}
+              {stats.coverage.total} hands. Both lines use only those same
+              hands, in played order. The gap includes outcome variation and
+              model limitations; it does not measure skill or prove learning.
             </p>
           </div>
           <div className="legend">
             <span>
-              <i className="series-key actual" /> Result
+              <i className="series-key actual" /> Actual · covered hands
             </span>
             <span>
-              <i className="series-key expected" /> Expected from decisions
+              <i className="series-key expected" /> Modeled · covered hands
             </span>
           </div>
         </div>
-        <LineChart
-          width={980}
-          height={260}
-          label="Cumulative chips: result versus expected"
-          series={[
-            {
-              label: 'Expected',
-              className: 'expected',
-              values: stats.expectedLine,
-            },
-            { label: 'Result', className: 'actual', values: stats.netLine },
-          ]}
-        />
+        <p className="muted">
+          {stats.coverage.eligible} nonguided graded hands eligible ·{' '}
+          {stats.coverage.evaluated} with a modeled result. Excluded:{' '}
+          {stats.coverage.guided} guided, {stats.coverage.pending} pending,{' '}
+          {stats.coverage.ungraded} without grades. Missing modeled result:{' '}
+          {stats.coverage.missingModel}. Nonguided does not establish absence of
+          hints; these are practice-model metrics, not unaided assessments.
+        </p>
+        {stats.modeledCovered === null || stats.actualCovered === null ? (
+          <p>Modeled result unknown. Actual results remain available above.</p>
+        ) : (
+          <>
+            <p>
+              Actual on covered hands: {signed(stats.actualCovered)} · Modeled:{' '}
+              {signed(stats.modeledCovered)}
+            </p>
+            <LineChart
+              width={980}
+              height={260}
+              label="Cumulative chips on covered hands: actual versus modeled"
+              series={[
+                {
+                  label: 'Modeled',
+                  className: 'expected',
+                  values: stats.expectedLine,
+                },
+                {
+                  label: 'Actual',
+                  className: 'actual',
+                  values: stats.coveredNetLine,
+                },
+              ]}
+            />
+          </>
+        )}
       </section>
 
       <div className="panel-row">
