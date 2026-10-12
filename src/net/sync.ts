@@ -429,24 +429,30 @@ export class PracticeSync {
       await this.send()
       for (const p of this.participants) {
         const result = await p.flush(await p.barrier(this.scope), ms)
-        if (result.status !== 'saved') reasons.push(`Evidence outbox: ${result.status}`)
+        if (result.status !== 'saved') reasons.push(`Evidence outbox: ${result.status}`, ...result.reasons)
       }
     }
     try { await Promise.race([run(), new Promise<void>((resolve) => { timer = setTimeout(() => { timeout = true; resolve() }, ms) })]) }
     catch (e) { reasons.push(errorText(e)) }
     finally { if (timer) clearTimeout(timer) }
     const pending = (await this.barrier()).targets.filter((t) => { const e = this.entries.get(keyOf(t.kind as RevisionKind, t.id)); return e?.local !== e?.base || e?.conflict || !!e?.mutation })
+    const participantStates = [...this.participants].map((p) => p.status?.(this.scope))
     if (this.guest) reasons.push('Unclaimed guest work is not saved to this account; import or export before signing out')
-    const status: FlushResult['status'] = !this.live() ? 'account_changed' : this.conflicts().length ? 'conflict'
-      : [...this.problems.keys()].some((k) => k !== 'read') || reasons.length ? 'blocked'
-      : !this.ready ? 'unknown' : timeout || this.pending() || this.sending ? 'timeout' : 'saved'
+    const status: FlushResult['status'] = !this.live() ? 'account_changed' : this.conflicts().length || participantStates.includes('conflict') ? 'conflict'
+      : [...this.problems.keys()].some((k) => k !== 'read') || reasons.length || participantStates.includes('blocked') ? 'blocked'
+      : !this.ready ? 'unknown' : timeout || this.pending() || this.sending || participantStates.some((s) => s && s !== 'saved_to_account') ? 'timeout' : 'saved'
     return { barrier, status, pending, reasons: [...this.problems.values(), ...reasons] }
   }
   async exportAccount(): Promise<Blob> {
+    if (!this.live()) throw new Error('Account changed')
+    // A producer may not have loaded, or a future schema may have refused its writer.
+    const rawEvidence = typeof indexedDB === 'undefined' ? null
+      : await (await import('./syncOutbox')).exportStoredAccount(this.userId)
     const outboxes = await Promise.all([...this.participants].map(async (p) => JSON.parse(await (await p.exportAccount(this.scope)).text()) as unknown))
+    if (!this.live()) throw new Error('Account changed')
     return new Blob([JSON.stringify({ schema: 'deltadeck.recovery.v1', accountId: this.userId, progress: this.latest,
       entries: [...this.entries.values()], generations: this.generations, unclaimed: this.guest, problems: [...this.problems.values()],
-      recoveryJournals: Object.fromEntries(storageKeys().filter((k) => k.startsWith(`${PREFIX}${this.userId}.`)).map((k) => [k, localStorage.getItem(k)])), outboxes }, null, 2)], { type: 'application/json' })
+      recoveryJournals: Object.fromEntries(storageKeys().filter((k) => k.startsWith(`${PREFIX}${this.userId}.`)).map((k) => [k, localStorage.getItem(k)])), rawEvidence, outboxes }, null, 2)], { type: 'application/json' })
   }
   async clearDevice() {
     this.stop()

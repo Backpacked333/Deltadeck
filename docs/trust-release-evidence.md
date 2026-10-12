@@ -22,6 +22,55 @@ two-device account recovery, cloud CPU headroom and an elapsed human study are
 separate gates. Synthetic rating-season tests exercise mathematics/ordering as
 DB owner, not certification of 5,000 real poker matches.
 
+## Independent acceptance repair: F08 and F10
+
+Repair branch: `devin/1791835277-evidence-repair`, directly based on integrated
+revision `7c7a4dbf84ea83544e0363d6a14f6de75faa9f05`. Both independently supplied
+regressions failed on that revision before the repair. This branch changes only
+client evidence recovery/capture, their tests, and this evidence record; it does
+not change SQL migrations, Worker rules, rating certificates, delayed-assessment
+timing, privacy/redaction contracts or rollout controls.
+
+- **F10 / initialization is a save participant:** `SessionKeeper` synchronously
+  installs `startEvidenceBootstrap` before importing the evidence runtime.
+  Account reconciliation, module loading, deletion cleanup, local restoration,
+  source capture and remote verification must succeed before that participant
+  is ready. Failure stays blocked; ordinary account flush/sign-out retry reruns
+  initialization without requiring a curriculum mount. Stopped accounts/epochs
+  cannot register a late runtime, and changed deletion generations invalidate
+  readiness. A partial runtime is stopped/unregistered on failure.
+- **F10 / account recovery is independent of runtime registration:** whole-account
+  export reads all IndexedDB stores at the database's existing version and filters
+  every row by exact account ID, including unregistered and future-schema rows.
+  It does not create an empty database, write/clear rows, or export another
+  account. An account switch before export completion rejects the result.
+  Unsupported data is recovery material, not permission to upload or claim saved.
+- **F08 / current source draining:** capture requests arriving during hashing,
+  enqueue, or the promise-cleanup microtask window trigger another pass using the
+  latest sources. Save barriers capture current sources, extend evidence watermarks
+  after delayed ACKs, and recheck participant state at account-save completion.
+  Export waits for an active capture. A document changed after its own barrier
+  remains unsaved unless its autosave completed; retry captures a new barrier.
+  Continuous edits or service failure can still time out/block, never certify an
+  older revision as the current account save.
+
+Regression mapping:
+
+| Boundary | Executable local evidence |
+| --- | --- |
+| Original bootstrap failure | `src/curriculum/learning/independent-review.test.ts` (F10) |
+| Original final-grade race and promise-cleanup gap | `src/curriculum/learning/independent-capture-review.test.ts` (F08); both assert before an extra barrier/capture |
+| Cleanup/restore/offline retry, no-mount initialization, account switch, delayed evidence ACK | `src/curriculum/learning/runtimeBootstrap.test.ts` (F08/F10) |
+| Pre-import fence, first-read retry, generation/epoch drift, final participant recheck, late export rejection | `src/net/evidenceBootstrap.test.ts` (F08/F10) |
+| Failed bootstrap cannot invoke sign-out privacy cleanup | `src/net/AccountPage.test.tsx` (F10), component test only |
+| Unregistered future-schema whole-account export and no-database export | `src/net/syncOutbox.test.ts` (F10), actual headless IndexedDB API only |
+
+Removing the final promise-cleanup re-drain reproduced the new F08 microtask
+regression; restoring it passed. No application UI/manual browser testing or
+production access was performed in this repair lane. Parent must run recorded
+application acceptance on the repaired revision, including cold account start,
+cleanup failure, recovery export/retry, final-grade save and account switching.
+
 ## Reproduce local checks
 
 Use Node 24 (`. "$HOME/.nvm/nvm.sh" && nvm use 24`) and `npm ci` on a clean clone.
@@ -242,7 +291,7 @@ learning evidence remain separate constructs.
 - [ ] Human pilot protocol/content/ethics review and genuine delayed follow-up.
 - [ ] Statistical efficacy evaluation and a separately approved recommendation rollout.
 
-## Final local execution record
+## Historical integration execution record (before independent repairs)
 
 - Frontend full suite: **131 files, 1,537 tests passed**, with 11 browser-gated
   tests skipped by default. Final changed-learning/runtime/Session/Progress rerun:
@@ -264,3 +313,31 @@ learning evidence remain separate constructs.
   local fake-host DNS warnings occurred with the suite still passing. No cloud
   runtime claim is inferred from these logs.
 - No active Git pre-commit hook was present (`.git/hooks` contains samples only).
+
+## Final independent-repair execution record
+
+Executed locally with Node **24.21.0** against the repaired source, 2026-10-12:
+
+- Final clean-revision `npm test`: **135 files, 1,556 tests passed**; two optional
+  storage files / 13 tests skipped by the default browser gate, not waived.
+- Explicit `INDEXEDDB_BROWSER_TESTS=1 npx vitest run src/net/syncOutbox.test.ts
+  src/curriculum/learning/cleanup.test.ts`: **2 files, all 13 tests passed**.
+  Installed the lockfile-selected Chromium via the documented
+  `npx playwright install chromium`; these are bare-document API tests only.
+- Final focused rerun of the two independent probes, runtime/bootstrap,
+  practice-sync, Session and AccountPage suites: **8 files, 73 tests passed**.
+- `npm run worker:test`: **33 files, 529 tests passed**. No Worker source changed.
+  Existing workerd negative-input/fake-host DNS warnings were emitted; not
+  interpreted as production observations.
+- Final `npm run typecheck`, `npm run typecheck:worker`, `npm run lint`,
+  `npm run build` and `git diff --check`: **passed**. Entry **146.1 kB gzip**
+  (Vite raw display 146.15 kB), below the unchanged 150 kB budget. Evidence
+  runtime and IndexedDB writer/recovery module remain lazy-loaded.
+- No active Git pre-commit hook. No PR, merge, deploy, production query/mutation,
+  app UI/manual browser test or CI/security-control change in this repair lane.
+  An optional Chromium-cache environment suggestion is approval-gated and is
+  not a repository or production configuration change.
+
+The remaining acceptance and release gates above are unchanged. These local
+results are not new evidence of production parity, real-device/browser recovery,
+operational performance or learner effectiveness.

@@ -18,6 +18,7 @@ import { loadPlayer } from './players'
 import { storageKeyFor } from './sessionKey'
 import { loadOnline } from './supabase'
 import { activeSync, PracticeSync, SYNC_CHANGED } from './sync'
+import { startEvidenceBootstrap } from './evidenceBootstrap'
 
 function stored(key: string) {
   try {
@@ -95,18 +96,7 @@ export default function SessionKeeper({
       })
       sync.current = next
       next.note(latest.current)
-      void import('../curriculum/learning/runtime')
-        .then(({ startLearningEvidence }) => {
-          if (live && generation === mine && activeSync() === next)
-            startLearningEvidence()
-        })
-        .catch(() => {
-          if (live && generation === mine)
-            next.reportSourceBlocked(
-              'evidence',
-              'Evidence module unavailable; reload before signing out',
-            )
-        })
+      void startEvidenceBootstrap(next)
       void next.start()
       try {
         const player = await loadPlayer(online.client, userId)

@@ -9,6 +9,7 @@ import { emptyProgress } from '../lib/storage'
 import type { HandRecord } from '../lib/storage'
 import { revisionService } from './syncTestHarness'
 import { activeSync, PracticeSync } from './sync'
+import { startEvidenceBootstrap } from './evidenceBootstrap'
 import { AccountPage, AuthCallback, SignOut } from './AccountPage'
 import type { Online } from './supabase'
 
@@ -163,6 +164,20 @@ describe('AuthCallback', () => {
 })
 
 describe('SignOut', () => {
+  it('F10 failed pre-runtime evidence bootstrap prevents sign-out from clearing private work', async () => {
+    const { sync } = await prepared()
+    seedSession()
+    localStorage.setItem('quantpoker.learning.v2', '{"private":"retained"}')
+    const replace = vi.fn(); vi.stubGlobal('location', { ...window.location, replace })
+    const clear = vi.spyOn(sync, 'clearDevice')
+    await startEvidenceBootstrap(sync, false, async () => { throw new Error('Evidence chunk unavailable') })
+    render(<SignOut online={online()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('not verified')
+    expect(clear).not.toHaveBeenCalled()
+    expect(replace).not.toHaveBeenCalled()
+    expect(localStorage.getItem('quantpoker.learning.v2')).toBe('{"private":"retained"}')
+    expect(signedIn()).toBe(true)
+  })
   it('signs this browser out, forgets the account and starts at the home page', async () => {
     await prepared()
     seedSession({ username: 'alice' })

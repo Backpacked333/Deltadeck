@@ -49,8 +49,17 @@ export async function clearOutboxDevice(factory: IDBFactory = indexedDB): Promis
 }
 
 /** Read-only export also works when a future database version blocks the old writer. */
-async function exportStoredAccount(accountId: string, factory: IDBFactory): Promise<unknown> {
-  const db = await request(factory.open(OUTBOX_DB))
+export async function exportStoredAccount(accountId: string, factory: IDBFactory = indexedDB): Promise<unknown> {
+  const db = await new Promise<IDBDatabase | null>((resolve, reject) => {
+    const r = factory.open(OUTBOX_DB)
+    let missing = false, blocked = false
+    r.onupgradeneeded = () => { missing = true; r.transaction!.abort() }
+    r.onerror = () => missing ? resolve(null) : reject(r.error ?? new Error('Recovery export unavailable'))
+    r.onblocked = () => { blocked = true; reject(new Error('Recovery export blocked by another tab; close it and retry')) }
+    r.onsuccess = () => { if (blocked) r.result.close(); else resolve(r.result) }
+  })
+  // Export must not create an empty v1 database that the v1 writer cannot initialize.
+  if (!db) return { databaseVersion: null, stores: {} }
   try {
     const names = [...db.objectStoreNames]
     if (!names.length) return { databaseVersion: db.version, stores: {} }

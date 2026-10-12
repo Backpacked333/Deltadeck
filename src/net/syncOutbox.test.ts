@@ -5,12 +5,14 @@ import { chromium } from 'playwright'
 import type { Browser, Page } from 'playwright'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type * as API from './syncOutbox'
+import type * as SyncAPI from './sync'
 
-declare global { interface Window { outboxAPI: typeof API } }
+declare global { interface Window { outboxAPI: typeof API; syncAPI: typeof SyncAPI } }
 let browser: Browser, page: Page, url: string
 const enabled = process.env.INDEXEDDB_BROWSER_TESTS === '1'
 const server = createServer((_req, res) => res.end('<!doctype html><title>IndexedDB API tests</title>'))
 const bundle = buildSync({ entryPoints: ['src/net/syncOutbox.ts'], bundle: true, format: 'iife', globalName: 'outboxAPI', write: false }).outputFiles[0]!.text
+const syncBundle = buildSync({ entryPoints: ['src/net/sync.ts'], bundle: true, format: 'iife', globalName: 'syncAPI', write: false }).outputFiles[0]!.text
 beforeAll(async () => {
   if (!enabled) return
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -186,5 +188,47 @@ describe.skipIf(!enabled)('F08–F10 real IndexedDB API (headless, no applicatio
     expect(result.blocked).toBe(true)
     expect(result.data.recovery.databaseVersion).toBe(2)
     expect(result.data.recovery.stores.events).toEqual([{ schema: 2, accountId: 'A', id: 'recover', private: 'preserved' }])
+  })
+  it('F10 account export before evidence registration does not create a broken empty database', async () => {
+    await page.addScriptTag({ content: syncBundle })
+    const result = await page.evaluate(async () => {
+      const sync = new window.syncAPI.PracticeSync({} as never, 'A', { merge: () => {}, reloadLearning: () => {} })
+      const data = JSON.parse(await (await sync.exportAccount()).text())
+      sync.stop()
+      const db = await window.outboxAPI.openOutbox()
+      const stores = Array.from(db.objectStoreNames)
+      db.close(); return { data, stores }
+    })
+    expect(result.data.rawEvidence).toEqual({ databaseVersion: null, stores: {} })
+    expect(result.stores.sort()).toEqual(['events', 'jobs', 'scopes'])
+  })
+  it('F10 whole-account export recovers unregistered future-schema evidence without another account or mutation', async () => {
+    await page.addScriptTag({ content: syncBundle })
+    const result = await page.evaluate(async () => {
+      const { OUTBOX_DB, openOutbox } = window.outboxAPI
+      const original = await openOutbox(); original.close()
+      const opening = indexedDB.open(OUTBOX_DB, 2)
+      opening.onupgradeneeded = () => { opening.result.createObjectStore('future_notes', { keyPath: ['accountId', 'id'] }) }
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        opening.onsuccess = () => resolve(opening.result); opening.onerror = () => reject(opening.error)
+      })
+      const tx = db.transaction(Array.from(db.objectStoreNames), 'readwrite')
+      for (const accountId of ['A', 'B']) for (const name of Array.from(db.objectStoreNames))
+        tx.objectStore(name).put({ schema: 99, accountId, id: `${name}-${accountId}`, private: `private-${accountId}` })
+      await new Promise<void>((resolve, reject) => { tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error) })
+      db.close()
+      const sync = new window.syncAPI.PracticeSync({} as never, 'A', { merge: () => {}, reloadLearning: () => {} })
+      const exported = await (await sync.exportAccount()).text(), data = JSON.parse(exported)
+      sync.stop()
+      const preserved = await window.outboxAPI.exportStoredAccount('B')
+      return { data, exported, preserved }
+    })
+    expect(result.data.outboxes).toEqual([])
+    expect(result.data.rawEvidence.databaseVersion).toBe(2)
+    for (const store of ['events', 'jobs', 'scopes', 'future_notes']) {
+      expect(result.data.rawEvidence.stores[store]).toEqual([{ schema: 99, accountId: 'A', id: `${store}-A`, private: 'private-A' }])
+      expect((result.preserved as { stores: Record<string, unknown[]> }).stores[store]).toEqual([{ schema: 99, accountId: 'B', id: `${store}-B`, private: 'private-B' }])
+    }
+    expect(result.exported).not.toContain('private-B')
   })
 })

@@ -30,6 +30,7 @@ import {
 import type { LearningEvent, StoredEvent } from './types'
 import { validEvent } from './validate'
 import { cleanupDeletedEvidence } from './cleanup'
+import { startEvidenceBootstrap } from '../../net/evidenceBootstrap'
 
 export interface Assignment {
   protocol: string
@@ -54,6 +55,8 @@ export class EvidenceRuntime implements SaveParticipant {
   private active = true
   private seen = new Map<string, string>()
   private capturePending: Promise<void> | null = null
+  private captureAgain = false
+  private captureSession: LearningSession | null = null
   private refreshing: Promise<void> | null = null
   private unregister: () => void = () => {}
   private lastInput = ''
@@ -119,17 +122,28 @@ export class EvidenceRuntime implements SaveParticipant {
     changed()
   }
   capture(session?: LearningSession | null) {
-    if (this.capturePending || !this.live())
-      return this.capturePending ?? Promise.resolve()
+    if (!this.live()) return Promise.resolve()
+    this.captureAgain = true
+    this.captureSession = session ?? attachedSession
+    if (this.capturePending) return this.capturePending
+    let failed = false
     this.capturePending = Promise.resolve()
-      .then(() => this.captureSources(session))
+      .then(async () => {
+        while (this.captureAgain && this.live()) {
+          this.captureAgain = false
+          await this.captureSources(this.captureSession)
+        }
+      })
       .catch((e) => {
+        failed = true
         this.error = String(e)
-        this.sync.reportSourceBlocked('evidence', this.error)
+        if (this.live()) this.sync.reportSourceBlocked('evidence', this.error)
         changed()
       })
       .finally(() => {
         this.capturePending = null
+        if (!failed && this.captureAgain && this.live())
+          return this.capture(this.captureSession)
       })
     return this.capturePending
   }
@@ -295,8 +309,10 @@ export class EvidenceRuntime implements SaveParticipant {
     this.lastInput = ''
     await this.outbox.retry()
     await this.capture(attachedSession)
-    if (!this.error) this.sync.reportSourceBlocked('evidence', null)
-    await this.refresh()
+    if (!this.error) {
+      this.sync.reportSourceBlocked('evidence', null)
+      await this.refresh()
+    }
   }
   status() {
     return this.error
@@ -306,20 +322,28 @@ export class EvidenceRuntime implements SaveParticipant {
         : this.outbox.status()
   }
   async barrier(scope: SyncScope) {
-    await this.capturePending
+    if (this.error) await this.retry()
+    else await this.capture(attachedSession)
     return this.outbox.barrier(scope)
   }
-  flush(barrier: SaveBarrier, timeoutMs: number) {
-    if (this.error)
-      return Promise.resolve({
-        barrier,
-        status: 'blocked' as const,
-        pending: [],
-        reasons: [this.error],
-      })
-    return this.outbox.flush(barrier, timeoutMs)
+  async flush(barrier: SaveBarrier, timeoutMs: number) {
+    const until = performance.now() + timeoutMs
+    for (;;) {
+      if (this.error)
+        return { barrier, status: 'blocked' as const, pending: [], reasons: [this.error] }
+      const result = await this.outbox.flush(barrier, Math.max(0, until - performance.now()))
+      if (result.status !== 'saved') return result
+      await this.capture(attachedSession)
+      const latest = await this.outbox.barrier(barrier.scope)
+      if (this.error) continue
+      if (latest.watermark === barrier.watermark) return result
+      barrier = latest
+      if (performance.now() >= until)
+        return { barrier, status: 'timeout' as const, pending: barrier.targets, reasons: ['Evidence changed during save'] }
+    }
   }
   async exportAccount(scope: SyncScope) {
+    await this.capturePending
     return new Blob(
       [
         JSON.stringify(
@@ -361,8 +385,8 @@ export class EvidenceRuntime implements SaveParticipant {
 let current: EvidenceRuntime | null = null
 let attachedSession: LearningSession | null = null
 let attachedScope: SyncScope | null = null
-let started = false,
-  connecting = false
+let started = false
+let restored = false
 export const evidenceRuntime = () => current
 export function attachLearningSession(session: LearningSession) {
   attachedSession = session
@@ -381,9 +405,14 @@ export function attachLearningSession(session: LearningSession) {
 }
 /** Lazy account producer, shared by account bootstrap and curriculum mount. */
 export function startLearningEvidence() {
+  const sync = activeSync()
+  if (sync) void startEvidenceBootstrap(sync)
+}
+
+function listen() {
   if (started) return
   started = true
-  const reconcile = async () => {
+  window.addEventListener('qp-sync-changed', () => {
     const sync = activeSync(),
       generations = sync?.deletionGenerations()
     if (
@@ -394,61 +423,66 @@ export function startLearningEvidence() {
     ) {
       const old = current
       current = null
+      restored = false
       old.stop(old.sync.scope)
     }
-    if (!sync?.isReconciled() || !generations || connecting) return
-    const stillCurrent = () => {
-      const latest = sync.deletionGenerations()
-      return (
-        activeSync() === sync &&
-        latest?.learning === generations.learning &&
-        latest.practice === generations.practice
-      )
-    }
-    if (current) {
-      void current.capture(attachedSession)
-      return
-    }
-    connecting = true
-    try {
-      const online = await loadOnline()
-      if (!online || !stillCurrent()) return
-      await cleanupDeletedEvidence(sync.scope, generations, stillCurrent)
-      if (!stillCurrent()) return
-      const runtime = new EvidenceRuntime(
-        sync,
-        online.client,
-        generations.learning,
-        generations.practice,
-      )
-      current = runtime
-      runtime.register()
-      await runtime.restore()
-      await runtime.capture(attachedSession)
-      await runtime.refresh()
-    } catch (e) {
-      if (current) {
-        current.error = String(e)
-        sync.reportSourceBlocked('evidence', String(e))
-      }
-    } finally {
-      connecting = false
-      changed()
-      if (!stillCurrent()) queueMicrotask(() => void reconcile())
-    }
-  }
-  window.addEventListener('qp-sync-changed', () => {
-    void reconcile()
+    if (sync?.isReconciled()) void startEvidenceBootstrap(sync)
+    if (restored) void current?.capture(attachedSession)
     changed()
   })
   window.addEventListener('qp-learning-saved', () => {
-    void current?.capture(attachedSession)
+    if (restored) void current?.capture(attachedSession)
   })
   window.addEventListener('online', () => {
-    void current?.retry()
+    const sync = activeSync()
+    if (sync) void startEvidenceBootstrap(sync, true)
+    if (restored) void current?.retry()
   })
   window.addEventListener('storage', () => {
-    void current?.capture(attachedSession)
+    if (restored) void current?.capture(attachedSession)
   })
-  void reconcile()
+}
+
+/** Called only behind the synchronously registered bootstrap save participant. */
+export async function initializeLearningEvidence(sync: PracticeSync) {
+  listen()
+  const generations = sync.deletionGenerations()
+  if (!sync.isReconciled() || !generations) throw new Error('Account not reconciled')
+  const stillCurrent = () => {
+    const latest = sync.deletionGenerations()
+    return activeSync() === sync && latest?.learning === generations.learning &&
+      latest.practice === generations.practice
+  }
+  if (!stillCurrent()) throw new Error('Account changed')
+  if (current && restored && current.sync === sync &&
+    current.learningGeneration === generations.learning &&
+    current.practiceGeneration === generations.practice) return
+  const old = current
+  current = null
+  restored = false
+  old?.stop(old.sync.scope)
+  let runtime: EvidenceRuntime | null = null
+  try {
+    const online = await loadOnline()
+    if (!online) throw new Error('Evidence account service unavailable')
+    if (!stillCurrent()) throw new Error('Account changed')
+    await cleanupDeletedEvidence(sync.scope, generations, stillCurrent)
+    if (!stillCurrent()) throw new Error('Account changed')
+    runtime = new EvidenceRuntime(sync, online.client, generations.learning, generations.practice)
+    current = runtime
+    runtime.register()
+    await runtime.restore()
+    if (!stillCurrent()) throw new Error('Account changed')
+    await runtime.capture(attachedSession)
+    if (runtime.error) throw new Error(runtime.error)
+    await runtime.refresh()
+    if (runtime.error) throw new Error(runtime.error)
+    if (!stillCurrent()) throw new Error('Account changed')
+    restored = true
+    sync.reportSourceBlocked('evidence', null)
+  } catch (e) {
+    if (current === runtime) { current = null; restored = false }
+    runtime?.stop(sync.scope)
+    throw e
+  } finally { changed() }
 }
