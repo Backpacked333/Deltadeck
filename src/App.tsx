@@ -21,11 +21,8 @@ import {
   GraduationCap,
   Lightbulb,
   Lock,
-  Monitor,
-  Moon,
   Settings2,
   Spade,
-  Sun,
   Target,
   X,
 } from 'lucide-react'
@@ -886,12 +883,6 @@ export default function App() {
     </Suspense>
   )
 
-  const ThemeIcon =
-    settings.theme === 'dark'
-      ? Moon
-      : settings.theme === 'light'
-        ? Sun
-        : Monitor
   const nextTheme: Settings['theme'] =
     settings.theme === 'system'
       ? 'light'
@@ -951,51 +942,55 @@ export default function App() {
             )
           })}
         </nav>
+        {/* The right side is the visitor's own: their account, and on the
+            trainer its settings. Trainer controls live in the account menu
+            once signed in. */}
         <div className="header-tools">
-          <span className="pill">
-            <i /> Play money
-          </span>
           {member ? (
-            <AccountMenu username={account.username} />
+            <AccountMenu
+              username={account.username}
+              theme={settings.theme}
+              onTheme={() => updateSettings({ theme: nextTheme })}
+              onSettings={() => setDialog('settings')}
+              onHelp={() => setDialog('help')}
+            />
           ) : (
-            <span className="header-account">
-              <a href="#signin" className="header-signin">
-                Sign in
-              </a>
-              <a
-                href="#signup"
-                className="btn btn-accent header-join"
-                onClick={() => track('signup_start')}
-              >
-                <span className="header-join-long">Create free account</span>
-                <span className="header-join-short">Join free</span>
-              </a>
-            </span>
+            <>
+              {view === 'play' && (
+                <>
+                  <button
+                    className="icon-btn"
+                    onClick={() => setDialog('help')}
+                    aria-label="How it works"
+                    title="How it works (?)"
+                  >
+                    <CircleHelp size={17} />
+                  </button>
+                  <button
+                    className="icon-btn"
+                    onClick={() => setDialog('settings')}
+                    aria-label="Settings"
+                    title="Settings"
+                  >
+                    <Settings2 size={17} />
+                  </button>
+                </>
+              )}
+              <span className="header-account">
+                <a href="#signin" className="header-signin">
+                  Sign in
+                </a>
+                <a
+                  href="#signup"
+                  className="btn btn-accent header-join"
+                  onClick={() => track('signup_start')}
+                >
+                  <span className="header-join-long">Create free account</span>
+                  <span className="header-join-short">Join free</span>
+                </a>
+              </span>
+            </>
           )}
-          <button
-            className="icon-btn header-theme"
-            onClick={() => updateSettings({ theme: nextTheme })}
-            aria-label={`Theme: ${settings.theme}. Switch to ${nextTheme}.`}
-            title={`Theme: ${settings.theme}`}
-          >
-            <ThemeIcon size={17} />
-          </button>
-          <button
-            className="icon-btn"
-            onClick={() => setDialog('help')}
-            aria-label="How it works"
-            title="How it works (?)"
-          >
-            <CircleHelp size={17} />
-          </button>
-          <button
-            className="icon-btn"
-            onClick={() => setDialog('settings')}
-            aria-label="Settings"
-            title="Settings"
-          >
-            <Settings2 size={17} />
-          </button>
         </div>
       </header>
 

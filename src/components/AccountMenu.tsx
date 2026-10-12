@@ -1,5 +1,6 @@
 // The signed-in player's place in the header: their initial, and a small
-// menu with their profile, online play, progress and Sign out. A disclosure
+// menu with what is theirs (profile, online play, progress), the app's
+// settings, theme and help, and Sign out. A disclosure
 // (a button that shows a list of links), so the keyboard and screen readers
 // treat it like the rest of the header. Entry chunk: no account client here;
 // Sign out is a route the online chunk handles.
@@ -9,7 +10,21 @@ import { LogOut } from 'lucide-react'
 /** A new account's name until it chooses one: no profile to show yet. */
 const PLACEHOLDER = /^player_[0-9a-f]{12}$/
 
-export function AccountMenu({ username }: { username: string | null }) {
+type Theme = 'system' | 'light' | 'dark'
+
+export function AccountMenu({
+  username,
+  theme,
+  onTheme,
+  onSettings,
+  onHelp,
+}: {
+  username: string | null
+  theme?: Theme
+  onTheme?: () => void
+  onSettings?: () => void
+  onHelp?: () => void
+}) {
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   const button = useRef<HTMLButtonElement>(null)
@@ -66,6 +81,39 @@ export function AccountMenu({ username }: { username: string | null }) {
             <li>
               <a href="#progress">Your progress</a>
             </li>
+            {onSettings && (
+              <li>
+                <button
+                  className="account-item"
+                  onClick={() => {
+                    setOpen(false)
+                    onSettings()
+                  }}
+                >
+                  Settings
+                </button>
+              </li>
+            )}
+            {onTheme && theme && (
+              <li>
+                <button className="account-item" onClick={onTheme}>
+                  Theme: {theme}
+                </button>
+              </li>
+            )}
+            {onHelp && (
+              <li>
+                <button
+                  className="account-item"
+                  onClick={() => {
+                    setOpen(false)
+                    onHelp()
+                  }}
+                >
+                  How it works
+                </button>
+              </li>
+            )}
             <li>
               <a href="#signout" className="account-signout">
                 <LogOut size={15} aria-hidden="true" /> Sign out

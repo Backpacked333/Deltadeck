@@ -4828,7 +4828,8 @@ html.resizing * {
   padding: 0;
   list-style: none;
 }
-.account-panel a {
+.account-panel a,
+.account-item {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -4841,8 +4842,18 @@ html.resizing * {
   text-decoration: none;
 }
 .account-panel a:hover,
+.account-item:hover,
+.account-item:focus-visible,
 .account-panel a:focus-visible {
   background: var(--surface-3);
+}
+.account-item {
+  width: 100%;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 .account-signout {
   color: var(--text-2) !important;
