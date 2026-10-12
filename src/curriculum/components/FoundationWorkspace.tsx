@@ -23,6 +23,7 @@ import { connectionLabels } from '../content/foundations'
 import { CasePlayer } from './CasePlayer'
 import { PredictionForm } from './PredictionForm'
 import { modules } from '../curriculum'
+import { freshFamilyCase } from '../core/freshness'
 
 function Retrieval({
   question: q,
@@ -196,20 +197,7 @@ function CaseSelector({
   ids: readonly string[]
   session: LearningSession
 }) {
-  const fresh = ids.find(
-    (id) =>
-      !session.store.exposedVariants.includes(
-        `${id}@${registry.cases.get(id)!.contentVersion}`,
-      ) &&
-      !session.store.receipts.some((r) => r.caseId === id) &&
-      !session.store.attempts.some(
-        (a) =>
-          a.caseId === id &&
-          (a.submittedAt ||
-            a.assistance.solutionViewed ||
-            a.assistance.hintIds.length),
-      ),
-  )
+  const fresh = freshFamilyCase(ids, registry.cases, session.store)
   const [selected, setSelected] = useState(fresh ?? ids[0])
   if (!selected)
     return <p>Case bank pending integration; no evidence can be earned here.</p>
