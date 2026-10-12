@@ -188,6 +188,8 @@ create trigger learning_evidence_generation after update on public.learning_sync
 create function public.export_learning_pilot_v1(p_protocol text) returns jsonb
 language sql security definer set search_path=public,pg_temp as $$
   select coalesce(jsonb_agg(jsonb_build_object('learner',a.user_id,'arm',a.arm,'stratum',a.stratum,'assignedAt',a.assigned_at,'consentAt',a.consent_at,'withdrawnAt',a.withdrawn_at,
+    'decisions',(select coalesce(jsonb_agg(jsonb_build_object('receivedAt',e.received_at,'payload',e.payload)),'[]') from public.learning_evidence_events e where e.user_id=a.user_id and e.kind='recommendation'),
+    'invalidations',(select coalesce(jsonb_agg(e.payload),'[]') from public.learning_evidence_events e where e.user_id=a.user_id and e.kind='invalidation'),
     'exposures',(select coalesce(jsonb_agg(jsonb_build_object('receivedAt',e.received_at,'recommendationId',e.payload->>'recommendationId','response',e.payload->>'response')),'[]') from public.learning_evidence_events e where e.user_id=a.user_id and e.kind='feedback'),
     'outcomes',(select coalesce(jsonb_agg(jsonb_build_object('evidenceId',s.id,'family',s.payload->>'family','heldout',(s.payload->>'family')=any(c.heldout_families),'mode',s.payload->>'mode','assistance',s.payload->>'assistance','observedAt',s.payload->>'observedAt','receivedAt',s.received_at,'clock','device-uncertain','evaluations',
       (select coalesce(jsonb_agg(jsonb_build_object('id',ev.id,'evaluator',ev.payload->>'evaluator','supersedes',ev.payload->>'supersedes','passed',ev.payload->'passed','eligible',ev.payload->'eligible','reasons',ev.payload->'reasons')),'[]') from public.learning_evidence_events ev where ev.user_id=a.user_id and ev.kind='evaluation' and ev.payload->>'submissionId'=s.id))), '[]')

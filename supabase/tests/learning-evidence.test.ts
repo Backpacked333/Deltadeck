@@ -252,6 +252,16 @@ describe('F08/F09/F10 private append-only source truth', () => {
       expect(await send(u, rec)).toMatchObject({ status: 'blocked' })
       await rpc('learning_pilot_consent_v1', { consent: true })
       expect(await send(u, rec)).toMatchObject({ status: 'accepted' })
+      const source = submission(u, attempt()),
+        grade = evaluateSubmission(source)
+      await send(u, source)
+      await send(u, grade)
+      await send(u, {
+        ...base(u, 'withdraw-grade', source.observedAt),
+        kind: 'invalidation',
+        targetId: grade.id,
+        reason: 'rubric challenged',
+      })
       await rpc('learning_pilot_consent_v1', { consent: false })
       expect(await send(u, { ...rec, id: 'r2' })).toMatchObject({
         status: 'blocked',
@@ -269,6 +279,10 @@ describe('F08/F09/F10 private append-only source truth', () => {
         }>("select public.export_learning_pilot_v1('test') r")
       ).rows[0]!.r
       expect(exported).toHaveLength(2)
+      expect(exported.find((r) => r.learner === u)).toMatchObject({
+        decisions: [{ payload: { exposure: 'limited-pilot' } }],
+        invalidations: [{ targetId: expect.stringContaining(':eval:v1') }],
+      })
       expect(exported.find((r) => r.learner === absent)).toMatchObject({
         outcomes: [],
         consentAt: null,

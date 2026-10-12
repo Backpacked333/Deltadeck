@@ -22,6 +22,7 @@ export function recommend(
     practiceGeneration?: number
   } = {},
 ): Recommendation {
+  rows = rows.filter((r) => r.event.accountId === accountId)
   const feedback = rows
     .filter((r) => r.event.kind === 'feedback')
     .map((r) => r.event)
