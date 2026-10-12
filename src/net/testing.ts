@@ -20,6 +20,7 @@ import type {
   MatchInfo,
   Reveal,
   ServerMsg,
+  OwnControlV1,
 } from '../shared/protocol'
 
 /** A lobby frame without its `seq`, which only counts them. */
@@ -93,6 +94,25 @@ export class FakeSocket {
 
 export const MATCH = '33333333-3333-4333-8333-333333333333'
 
+export function control(seq: number, seat: SeatId | null): OwnControlV1 {
+  return {
+    scope:
+      seat === null
+        ? null
+        : {
+            tableId: MATCH,
+            activationId: 'activation-1',
+            membershipGeneration: 1,
+            seat,
+            seatGeneration: 1,
+          },
+    stateVersion: seq,
+    pendingIntent: null,
+    standing: false,
+    commandOutcomes: [],
+  }
+}
+
 export const tableInfo = (
   players = 2,
   status: MatchInfo['status'] = 'playing',
@@ -132,7 +152,14 @@ export function frame(
         commitment: null,
       })
     : null
-  const base = { seq, matchId: MATCH, serverNow: 0, table, view }
+  const base = {
+    seq,
+    matchId: MATCH,
+    serverNow: 0,
+    table,
+    view,
+    ownControl: control(seq, seat),
+  }
   return kind === 'welcome'
     ? { ...base, t: 'welcome', seat }
     : { ...base, t: 'state' }
@@ -290,7 +317,14 @@ export function sixFrame(
           commitment: null,
         })
       : null
-  const base = { seq, matchId: MATCH, serverNow: 0, table, view }
+  const base = {
+    seq,
+    matchId: MATCH,
+    serverNow: 0,
+    table,
+    view,
+    ownControl: control(seq, seat),
+  }
   return kind === 'welcome'
     ? { ...base, t: 'welcome', seat }
     : { ...base, t: 'state' }

@@ -144,7 +144,7 @@ describe('TableConnection', () => {
     expect(socket.sent).toHaveLength(0)
   })
 
-  it('sends a bare rebuy and stand from a seat at a six table only', async () => {
+  it('sends a fenced rebuy and prevents overlapping seat commands', async () => {
     const { connection } = connect()
     await flush()
     const socket = FakeSocket.last()
@@ -156,15 +156,22 @@ describe('TableConnection', () => {
     expect(connection.rebuy()).toBe(false)
     expect(connection.stand()).toBe(false)
     expect(socket.sent).toEqual([])
-    // Seated: each frame is the type alone. The server finds the seat
-    // from the account and computes the top-up.
+    // Commands bind to the authoritative membership and state version.
     socket.emit(sixFrame('welcome', 2, 2, null, null))
     expect(connection.rebuy()).toBe(true)
-    expect(connection.stand()).toBe(true)
-    expect(socket.sent.map((m) => JSON.parse(m))).toEqual([
-      { t: 'rebuy' },
-      { t: 'stand' },
-    ])
+    expect(connection.stand()).toBe(false)
+    expect(JSON.parse(socket.sent[0])).toMatchObject({
+      t: 'seat_command',
+      kind: 'rebuy',
+      v: 1,
+      commandId: 'req1',
+      tableId: MATCH,
+      membershipGeneration: 1,
+      seatGeneration: 1,
+      expectedStateVersion: 2,
+      hand: null,
+    })
+    expect(socket.sent).toHaveLength(1)
   })
 
   it('sit without a seat sends a bare sit; with one, names it', async () => {
@@ -202,7 +209,7 @@ describe('TableConnection', () => {
     expect(socket.sent.map((m) => JSON.parse(m))).toEqual([{ t: 'resync' }])
   })
 
-  it('sends a bare sit_out and sit_in from a seat at a six table only', async () => {
+  it('sends a fenced sit_out and prevents overlapping sit_in', async () => {
     const { connection } = connect()
     await flush()
     const socket = FakeSocket.last()
@@ -216,11 +223,14 @@ describe('TableConnection', () => {
     // Seated: the type alone, for the socket account's own seat.
     socket.emit(sixFrame('welcome', 2, 2, null, null))
     expect(connection.sitOut()).toBe(true)
-    expect(connection.sitIn()).toBe(true)
-    expect(socket.sent.map((m) => JSON.parse(m))).toEqual([
-      { t: 'sit_out' },
-      { t: 'sit_in' },
-    ])
+    expect(connection.sitIn()).toBe(false)
+    expect(JSON.parse(socket.sent[0])).toMatchObject({
+      t: 'seat_command',
+      kind: 'sit_out',
+      v: 1,
+      expectedStateVersion: 2,
+    })
+    expect(socket.sent).toHaveLength(1)
   })
 
   it('reconnects with backoff and a fresh token, then gives up', async () => {
@@ -534,6 +544,7 @@ describe('TableConnection: the link', () => {
     expect(connection.getState().status).toBe('reconnecting')
     await vi.advanceTimersByTimeAsync(PING_EVERY_MS)
     expect(connection.getState().status).toBe('open')
+    FakeSocket.last().emit(welcomeAt(0))
     expect(connection.act({ type: 'call' })).toBe(true)
     connection.stop()
   })

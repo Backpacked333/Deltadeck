@@ -1,4 +1,70 @@
 /* Online area. Uses the app's tokens; loaded only with the online chunk. */
+.live-trust {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+.live-trust:empty {
+  display: none;
+}
+.live-last-hand {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.live-last-hand summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.live-last-hand ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  list-style: none;
+  padding: 0;
+}
+.live-phase {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-2);
+}
+.live-hand-surface[data-motion='caught-up'] .flight {
+  display: none;
+}
+.live-table .act {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border);
+  box-shadow: none;
+}
+.live-table .act:not(:disabled):hover {
+  background: var(--surface-2);
+  border-color: var(--text-2);
+}
+.live-table .ring {
+  display: none;
+}
+.live-table :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+@media (min-width: 1000px) and (max-height: 800px) {
+  .live-table {
+    gap: 10px;
+  }
+  .live-table .six-ring {
+    min-height: 330px;
+  }
+  .live-table .action-bar {
+    padding: 12px;
+  }
+  .live-table .live-matchbar {
+    padding-block: 4px;
+  }
+}
 .live-page {
   max-width: 880px;
 }
