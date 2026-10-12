@@ -966,6 +966,11 @@
 /* The open games card spans the grid: a table of games wants the width. */
 .live-card-wide {
   grid-column: 1 / -1;
+  /* A grid item will not shrink below its content: the list and the code
+     form wrap instead, so a 320 px phone does not scroll sideways. */
+  min-width: 0;
+  /* The card is a grid too: its one column must shrink as well. */
+  grid-template-columns: minmax(0, 1fr);
 }
 .live-check {
   display: flex;
@@ -979,6 +984,16 @@
 }
 /* Cells and buttons may wrap, so the list fits a 320 px phone however long
    an age or a button reads; only a host's name is cut (ellipsis). */
+.live-games {
+  /* Fixed columns: the cells wrap inside the card instead of widening it. */
+  table-layout: fixed;
+}
+.live-games th:nth-child(1) {
+  width: 36%;
+}
+.live-games th:nth-child(2) {
+  width: 26%;
+}
 .live-games td {
   vertical-align: middle;
   white-space: normal;
