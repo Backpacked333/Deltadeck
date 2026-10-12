@@ -107,6 +107,7 @@ describe('migrations', () => {
       '20261010120000_school_email.sql',
       '20261010130000_six_casual.sql',
       '20261011100000_practice_history.sql',
+      '20261012000000_avatars.sql',
     ])
   })
 })

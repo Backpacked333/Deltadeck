@@ -21,13 +21,20 @@ import { lessonSummary } from '../curriculum/core/summary'
 import { handAccuracy, practiceStats } from '../lib/practiceStats'
 import type { Progress } from '../lib/storage'
 import { loadOnline } from '../net/supabase'
+import type { Online as OnlineService } from '../net/supabase'
 import { loadAccountHistory } from './account'
 import type { AccountHistory } from './account'
+import { ProfilePicture } from './ProfilePicture'
 
 type Online =
   | { status: 'loading' }
   | { status: 'unavailable' }
-  | { status: 'ready'; history: AccountHistory | null }
+  | {
+      status: 'ready'
+      history: AccountHistory | null
+      /** The account service, for the picture's upload. */
+      service: OnlineService
+    }
 
 const date = (iso: string) =>
   new Date(iso).toLocaleDateString('en-GB', {
@@ -67,16 +74,21 @@ export default function MyProfile({
     let live = true
     setOnline({ status: 'loading' })
     loadOnline()
-      .then((found) =>
-        found ? loadAccountHistory(found.client, username) : undefined,
+      .then(async (found) =>
+        found
+          ? {
+              service: found,
+              history: await loadAccountHistory(found.client, username),
+            }
+          : undefined,
       )
       .then(
-        (history) =>
+        (loaded) =>
           live &&
           setOnline(
-            history === undefined
+            loaded === undefined
               ? { status: 'unavailable' }
-              : { status: 'ready', history },
+              : { status: 'ready', ...loaded },
           ),
         () => live && setOnline({ status: 'unavailable' }),
       )
@@ -232,6 +244,15 @@ export default function MyProfile({
           </>
         )}
       </section>
+
+      {online.status === 'ready' && account && username && (
+        <ProfilePicture
+          client={online.service.client}
+          url={online.service.url}
+          username={username}
+          avatar={account.profile.player.avatar}
+        />
+      )}
 
       <section className="panel" aria-labelledby="me-online">
         <div className="panel-head">

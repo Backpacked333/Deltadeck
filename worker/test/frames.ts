@@ -256,10 +256,14 @@ export const TABLE_KEYS = keysOf<View['match']>()([
 // Six-casual adds each seat's stack outside the hand being played (as of
 // its deal while dealt in, as the last hand left it otherwise: public at
 // the hand's end) and whether it is playing or sitting out (six-only,
-// RULES).
+// RULES). Any table: the player's own picture (a path in the public avatars
+// bucket, named by the account id players already shows anyone) and their
+// verified school's domain, each left out when there is none.
 export const TABLE_PLAYER_KEYS = keysOf<View['match']['players'][number]>()([
   'seat',
   'username',
+  'avatar?',
+  'school?',
   'connected',
   'consecutiveTimeouts',
   'stack?',

@@ -18,6 +18,7 @@ import type {
   SeatView,
 } from '../shared/protocol'
 import { useRunout } from '../state/runout'
+import { PlayerAvatar, SchoolCrest } from './Avatar'
 import { inviteLink } from './api'
 import type { Identity } from './api'
 import type { TableState } from './client'
@@ -198,7 +199,16 @@ function MatchBar({
       </span>
       {opponent && (
         <span className={opponent.connected ? '' : 'live-warn'}>
-          vs <b>{opponent.username}</b>
+          vs{' '}
+          {opponent.avatar && (
+            <PlayerAvatar
+              username={opponent.username}
+              avatar={opponent.avatar}
+              size={20}
+            />
+          )}
+          <b>{opponent.username}</b>
+          <SchoolCrest school={opponent.school} />
           {!opponent.connected && ' · disconnected'}
         </span>
       )}

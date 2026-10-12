@@ -209,6 +209,13 @@ export type SeatView = {
     players: {
       seat: SeatId
       username: string
+      /**
+       * The player's picture, as a path in the public avatars bucket
+       * (`<userId>.webp?v=<n>`); left out when they have none.
+       */
+      avatar?: string
+      /** Their verified school's email domain; left out when none. */
+      school?: string
       connected: boolean
       consecutiveTimeouts: number
       /**

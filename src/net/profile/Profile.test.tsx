@@ -1,5 +1,7 @@
 import { render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
+import { AvatarBase } from '../avatarBase'
 import { fakeSupabase } from '../fakeSupabase'
 import { Profile } from './Profile'
 
@@ -165,5 +167,77 @@ describe('the public profile', () => {
         'accuracy',
         'rpc:rated_luck',
       ]).toContain(t)
+  })
+})
+
+describe('the picture and crest on a profile', () => {
+  const VIEWER = '00000000-0000-4000-8000-0000000000bb'
+  /** Alice with a picture and a verified Princeton email. */
+  function pictured(extra: Record<string, unknown> = {}) {
+    const tables = aliceTables({ matches: 1 })
+    ;(tables.players as Record<string, unknown>[])[0] = {
+      ...tables.players[0],
+      avatar_version: 9,
+      school_domain: 'princeton.edu',
+      school_verified_at: day(-5),
+      ...extra,
+    }
+    return tables
+  }
+
+  it('shows them, and lets another signed-in player report the picture', async () => {
+    const reported: unknown[] = []
+    const { client } = fakeSupabase({
+      tables: pictured(),
+      userId: VIEWER,
+      rpc: { report_avatar: (args) => void reported.push(args) },
+    })
+    const { container } = render(
+      <AvatarBase.Provider value="https://x.supabase.co">
+        <Profile client={client} username="alice" />
+      </AvatarBase.Provider>,
+    )
+    const report = await screen.findByRole('button', {
+      name: 'Report picture',
+    })
+    expect(container.querySelector('.player-avatar img')).toHaveAttribute(
+      'src',
+      `https://x.supabase.co/storage/v1/object/public/avatars/${ALICE}.webp?v=9`,
+    )
+    expect(screen.getByRole('img', { name: 'Princeton' })).toBeInTheDocument()
+    await userEvent.click(report)
+    expect(reported).toEqual([{ p_player: ALICE }])
+    expect(
+      await screen.findByText('Thanks — a person will look at it.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Report picture' })).toBeNull()
+  })
+
+  it('offers no report to the player themselves or to a signed-out viewer', async () => {
+    for (const userId of [ALICE, null]) {
+      const { client } = fakeSupabase({ tables: pictured(), userId })
+      const { unmount, container } = render(
+        <Profile client={client} username="alice" />,
+      )
+      await screen.findByRole('img', { name: 'Princeton' })
+      // The session check has had its turn.
+      await new Promise((r) => setTimeout(r, 0))
+      expect(container.querySelector('.player-avatar')).not.toBeNull()
+      expect(
+        screen.queryByRole('button', { name: 'Report picture' }),
+      ).toBeNull()
+      unmount()
+    }
+  })
+
+  it('shows no crest for an unverified school, and no picture section without either', async () => {
+    const { client } = fakeSupabase({
+      tables: pictured({ avatar_version: null, school_verified_at: null }),
+      userId: VIEWER,
+    })
+    const { container } = render(<Profile client={client} username="alice" />)
+    await screen.findByText('Sanctions')
+    expect(container.querySelector('.live-profile-who')).toBeNull()
+    expect(screen.queryByRole('img', { name: 'Princeton' })).toBeNull()
   })
 })

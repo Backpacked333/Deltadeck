@@ -224,6 +224,16 @@ const TABLES: Record<string, Spec> = {
     (u) =>
       `insert into public.learning_state (user_id) values ('${u}') on conflict do nothing`,
   ),
+  'public.avatar_reports': {
+    select: (u) =>
+      `select count(*) n from public.avatar_reports where reporter = '${u}'`,
+    insert: (u) =>
+      `insert into public.avatar_reports (reporter, player)
+       values ('${u}', '${u === ALICE ? BOB : ALICE}') on conflict do nothing`,
+    update: (u) =>
+      `update public.avatar_reports set day = day where reporter = '${u}'`,
+    remove: (u) => `delete from public.avatar_reports where reporter = '${u}'`,
+  },
   'private.coach_usage': shared(
     'private.coach_usage',
     'used = used',
@@ -323,6 +333,14 @@ const EXPECTED: Record<string, Record<Who, Cell[]>> = {
     other: [0, D, 0, D],
     ...SERVICE,
   },
+  // Picture reports: a player adds them in their own name only, and nobody
+  // but the server reads, changes or deletes one (avatars.test.ts).
+  'public.avatar_reports': {
+    anon: [D, D, D, D],
+    self: [D, 'ok', D, D],
+    other: [D, D, D, D],
+    ...SERVICE,
+  },
   // Only reachable through reserve_coach_request (security definer). In this
   // stub service_role has no usage on schema private either; on Supabase the
   // grants may differ, which does not change what browsers can do.
@@ -368,6 +386,7 @@ beforeAll(async () => {
       values ('${ALICE}', 'h:1', now(), '{"id": "h:1"}'),
              ('${BOB}', 'h:1', now(), '{"id": "h:1"}');
     insert into public.learning_state (user_id) values ('${ALICE}'), ('${BOB}');
+    insert into public.avatar_reports (reporter, player) values ('${ALICE}', '${BOB}'), ('${BOB}', '${ALICE}');
     insert into public.challenge_scores (user_id, hand, ver, accuracy, receipt, played_at)
       values ('${ALICE}', 'overpair', 1, 80, repeat('a', 32), now()),
              ('${BOB}', 'overpair', 1, 70, repeat('b', 32), now());
@@ -458,7 +477,10 @@ describe('functions', () => {
       'public.record_hand',
       'public.record_incident',
       'public.record_match',
+      'public.remove_avatar',
+      'public.report_avatar',
       'public.reserve_coach_request',
+      'public.set_avatar',
       'public.set_player_school',
       'public.verify_hand',
     ])
