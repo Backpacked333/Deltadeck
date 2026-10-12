@@ -15,6 +15,7 @@ import type { HandRecordV1, MatchInfo } from '../shared/protocol'
 import { DENOMINATIONS } from '../lib/chips'
 import { seedRandom } from '../lib/random'
 import type { Identity } from './api'
+import { AvatarBase } from './avatarBase'
 import { Lobby } from './Lobby'
 import { LiveTable } from './LiveTable'
 import { FLY_MS, NEXT_POT_MS, PAY_MS } from './SixFlights'
@@ -228,6 +229,43 @@ describe('LiveTable', () => {
     const view = { ...welcome.view, match: rated }
     act(() => socket.emit({ ...welcome, table: rated, view }))
     expect(screen.getByText('Rated · Hand 1 of 40')).toBeInTheDocument()
+  })
+
+  it("shows the opponent's picture and school crest in the match bar", async () => {
+    const pic = '0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b.webp?v=3'
+    render(
+      <AvatarBase.Provider value="https://x.supabase.co">
+        <LiveTable matchId={MATCH} identity={alice} />
+      </AvatarBase.Provider>,
+    )
+    const socket = await opened()
+    const welcome = frame('welcome', 1, 0, firstHand())
+    if (welcome.t !== 'welcome' || !welcome.view) throw new Error('fixture')
+    const table = {
+      ...welcome.table,
+      players: welcome.table.players.map((p) =>
+        p.username === 'bob'
+          ? { ...p, avatar: pic, school: 'mit.edu' }
+          : { ...p, school: 'uni.edu' },
+      ),
+    }
+    act(() =>
+      socket.emit({
+        ...welcome,
+        table,
+        view: { ...welcome.view, match: table },
+      } as typeof welcome),
+    )
+    const bar = screen.getByText('bob', { selector: 'b' }).parentElement!
+    expect(bar).toHaveTextContent('vs bob')
+    expect(bar.querySelector('.player-avatar img')).toHaveAttribute(
+      'src',
+      `https://x.supabase.co/storage/v1/object/public/avatars/${pic}`,
+    )
+    expect(within(bar).getByRole('img', { name: 'MIT' })).toHaveAttribute(
+      'title',
+      'MIT',
+    )
   })
 
   it('a rated table renders no equity value, EV label, lab button or guess bar', async () => {

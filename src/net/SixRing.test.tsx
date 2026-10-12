@@ -2,6 +2,7 @@ import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { ComponentProps } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { AvatarBase } from './avatarBase'
 import type { PlateSeat } from './SeatPlate'
 import { SixRing } from './SixRing'
 
@@ -146,5 +147,66 @@ describe('the six-seat ring', () => {
     expect(seat(1)).toHaveTextContent('Sitting out')
     expect(seat(1)).toHaveAttribute('data-state', 'sitting-out')
     expect(screen.getAllByText('Sitting out')).toHaveLength(1)
+  })
+})
+
+describe('pictures and school crests on the plates', () => {
+  const PIC = '0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b.webp?v=3'
+  const players: PlateSeat[] = [
+    { ...SIX[0], avatar: PIC, school: 'princeton.edu' },
+    // A verified school with no crest of ours shows nothing new.
+    { ...SIX[1], school: 'uni.edu' },
+    SIX[2],
+  ]
+  const show = (base: string) =>
+    render(
+      <AvatarBase.Provider value={base}>
+        <SixRing
+          players={players}
+          you={0}
+          button={0}
+          sb={1}
+          bb={2}
+          toAct={null}
+          clock={null}
+          clockOffset={0}
+        />
+      </AvatarBase.Provider>,
+    )
+
+  it("shows a player's picture and their school's crest by the name", () => {
+    const { container } = show('https://x.supabase.co')
+    const plate = seat(0)
+    const picture = plate.querySelector('.player-avatar img')!
+    expect(picture).toHaveAttribute(
+      'src',
+      `https://x.supabase.co/storage/v1/object/public/avatars/${PIC}`,
+    )
+    expect(picture).toHaveAttribute('alt', '')
+    expect(picture).toHaveAttribute('loading', 'lazy')
+    const crest = within(plate).getByRole('img', { name: 'Princeton' })
+    expect(crest).toHaveAttribute('src', '/schools/princeton.webp')
+    expect(crest).toHaveAttribute('title', 'Princeton')
+    // Still named in words for a screen reader.
+    expect(plate).toHaveAccessibleName('Seat 1: alice (you)')
+    // Nobody else has a picture or a crest we know.
+    expect(container.querySelectorAll('.player-avatar')).toHaveLength(1)
+    expect(container.querySelectorAll('.school-crest')).toHaveLength(1)
+  })
+
+  it('falls back to the initial when the picture fails to load', () => {
+    show('https://x.supabase.co')
+    const picture = seat(0).querySelector('.player-avatar img')!
+    act(() => {
+      picture.dispatchEvent(new Event('error'))
+    })
+    expect(seat(0).querySelector('.player-avatar img')).toBeNull()
+    expect(seat(0).querySelector('.player-avatar')).toHaveTextContent('A')
+  })
+
+  it('shows the initial until the account service is known', () => {
+    show('')
+    expect(seat(0).querySelector('.player-avatar img')).toBeNull()
+    expect(seat(0).querySelector('.player-avatar')).toHaveTextContent('A')
   })
 })

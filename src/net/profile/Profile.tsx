@@ -3,7 +3,9 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { LineChart } from '../../components/progress/Charts'
 import { VERSION } from '../../rating/glicko2'
 import { isProvisional, matchesToGo, PROVISIONAL_RD } from '../../rating/rules'
+import { crestFor } from '../../lib/crests'
 import { AccuracyPanel } from '../AccuracyPanel'
+import { PlayerAvatar, SchoolCrest } from '../Avatar'
 import { ratingText, winRate } from '../ladder'
 import { loadProfile } from './profile'
 import type { Profile as ProfileData, ProfileRating } from './profile'
@@ -83,6 +85,21 @@ export function Profile({
   const { player, rating, history, recent } = state.profile
   return (
     <>
+      {(player.avatar || crestFor(player.school)) && (
+        <section className="panel live-profile live-profile-who">
+          {player.avatar && (
+            <PlayerAvatar
+              username={player.username}
+              avatar={player.avatar}
+              size={64}
+            />
+          )}
+          <SchoolCrest school={player.school} size={28} />
+          {player.avatar && (
+            <ReportPicture client={client} player={player.userId} />
+          )}
+        </section>
+      )}
       <section className="panel live-profile" aria-labelledby="profile-rating">
         <h2 id="profile-rating">Heads-up rating</h2>
         {rating && rating.matches > 0 ? (
@@ -247,5 +264,63 @@ function Share({ username }: { username: string }) {
         </button>
       </div>
     </section>
+  )
+}
+
+/**
+ * "Report picture", for a signed-in viewer who is not the player. Pictures
+ * go live without review; a report is one row an operator reads
+ * (report_avatar, 20261012000000_avatars.sql), at most one a day each.
+ */
+function ReportPicture({
+  client,
+  player,
+}: {
+  client: SupabaseClient
+  player: string
+}) {
+  const [viewer, setViewer] = useState<string | null>(null)
+  const [sent, setSent] = useState<'idle' | 'sending' | 'sent' | 'failed'>(
+    'idle',
+  )
+  useEffect(() => {
+    let live = true
+    client.auth.getSession().then(
+      ({ data }) => live && setViewer(data.session?.user.id ?? null),
+      () => undefined,
+    )
+    return () => {
+      live = false
+    }
+  }, [client])
+  if (!viewer || viewer === player) return null
+  if (sent === 'sent')
+    return (
+      <p className="live-muted" role="status">
+        Thanks — a person will look at it.
+      </p>
+    )
+  return (
+    <>
+      <button
+        type="button"
+        className="btn btn-outline"
+        disabled={sent === 'sending'}
+        onClick={async () => {
+          setSent('sending')
+          const { error } = await client.rpc('report_avatar', {
+            p_player: player,
+          })
+          setSent(error ? 'failed' : 'sent')
+        }}
+      >
+        Report picture
+      </button>
+      {sent === 'failed' && (
+        <p className="live-error" role="alert">
+          The report could not be sent. Try again.
+        </p>
+      )}
+    </>
   )
 }

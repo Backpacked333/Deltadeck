@@ -2,6 +2,7 @@
 // table here is public (players, ratings, rating_history, match_players).
 // Only rated matches that were rated, so finished, are listed.
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { avatarPath } from '../../lib/avatar'
 import type { Outcome } from '../../shared/protocol'
 
 /** Matches listed on the profile. */
@@ -15,6 +16,10 @@ export type ProfilePlayer = {
   country: string | null
   bio: string
   createdAt: string
+  /** The picture's path in the avatars bucket, or null for none. */
+  avatar: string | null
+  /** A verified school's email domain, or null. */
+  school: string | null
 }
 
 export type ProfileRating = {
@@ -69,7 +74,9 @@ export async function loadProfile(
 ): Promise<Profile | null> {
   const found = await client
     .from('players')
-    .select('user_id, username, country, bio, created_at')
+    .select(
+      'user_id, username, country, bio, created_at, avatar_version, school_domain, school_verified_at',
+    )
     .eq('username', username.toLowerCase())
     .maybeSingle<{
       user_id: string
@@ -77,6 +84,9 @@ export async function loadProfile(
       country: string | null
       bio: string
       created_at: string
+      avatar_version?: number | null
+      school_domain?: string | null
+      school_verified_at?: string | null
     }>()
   fail(found.error)
   if (!found.data) return null
@@ -186,6 +196,9 @@ export async function loadProfile(
       country: p.country,
       bio: p.bio,
       createdAt: p.created_at,
+      avatar: p.avatar_version ? avatarPath(userId, p.avatar_version) : null,
+      // The badge is a verified school's only, as at the table.
+      school: p.school_verified_at ? (p.school_domain ?? null) : null,
     },
     rating: rating.data
       ? {

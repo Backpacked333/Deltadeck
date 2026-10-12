@@ -5,7 +5,17 @@ import { PROTOCOL } from '../../src/shared/protocol'
 import { now } from './clock'
 import type { WorkerEnv } from './env'
 
-export type Identity = { userId: string; username: string }
+export type Identity = {
+  userId: string
+  username: string
+  /** players.avatar_version: the picture to show, or null for none. */
+  avatar: number | null
+  /** The school domain of a verified school email, or null. */
+  school: string | null
+}
+
+/** What a table shows of a player, besides their account id. */
+export type PublicProfile = Omit<Identity, 'userId'>
 
 let jwks: ReturnType<typeof createRemoteJWKSet> | null = null
 let jwksUrl = ''
@@ -86,12 +96,12 @@ export async function verifyToken(
 }
 
 /**
- * Usernames already looked up in this isolate. Every socket upgrade needs
+ * Profiles already looked up in this isolate. Every socket upgrade needs
  * one, so without this a reconnecting client is a Supabase request each time,
  * and a Supabase outage would stop players who are already known.
  */
-const names = new Map<string, { username: string; at: number }>()
-/** A rename shows at new tables within this time. */
+const names = new Map<string, { profile: PublicProfile; at: number }>()
+/** A rename, or a new picture, shows at new tables within this time. */
 export const NAME_TTL_MS = 300_000
 const MAX_NAMES = 10_000
 
@@ -105,28 +115,73 @@ export async function usernameFor(
   userId: string,
   env: WorkerEnv,
 ): Promise<string | null> {
-  if (devTokensOn(env) && !/^[0-9a-f-]{36}$/.test(userId)) return userId
+  return (await profileFor(userId, env))?.username ?? null
+}
+
+type PlayerRow = {
+  username: string
+  avatar_version?: unknown
+  school_domain?: unknown
+  school_verified_at?: unknown
+}
+
+/**
+ * The public username, picture version and verified school, in one request
+ * to public.players (readable with the anon key). Dev accounts have no row,
+ * so no picture or school either.
+ */
+export async function profileFor(
+  userId: string,
+  env: WorkerEnv,
+): Promise<PublicProfile | null> {
+  if (devTokensOn(env) && !/^[0-9a-f-]{36}$/.test(userId))
+    return { username: userId, avatar: null, school: null }
   const cached = names.get(userId)
-  if (cached && now() - cached.at < NAME_TTL_MS) return cached.username
-  let username: string | null = null
+  if (cached && now() - cached.at < NAME_TTL_MS) return cached.profile
+  let profile: PublicProfile | null = null
   try {
     const response = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/players?select=username&user_id=eq.${userId}`,
+      `${env.SUPABASE_URL}/rest/v1/players?select=username,avatar_version,school_domain,school_verified_at&user_id=eq.${userId}`,
       { headers: { apikey: env.SUPABASE_PUBLISHABLE_KEY } },
     )
-    // Supabase down: a player we know keeps their stale name.
-    if (!response.ok) return cached?.username ?? null
-    const rows = (await response.json()) as { username: string }[]
-    username = rows[0]?.username ?? null
+    // Supabase down: a player we know keeps their stale profile.
+    if (!response.ok) return cached?.profile ?? null
+    const row = ((await response.json()) as PlayerRow[])[0]
+    if (row?.username)
+      profile = {
+        username: row.username,
+        avatar: avatarVersion(row.avatar_version),
+        // The badge is a verified school's only.
+        school:
+          row.school_verified_at != null
+            ? schoolDomain(row.school_domain)
+            : null,
+      }
   } catch {
-    return cached?.username ?? null
+    return cached?.profile ?? null
   }
-  if (username) {
+  if (profile) {
     names.delete(userId)
     if (names.size >= MAX_NAMES) names.delete(names.keys().next().value!)
-    names.set(userId, { username, at: now() })
+    names.set(userId, { profile, at: now() })
   }
-  return username
+  return profile
+}
+
+/** A picture version as players.avatar_version allows it, else null. */
+export function avatarVersion(value: unknown): number | null {
+  const n =
+    typeof value === 'string' && /^\d{1,10}$/.test(value) ? +value : value
+  return typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= 1e9
+    ? n
+    : null
+}
+
+/** A school domain as school_domains spells one, else null. */
+export function schoolDomain(value: unknown): string | null {
+  return typeof value === 'string' && /^[a-z0-9.-]{3,190}$/.test(value)
+    ? value
+    : null
 }
 
 /**
@@ -190,8 +245,20 @@ export async function identify(
   if (!token) return null
   const userId = await verifyToken(token, env)
   if (!userId) return null
-  const username = await usernameFor(userId, env)
-  return username ? { userId, username } : null
+  const profile = await profileFor(userId, env)
+  return profile ? { userId, ...profile } : null
+}
+
+/**
+ * The picture version and school for a table, as headers beside x-username.
+ * Left out when there is none; the table checks both again (avatarVersion,
+ * schoolDomain), so a header it cannot read shows nothing.
+ */
+export function identityHeaders(who: Identity): Record<string, string> {
+  return {
+    ...(who.avatar !== null ? { 'x-avatar': String(who.avatar) } : {}),
+    ...(who.school !== null ? { 'x-school': who.school } : {}),
+  }
 }
 
 /**

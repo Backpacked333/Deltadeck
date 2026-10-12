@@ -3,10 +3,12 @@
 // whether they sit out or have dropped. An empty seat offers "Sit here".
 // It takes no cards, so a plate can never show a hole card the viewer may
 // not see; cards stay with the live table.
-// Generic on purpose: Atlas's avatar is for Atlas only (P2-05).
+// Generic on purpose: Atlas's avatar is for Atlas only (P2-05). A player's
+// own picture and school crest show beside their name when they have them.
 import { WifiOff } from 'lucide-react'
 import type { SeatId } from '../engine/types'
 import type { SeatView } from '../shared/protocol'
+import { PlayerAvatar, SchoolCrest } from './Avatar'
 import { clockParts } from './clockParts'
 import { useNow } from './useNow'
 
@@ -31,6 +33,9 @@ export type PlateSeat = {
   connected?: boolean
   /** Stood up during the hand whose result is showing (SixTable). */
   left?: boolean
+  /** Their picture's bucket path, and their verified school's domain. */
+  avatar?: string
+  school?: string
 }
 
 export type SeatClock = NonNullable<SeatView['clock']>
@@ -92,8 +97,18 @@ export function SeatPlate({
     >
       {player ? (
         <div className="six-plate">
-          <span className="six-name" title={player.username}>
-            {player.username}
+          <span className="six-who">
+            {player.avatar && (
+              <PlayerAvatar
+                username={player.username}
+                avatar={player.avatar}
+                size={20}
+              />
+            )}
+            <span className="six-name" title={player.username}>
+              {player.username}
+            </span>
+            <SchoolCrest school={player.school} />
           </span>
           <span className="six-stack">
             {chips(player.stack)}

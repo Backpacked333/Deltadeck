@@ -3,13 +3,6 @@ import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { signedInVisitor } from './helpers'
 
-/**
- * The home page is a lazy chunk with the 3D table: on a busy 2-core CI runner
- * its heading can take longer than the default 5 s to appear. Waiting longer
- * is the fix; the assertion is unchanged.
- */
-const LANDING_MS = 20_000
-
 // The landing page (L-1, L-2, L-11): the bare URL is the home page. A visit
 // plays a graded challenge hand by keyboard, with no account, and reaches the
 // score card. The preview server has no Worker, so the percentile is unavailable
@@ -78,7 +71,7 @@ test('the hero offers an account; practice needs one; the bare URL stays home', 
   await expect(page.locator('.table')).toHaveCount(0)
   await page.goto('/')
   await expect(page.getByRole('heading', { name: /misprice/ })).toBeVisible({
-    timeout: LANDING_MS,
+    timeout: 15_000,
   })
 })
 
@@ -94,7 +87,7 @@ test('the logo leads home from the trainer', async ({ page }) => {
   await expect(page.locator('.table')).toBeVisible()
   await page.getByRole('link', { name: 'DeltaDeck home' }).click()
   await expect(page.getByRole('heading', { name: /misprice/ })).toBeVisible({
-    timeout: LANDING_MS,
+    timeout: 15_000,
   })
   expect(new URL(page.url()).hash).toBe('')
 })

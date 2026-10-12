@@ -2,13 +2,6 @@ import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { fakeAccountService } from './helpers'
 
-/**
- * The home page is a lazy chunk with the 3D table: on a busy 2-core CI runner
- * its heading can take longer than the default 5 s to appear. Waiting longer
- * is the fix; the assertion is unchanged.
- */
-const LANDING_MS = 20_000
-
 // The account path in a real browser: a signed-out visitor at the practice
 // table is sent to sign up, signs in instead, comes back to the table, and
 // signs out from the header's menu. The account service is a stand-in
@@ -144,8 +137,10 @@ test('signing out from the menu goes home and locks practice again', async ({
 
   await page.getByRole('button', { name: 'Account: carol' }).click()
   await page.getByRole('link', { name: 'Sign out' }).click()
+  // Sign out reloads the landing, whose 3D stage can take longer than the
+  // 5 s default to draw on a busy runner.
   await expect(page.getByRole('heading', { name: /misprice/ })).toBeVisible({
-    timeout: LANDING_MS,
+    timeout: 15_000,
   })
   await expect(
     page.locator('header.header').getByRole('link', { name: 'Sign in' }),

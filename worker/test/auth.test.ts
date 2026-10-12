@@ -129,6 +129,8 @@ describe('Supabase access tokens', () => {
     expect(await identify(await sign(), prodEnv)).toEqual({
       userId: USER,
       username: 'alice',
+      avatar: null,
+      school: null,
     })
     expect((await createMatch(await sign())).status).toBe(201)
   })

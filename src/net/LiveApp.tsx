@@ -17,6 +17,7 @@ import type { Identity } from './api'
 import { AuthGate } from './AuthGate'
 import { JoinByCode, JoinFailed } from './JoinByCode'
 import { Ladder } from './Ladder'
+import { AvatarBase } from './avatarBase'
 import { LiveTable } from './LiveTable'
 import { Lobby } from './Lobby'
 import { Onboarding } from './Onboarding'
@@ -236,65 +237,72 @@ export default function LiveApp() {
         : null
   if (page)
     return (
-      <div className="page live-page">
-        <header className="page-head">
-          <h1>{page.title}</h1>
-          {page.intro && <p>{page.intro}</p>}
-          <p className="live-muted">
-            <a href="#ladder">Ladder</a> · <a href="#lobby">Play rated</a> ·{' '}
-            <a href="#method">Method</a>
-          </p>
-        </header>
-        {online === undefined && !dev ? (
+      <AvatarBase.Provider value={online?.url ?? ''}>
+        <div className="page live-page">
+          <header className="page-head">
+            <h1>{page.title}</h1>
+            {page.intro && <p>{page.intro}</p>}
+            <p className="live-muted">
+              <a href="#ladder">Ladder</a> · <a href="#lobby">Play rated</a> ·{' '}
+              <a href="#method">Method</a>
+            </p>
+          </header>
+          {online === undefined && !dev ? (
+            <p className="live-status" role="status">
+              Connecting…
+            </p>
+          ) : online ? (
+            page.body(online.client)
+          ) : (
+            <p className="live-muted" role="status">
+              This page is not available on this site: it has no account service
+              configured.
+            </p>
+          )}
+        </div>
+      </AvatarBase.Provider>
+    )
+
+  // Pictures at tables and on profiles load from the account service.
+  return (
+    <AvatarBase.Provider value={online?.url ?? ''}>
+      <div className={`page live-page ${matchId ? 'live-page-table' : ''}`}>
+        {onboarding ? (
+          <header className="page-head">
+            <h1>Save your score</h1>
+            <p>One account: your score, a rating, a public profile.</p>
+          </header>
+        ) : (
+          !matchId && (
+            <header className="page-head">
+              <h1>Play online</h1>
+              <p>
+                Real opponents, play money, every hand reviewable afterwards.
+              </p>
+              <p className="live-muted">
+                <a href="#ladder">Ladder</a> ·{' '}
+                <a href="#fair-play">Fair play</a> · <a href="#terms">Terms</a>
+              </p>
+            </header>
+          )
+        )}
+        {dev ? (
+          content(dev)
+        ) : online === undefined ? (
           <p className="live-status" role="status">
             Connecting…
           </p>
-        ) : online ? (
-          page.body(online.client)
         ) : (
-          <p className="live-muted" role="status">
-            This page is not available on this site: it has no account service
-            configured.
-          </p>
+          <AuthGate
+            client={online?.client ?? null}
+            url={online?.url ?? ''}
+            apiKey={online?.key ?? ''}
+            onboarding={onboarding}
+          >
+            {content}
+          </AuthGate>
         )}
       </div>
-    )
-
-  return (
-    <div className={`page live-page ${matchId ? 'live-page-table' : ''}`}>
-      {onboarding ? (
-        <header className="page-head">
-          <h1>Save your score</h1>
-          <p>One account: your score, a rating, a public profile.</p>
-        </header>
-      ) : (
-        !matchId && (
-          <header className="page-head">
-            <h1>Play online</h1>
-            <p>Real opponents, play money, every hand reviewable afterwards.</p>
-            <p className="live-muted">
-              <a href="#ladder">Ladder</a> · <a href="#fair-play">Fair play</a>{' '}
-              · <a href="#terms">Terms</a>
-            </p>
-          </header>
-        )
-      )}
-      {dev ? (
-        content(dev)
-      ) : online === undefined ? (
-        <p className="live-status" role="status">
-          Connecting…
-        </p>
-      ) : (
-        <AuthGate
-          client={online?.client ?? null}
-          url={online?.url ?? ''}
-          apiKey={online?.key ?? ''}
-          onboarding={onboarding}
-        >
-          {content}
-        </AuthGate>
-      )}
-    </div>
+    </AvatarBase.Provider>
   )
 }

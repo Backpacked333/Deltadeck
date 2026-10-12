@@ -5,6 +5,7 @@ import { PROTOCOL } from '../../src/shared/protocol'
 import {
   bearerToken,
   identify,
+  identityHeaders,
   primeKeys,
   ratedEligibility,
   readSubprotocols,
@@ -171,9 +172,10 @@ export default {
       // from the request but what it asked for, and the lobby (a full list
       // makes a game unlisted) decides whether it is listed.
       const { code, listed } = verdict
+      // The picture and badge come with the creator's socket, as for anyone.
       const body: InitBody = {
         matchId,
-        creator: who,
+        creator: { userId: who.userId, username: who.username },
         code,
         gameId: verdict.gameId,
         listed,
@@ -244,6 +246,8 @@ export default {
           Upgrade: 'websocket',
           'x-user-id': who.userId,
           'x-username': who.username,
+          // The picture and badge a table shows beside the name.
+          ...identityHeaders(who),
         },
       })
     }
