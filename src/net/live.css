@@ -180,6 +180,10 @@
   color: var(--text-2);
   font-size: 14px;
 }
+.live-matchbar .player-avatar,
+.live-matchbar .school-crest {
+  margin: 0 4px;
+}
 .live-warn {
   color: var(--warning);
 }
@@ -373,6 +377,12 @@
   display: grid;
   gap: 12px;
   margin-top: 16px;
+}
+.live-profile-who {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
 }
 .live-profile h2,
 .live-profile p {
@@ -626,7 +636,15 @@
     box-shadow 0.25s,
     opacity 0.25s;
 }
+/* The name's line: picture, name and crest; the name is what shortens. */
+.six-who {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  min-width: 0;
+}
 .six-name {
+  min-width: 0;
   overflow: hidden;
   font-size: 13px;
   font-weight: 700;
