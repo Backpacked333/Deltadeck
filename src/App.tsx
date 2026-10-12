@@ -884,12 +884,13 @@ export default function App() {
     </Suspense>
   )
 
+  // Dark first: dark, then light, then following the system.
   const nextTheme: Settings['theme'] =
-    settings.theme === 'system'
+    settings.theme === 'dark'
       ? 'light'
       : settings.theme === 'light'
-        ? 'dark'
-        : 'system'
+        ? 'system'
+        : 'dark'
 
   return (
     <LazyMotion features={loadMotionFeatures} strict>

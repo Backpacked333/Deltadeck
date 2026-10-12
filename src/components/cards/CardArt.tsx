@@ -361,7 +361,10 @@ export function CardBack() {
   )
 }
 
-/** Shared SVG defs (the pearl face, the light gradient). Render once per page. */
+/**
+ * Shared SVG defs (the pearl face, the light gradient, the brand's spade).
+ * Render once per page.
+ */
 export function CardDefs() {
   return (
     <svg
@@ -375,6 +378,11 @@ export function CardDefs() {
         <linearGradient id="qp-pearl" x1="0" y1="0" x2="0.4" y2="1">
           <stop offset="0" stopColor="var(--card-face, #fefdfb)" />
           <stop offset="1" stopColor="var(--card-face-2, #efedf4)" />
+        </linearGradient>
+        <linearGradient id="qp-brand" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#ffe49a" />
+          <stop offset="0.55" stopColor="#e07aa8" />
+          <stop offset="1" stopColor="#8f8cff" />
         </linearGradient>
         <linearGradient id="qp-light" x1="0" y1="0" x2="1" y2="0">
           <stop offset="0" stopColor="#6f8cff" />
