@@ -24,11 +24,34 @@ export const GAME_STALE_MS = 90_000
  */
 export const GAME_PRUNE_MS = 600_000
 /**
- * `open:` rows the lobby stores at most as a creation counts them. A game
- * made past it is unlisted (never refused), so the list and its reads stay
- * bounded however many accounts create tables.
+ * Listed, fresh games the lobby counts against at creation. A game made past
+ * it is unlisted (never refused), so the list and its reads stay bounded
+ * however many accounts create tables. Only rows the list could show count:
+ * unlisted and stale rows are not the list's to fill, or a few cheap accounts
+ * making unlisted games would switch listing off for everyone.
  */
 export const GAMES_MAX = 200
+/**
+ * Most `open:` rows one read takes (`storage.list` cuts by key, and a key is a
+ * random UUID, so a row past the cut is simply not seen). Well above
+ * GAMES_MAX because unlisted and stale rows also sit in the store until
+ * pruned; a host's new table closes their earlier ones, so reaching it takes
+ * this many accounts at once.
+ */
+export const OPEN_ROWS_READ = 1_000
+/**
+ * Listed games one host has at once. A further one is made unlisted (never
+ * refused), so a single account cannot be the whole list.
+ */
+export const HOST_LISTED_MAX = 1
+/**
+ * A row this young is not closed for want of a table: the lobby writes the
+ * row, then calls the table's /init, and a request or code lookup that lands
+ * between sees a table that is not there yet and would delete a game being
+ * made. Longer than a cross-region Durable Object start, shorter than the
+ * wait for a host to share the link.
+ */
+export const INIT_GRACE_MS = 10_000
 /**
  * One `storage.list` serves every `games` frame inside this window, so the
  * cost of the list is the cache window's, not the number of players polling.
@@ -73,6 +96,12 @@ export type OpenGame = {
   openedAt: number
   /** The latest heartbeat (lobby clock). */
   updatedAt: number
+  /**
+   * Written by createMatch, cleared by the table's first report: the table's
+   * /init has not been seen yet (INIT_GRACE_MS). A row the table itself
+   * reported never has it, so a table that answers 'over' there really is.
+   */
+  awaitingInit?: true
 }
 
 /** What a table tells the lobby when it is open: the row without its times. */
@@ -88,6 +117,17 @@ export const isFresh = (game: OpenGame, t: number) =>
 /** A row the list may show: listed, and fresh. */
 export const isOffered = (game: OpenGame, t: number) =>
   game.listed && isFresh(game, t)
+
+/** How many of `games` the list could show (listed and fresh). */
+export const countOffered = (games: OpenGame[], t: number) =>
+  games.filter((game) => isOffered(game, t)).length
+
+/** How many listed, fresh games `hostId` has among `games`. */
+export const hostOffered = (games: OpenGame[], hostId: string, t: number) =>
+  countOffered(
+    games.filter((game) => game.hostId === hostId),
+    t,
+  )
 
 /** Whether a row is old enough to be deleted on the next read. */
 export const isPrunable = (game: OpenGame, t: number) =>

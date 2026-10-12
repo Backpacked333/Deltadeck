@@ -51,13 +51,18 @@ import { GAME_CODE_RE, GAME_ID_RE } from '../../src/shared/gameCode'
 import { newGameCode, newGameId } from './gamecode'
 import {
   byWaiting,
+  countOffered,
+  hostOffered,
   gameRow,
   GAMES_CACHE_MS,
   GAMES_MAX,
   GAMES_RETURNED,
+  HOST_LISTED_MAX,
+  INIT_GRACE_MS,
   isFresh,
   isOffered,
   isPrunable,
+  OPEN_ROWS_READ,
   REQUEST_TTL_MS,
 } from './games'
 import type { OpenGame, OpenReport } from './games'
@@ -254,6 +259,8 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
   private snapshot: GamesSnapshot | null = null
   private loading: Promise<GamesSnapshot> | null = null
   private generation = 0
+  /** The scan breaker's trip is logged (resolveCode); a calm miss clears it. */
+  private scanLogged = false
   /** Draws a code for a new game; tests replace it to force a collision. */
   newCode: () => string = () => newGameCode()
 
@@ -618,7 +625,11 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    * rest: from the first read of `code:` to the put only storage is awaited,
    * so the input gate holds, and no other create can draw the same code in
    * between (the lobby is one object). Past GAMES_MAX rows the game is
-   * unlisted, never refused; five codes in a row taken is `busy`.
+   * unlisted, never refused, and so is a second listed game of one host
+   * (HOST_LISTED_MAX); five codes in a row taken is `busy`. A host's new
+   * table closes their earlier waiting ones: an invite table does not hold
+   * its host (liveness 'open'), so without this one account would keep up to
+   * MATCH_CREATES_PER_DAY rows, and the store is what the list is read from.
    */
   createMatch(
     userId: string,
@@ -640,8 +651,18 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
         const code = await this.freeCode()
         if (!code) return { refused: 'busy' }
         const gameId = newGameId()
-        const listed = opts.listed && (await this.openRows()).length < GAMES_MAX
         const t = this.clock()
+        const rows = await this.openRows()
+        // Their own earlier games, closed in the same turn as the new one is
+        // written (only storage is awaited, so nobody sees both).
+        for (const [key, g] of rows)
+          if (g.hostId === userId)
+            await this.closeGame(key.slice('open:'.length))
+        const others = rows.map(([, g]) => g).filter((g) => g.hostId !== userId)
+        const listed =
+          opts.listed &&
+          countOffered(others, t) < GAMES_MAX &&
+          hostOffered(others, userId, t) < HOST_LISTED_MAX
         writes[`open:${matchId}`] = {
           gameId,
           code,
@@ -650,6 +671,7 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
           listed,
           openedAt: t,
           updatedAt: t,
+          awaitingInit: true,
         } satisfies OpenGame
         writes[`code:${code}`] = matchId
         writes[`gameid:${gameId}`] = matchId
@@ -766,7 +788,7 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
   }
 
   /**
-   * The stored `open:` rows, at most GAMES_MAX, those older than
+   * The stored `open:` rows, at most OPEN_ROWS_READ, those older than
    * GAME_PRUNE_MS deleted (with their `code:` and `gameid:` keys) as they are
    * read: pruning is lazy, so the constructor has no work and a quiet lobby
    * pays nothing.
@@ -777,7 +799,7 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
       ...(
         await this.ctx.storage.list<OpenGame>({
           prefix: 'open:',
-          limit: GAMES_MAX,
+          limit: OPEN_ROWS_READ,
         })
       ).entries(),
     ]
@@ -823,8 +845,11 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
     const key = `open:${matchId}`
     const row = await this.ctx.storage.get<OpenGame>(key)
     if (row) {
+      // The table has spoken, so its /init happened: no grace from here on.
+      const kept: OpenGame = { ...row }
+      delete kept.awaitingInit
       await this.ctx.storage.put(key, {
-        ...row,
+        ...kept,
         hostName,
         listed,
         updatedAt: t,
@@ -839,13 +864,17 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
     const taken = await this.ctx.storage.get(`gameid:${gameId}`)
     const handle =
       taken === undefined || taken === matchId ? gameId : newGameId()
+    const rows = (await this.openRows()).map(([, g]) => g)
     await this.ctx.storage.put({
       [key]: {
         gameId: handle,
         code: own,
         hostId,
         hostName,
-        listed: listed && (await this.openRows()).length < GAMES_MAX,
+        listed:
+          listed &&
+          countOffered(rows, t) < GAMES_MAX &&
+          hostOffered(rows, hostId, t) < HOST_LISTED_MAX,
         openedAt: t,
         updatedAt: t,
       } satisfies OpenGame,
@@ -1102,8 +1131,15 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
         CODE_FAIL_WINDOW_GLOBAL_MS,
       )
       // The last failure the lobby tolerates this minute: one line, no code.
-      if (all && all.tokens < 1)
-        logEvent('limit_hit', { code: 429, reason: 'code_scan' })
+      // Once per trip: while a scan keeps spending each refilled token the
+      // bucket stays under 1, and a line per miss would flood the log the
+      // operator reads the attack in. A miss that leaves a whole token ends
+      // the trip. In memory, so a lobby that woke may say it once more.
+      if (all && all.tokens < 1) {
+        if (!this.scanLogged)
+          logEvent('limit_hit', { code: 429, reason: 'code_scan' })
+        this.scanLogged = true
+      } else if (all) this.scanLogged = false
       return all ? this.unavailable(ws) : this.tooManyCodes(ws)
     }
     // A hit costs nothing. The account stops looking for a heads-up opponent
@@ -1151,7 +1187,7 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
       })
       return null
     }
-    if (state === 'over') await this.closeGame(matchId)
+    if (state === 'over') await this.closeIfOld(matchId)
     return state === 'open' ? matchId : null
   }
 
@@ -1269,10 +1305,24 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
   private async forgetIfOver(matchId: string) {
     try {
       if ((await tableStub(this.env, matchId).liveness()) === 'over')
-        await this.closeGame(matchId)
+        await this.closeIfOld(matchId)
     } catch {
       // Left for GAME_STALE_MS.
     }
+  }
+
+  /**
+   * closeGame for a table found 'over', unless its row is younger than
+   * INIT_GRACE_MS: createMatch writes the row before the table's /init, and a
+   * table with no match answers 'over', so a lookup in that gap would delete
+   * the game being made (and the creator's code with it). A table that is
+   * really gone is found again once the row is older, or goes stale.
+   */
+  private async closeIfOld(matchId: string) {
+    const game = await this.ctx.storage.get<OpenGame>(`open:${matchId}`)
+    if (game?.awaitingInit && this.clock() - game.openedAt < INIT_GRACE_MS)
+      return
+    await this.closeGame(matchId)
   }
 
   /** `cancel_request`: withdraw the pending request, in line with asking it. */

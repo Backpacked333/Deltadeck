@@ -29,6 +29,7 @@ import {
   GAME_STALE_MS,
   GAMES_CACHE_MS,
   GAMES_MAX,
+  INIT_GRACE_MS,
   OPEN_HEARTBEAT_MS,
   REQUEST_TTL_MS,
   REQUESTS_PER_GAME,
@@ -412,8 +413,9 @@ describe('POST /api/matches', () => {
       expect(refused.status, body).toBe(400)
       expect(await refused.json()).toEqual({ error: 'bad request' })
     }
-    // A refused body made nothing: only the five that were taken did.
-    expect(Object.keys(await lobbyRows('open:'))).toHaveLength(5)
+    // A refused body made nothing: only the five that were taken did, and a
+    // host's new game closes their earlier one, so one row is left.
+    expect(Object.keys(await lobbyRows('open:'))).toHaveLength(1)
   })
 
   it('writes the day, the table, and the game by code and handle in one put', async () => {
@@ -488,6 +490,102 @@ describe('POST /api/matches', () => {
     // It still has its code, which works.
     expect(await openRow(matchId)).toMatchObject({ code, listed: false })
     expect(Object.keys(await lobbyRows('code:'))).toContain(`code:${code}`)
+  })
+
+  /** A fresh open row; `listed` or not, by `hostId`. */
+  const seedRow = (
+    hostId: string,
+    over: Partial<OpenGame> = {},
+    t = Date.now(),
+  ): OpenGame => ({
+    gameId: newGameId(),
+    code: newGameCode(),
+    hostId,
+    hostName: hostId,
+    listed: true,
+    openedAt: t,
+    updatedAt: t,
+    ...over,
+  })
+  const seed = (rows: Record<string, OpenGame>) =>
+    runInDurableObject(lobbyStub(env), async (_: LobbyDO, state) => {
+      const entries = Object.entries(rows)
+      for (let i = 0; i < entries.length; i += 100)
+        await state.storage.put(Object.fromEntries(entries.slice(i, i + 100)))
+    })
+
+  it('counts only listed, fresh games against the cap: unlisted and stale rows cannot switch listing off', async () => {
+    const t = Date.now()
+    const rows: Record<string, OpenGame> = {}
+    for (let i = 0; i < GAMES_MAX; i++)
+      rows[`open:cheap-${i}`] = seedRow(`c${i}`, { listed: false }, t)
+    for (let i = 0; i < GAMES_MAX; i++)
+      rows[`open:stale-${i}`] = seedRow(
+        `s${i}`,
+        { updatedAt: t - GAME_STALE_MS - 1 },
+        t,
+      )
+    await seed(rows)
+    const made = await post('cap-a', JSON.stringify({ listed: true }))
+    expect(((await made.json()) as { listed: boolean }).listed).toBe(true)
+  })
+
+  it('shows a listed game whatever its key sorts as among many rows', async () => {
+    const t = Date.now()
+    const rows: Record<string, OpenGame> = {}
+    for (let i = 0; i < GAMES_MAX + 50; i++)
+      rows[`open:a-${String(i).padStart(4, '0')}`] = seedRow(
+        `u${i}`,
+        { listed: false },
+        t,
+      )
+    // Past the 200th key: a read that cuts at 200 before it filters misses it.
+    rows['open:z-last'] = seedRow('real-host', { hostName: 'Real Host' }, t)
+    await seed(rows)
+    const games = await listGames(await lobbyOf('cap-watcher'))
+    expect(games.map((g) => g.host)).toEqual(['Real Host'])
+  })
+
+  it("closes a host's earlier waiting game when they make another, with its code and handle", async () => {
+    const first = await post('again-a', JSON.stringify({ listed: true }))
+    const one = (await first.json()) as { matchId: string; code: string }
+    const gameId = (await openRow(one.matchId))!.gameId
+    await runInDurableObject(lobbyStub(env), (_: LobbyDO, s) =>
+      s.storage.delete('active:again-a'),
+    )
+    const second = await post('again-a', JSON.stringify({ listed: true }))
+    const two = (await second.json()) as { matchId: string; listed: boolean }
+    expect(two.listed).toBe(true)
+    expect(await openRow(one.matchId)).toBeUndefined()
+    expect(await lobbyRows('code:')).not.toHaveProperty(`code:${one.code}`)
+    expect(await lobbyRows('gameid:')).not.toHaveProperty(`gameid:${gameId}`)
+    expect(Object.keys(await lobbyRows('open:'))).toEqual([
+      `open:${two.matchId}`,
+    ])
+  })
+
+  it('lists one game per host: a second table of the same host is made unlisted, never refused', async () => {
+    const t = Date.now()
+    await seed({ 'open:mine-a': seedRow('hog', {}, t) })
+    // The second table reports itself open (its row was pruned or never made).
+    const report = (listed: boolean) => ({
+      gameId: newGameId(),
+      code: newGameCode(),
+      hostId: 'hog',
+      hostName: 'hog',
+      listed,
+    })
+    const answer = await runInDurableObject(
+      lobbyStub(env),
+      async (l: LobbyDO) => l.reportOpen('mine-b', report(true)),
+    )
+    expect(answer).toEqual({})
+    expect(await openRow('mine-b')).toMatchObject({ listed: false })
+    // Another host is not held back by it.
+    await runInDurableObject(lobbyStub(env), (l: LobbyDO) =>
+      l.reportOpen('other-b', { ...report(true), hostId: 'other' }),
+    )
+    expect(await openRow('other-b')).toMatchObject({ listed: true })
   })
 
   it('rolls everything back when the table refuses its /init, and keeps it when the call throws', async () => {
@@ -1142,6 +1240,33 @@ describe('joining by code', () => {
     )
   })
 
+  it('logs the breaker once per trip, not for every miss while the scan goes on', async () => {
+    const lines = watchConsole()
+    const t0 = 1_900_000_000_000
+    await setLobbyClock(t0)
+    const trips = () => lines.filter((l) => l.includes('code_scan')).length
+    const burst = async (tag: string) => {
+      for (let a = 0; a < CODE_FAILS_GLOBAL / CODE_FAILS; a++) {
+        const s = await lobbyOf(`${tag}-${a}`)
+        for (let i = 0; i < CODE_FAILS; i++) await joinCode(s, '333333')
+      }
+    }
+    await burst('trip-a')
+    expect(trips()).toBe(1)
+    // Each second a token refills and a miss spends it: the bucket stays dry
+    // the whole time, which is one trip, not three.
+    for (let i = 1; i <= 3; i++) {
+      await setLobbyClock(t0 + i * 1_000)
+      await joinCode(await lobbyOf(`trip-b-${i}`), '333333')
+    }
+    expect(trips()).toBe(1)
+    // The scan stops, the bucket recovers, and the next one is a new trip.
+    await setLobbyClock(t0 + 5 * 60_000)
+    await joinCode(await lobbyOf('trip-calm'), '333333')
+    await burst('trip-c')
+    expect(trips()).toBe(2)
+  })
+
   it('logs no code and no handle through a whole game', async () => {
     const lines = watchConsole()
     const game = await openGame('log-host')
@@ -1192,6 +1317,40 @@ describe('joining by code', () => {
       },
     })
     expect(response.status).toBe(401)
+  })
+})
+
+// ---- A game being made ---------------------------------------------------------------
+
+describe('a game the lobby has written and its table has not yet been told about', () => {
+  /** The lobby's rows for a game, as POST /api/matches writes them, without /init. */
+  async function written(host: string) {
+    const matchId = crypto.randomUUID()
+    const made = await runInDurableObject(lobbyStub(env), (l: LobbyDO) =>
+      l.createMatch(host, matchId, { listed: true, hostName: host }),
+    )
+    expect(made).toMatchObject({ listed: true })
+    const row = (await openRow(matchId))!
+    return { matchId, code: row.code, gameId: row.gameId }
+  }
+
+  it('is not closed by a request or a code lookup inside INIT_GRACE_MS, and is once it has had that long', async () => {
+    const t0 = 1_900_000_000_000
+    await setLobbyClock(t0)
+    const game = await written('grace-host')
+    const asker = await lobbyOf('grace-ask')
+    asker.send({ t: 'join_request', gameId: game.gameId })
+    await asker.next((f) => f.t === 'join_status')
+    expect(await openRow(game.matchId)).toBeDefined()
+    expect(
+      await joinCode(await lobbyOf('grace-code'), game.code),
+    ).toMatchObject({ state: 'unavailable' })
+    expect(await openRow(game.matchId)).toBeDefined()
+    expect(Object.keys(await lobbyRows('code:'))).toContain(`code:${game.code}`)
+    // A table that never comes is still found out, once the row has aged.
+    await setLobbyClock(t0 + INIT_GRACE_MS)
+    await joinCode(await lobbyOf('grace-late'), game.code)
+    expect(await openRow(game.matchId)).toBeUndefined()
   })
 })
 
