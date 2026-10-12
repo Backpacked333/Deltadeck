@@ -10,6 +10,8 @@
 export type WorkerEnv = Env & {
   DEV_AUTH_SECRET?: string
   SUPABASE_SECRET_KEY?: string
+  TRUST_PAUSE_RATED_ADMISSION?: string
+  TRUST_PAUSE_RATING_FINALIZATION?: string
   RESEND_API_KEY?: string
   SCHOOL_EMAIL_FROM?: string
 }

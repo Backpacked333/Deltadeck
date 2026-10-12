@@ -75,7 +75,13 @@ export class EvidenceRuntime implements SaveParticipant {
     this.unregister = registerSaveParticipant(this)
   }
   private live() {
-    return this.active && activeSync() === this.sync
+    const generations = this.sync.deletionGenerations()
+    return (
+      this.active &&
+      activeSync() === this.sync &&
+      generations?.learning === this.learningGeneration &&
+      generations.practice === this.practiceGeneration
+    )
   }
   private write = async (
     event: DurableEvent,
@@ -257,6 +263,33 @@ export class EvidenceRuntime implements SaveParticipant {
     if (error) throw error
     await this.refresh()
   }
+  async issueAssessment(skill: string) {
+    if (!this.live()) throw new Error('Account changed')
+    const { data, error } = await this.client.rpc(
+      'issue_learning_assessment_v1',
+      {
+        p: {
+          protocol: 1,
+          accountId: this.sync.scope.accountId,
+          deletionGeneration: this.learningGeneration,
+          skill,
+        },
+      },
+    )
+    if (!this.live()) throw new Error('Account changed')
+    if (error) throw error
+    if (
+      data?.status !== 'issued' ||
+      typeof data.issueId !== 'string' ||
+      typeof data.caseId !== 'string'
+    )
+      throw new Error(
+        data?.status === 'waiting'
+          ? `Not due until ${data.dueAt}; the server clock decides.`
+          : `Assessment unavailable: ${data?.reason ?? 'unknown response'}`,
+      )
+    return { issueId: data.issueId as string, caseId: data.caseId as string }
+  }
   async retry() {
     this.error = null
     this.lastInput = ''
@@ -346,7 +379,7 @@ export function attachLearningSession(session: LearningSession) {
     }
   }
 }
-/** Lazy account producer. The parent may invoke this once from its account-ready lazy boundary. */
+/** Lazy account producer, shared by account bootstrap and curriculum mount. */
 export function startLearningEvidence() {
   if (started) return
   started = true
@@ -364,6 +397,14 @@ export function startLearningEvidence() {
       old.stop(old.sync.scope)
     }
     if (!sync?.isReconciled() || !generations || connecting) return
+    const stillCurrent = () => {
+      const latest = sync.deletionGenerations()
+      return (
+        activeSync() === sync &&
+        latest?.learning === generations.learning &&
+        latest.practice === generations.practice
+      )
+    }
     if (current) {
       void current.capture(attachedSession)
       return
@@ -371,13 +412,9 @@ export function startLearningEvidence() {
     connecting = true
     try {
       const online = await loadOnline()
-      if (!online || activeSync() !== sync) return
-      await cleanupDeletedEvidence(
-        sync.scope,
-        generations,
-        () => activeSync() === sync,
-      )
-      if (activeSync() !== sync) return
+      if (!online || !stillCurrent()) return
+      await cleanupDeletedEvidence(sync.scope, generations, stillCurrent)
+      if (!stillCurrent()) return
       const runtime = new EvidenceRuntime(
         sync,
         online.client,
@@ -397,6 +434,7 @@ export function startLearningEvidence() {
     } finally {
       connecting = false
       changed()
+      if (!stillCurrent()) queueMicrotask(() => void reconcile())
     }
   }
   window.addEventListener('qp-sync-changed', () => {

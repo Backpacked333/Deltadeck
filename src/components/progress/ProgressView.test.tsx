@@ -27,6 +27,15 @@ function show(hands: HandRecord[]) {
 }
 
 describe('F16 practice metric presentation', () => {
+  it('F10 never claims an account save from the existence of local results', () => {
+    show([hand('local', 10)])
+    expect(
+      screen.queryByText(/Saved to your account, so it follows/),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByText(/These results may include unsaved work/),
+    ).toBeInTheDocument()
+  })
   it('F16 displays unknown rather than an invented expectation or zero gap', () => {
     show([hand('unknown', 100)])
     expect(

@@ -2,8 +2,9 @@
 // A simulated season in a scratch database (P1-14, mission DONE WHEN): 200
 // players with a hidden true skill play 5,000 rated matches over 60 days.
 // Opponents are paired near rating, outcomes follow the true skill gap
-// (with draws), and every match is rated the production way: Glicko-2 in
-// src/rating/glicko2.ts, applied by apply_rating with the versions read.
+// (with draws). This synthetic statistics fixture uses Glicko-2 and the
+// private rating math transaction as database owner; it does NOT certify
+// poker evidence or call the public rating gate (verified-settlement.test.ts).
 // The ladder must rank players by true skill, show only eligible players,
 // and the metrics file (supabase/metrics/rating-metrics.sql) must run on it,
 // saying "insufficient data" on the empty database first.
@@ -191,7 +192,7 @@ describe('a simulated season', () => {
         now(b),
         SCORE[outcome as keyof typeof SCORE],
       )
-      await db.query('select public.apply_rating($1::jsonb)', [
+      await db.query('select private.apply_rating_pre_certificate($1::jsonb)', [
         JSON.stringify({
           matchId: id,
           format: 'hu-duplicate',

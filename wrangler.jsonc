@@ -11,6 +11,7 @@
   "main": "worker/src/index.ts",
   "compatibility_date": "2026-09-01",
   "observability": { "enabled": true },
+  "triggers": { "crons": ["*/5 * * * *"] },
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",

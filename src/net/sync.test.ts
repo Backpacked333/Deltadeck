@@ -59,8 +59,9 @@ describe('F08 exact snapshot acknowledgement', () => {
     set.mockRestore()
   })
   it('F08 wrong digest never counts as saved; retry reuses the mutation ID', async () => {
-    const { sync, service } = setup(); await sync.start()
+    const { sync, service } = setup()
     service.state.badAck = true
+    await sync.start()
     expect((await sync.flush(1000)).status).not.toBe('saved')
     service.state.badAck = false
     expect((await sync.flush(1000)).status).toBe('saved')

@@ -11,6 +11,7 @@ import type {
 import { safeClone } from '../core/validation'
 import { PredictionForm } from './PredictionForm'
 import { connectionLabels } from '../content/foundations'
+import { EffortClock } from '../core/effort'
 
 function QuestionInput({
   question,
@@ -127,9 +128,11 @@ function QuestionInput({
 export function CasePlayer({
   caseRecord: c,
   session,
+  assessmentIssueId,
 }: {
   caseRecord: CaseRecord
   session: LearningSession
+  assessmentIssueId?: string
 }) {
   const feedbackRef = useRef<HTMLHeadingElement>(null)
   const focusFeedback = useRef(false)
@@ -146,6 +149,7 @@ export function CasePlayer({
       ? safeClone(prior)
       : {
           id: crypto.randomUUID(),
+          ...(assessmentIssueId ? { assessmentIssueId } : {}),
           unitId: c.unitId,
           caseId: c.id,
           contentVersion: c.contentVersion,
@@ -160,6 +164,26 @@ export function CasePlayer({
           phase: 'draft',
         }
   })
+  const [effort] = useState(
+    () => new EffortClock(attempt.effort, undefined, !document.hidden),
+  )
+  const latest = useRef(attempt)
+  useEffect(() => {
+    latest.current = attempt
+  }, [attempt])
+  useEffect(() => {
+    const visibility = () => {
+      effort.visibility(!document.hidden)
+      if (!latest.current.submittedAt) {
+        const next = { ...latest.current, effort: effort.snapshot() }
+        latest.current = next
+        session.recordAttempt(next)
+        setAttempt(next)
+      }
+    }
+    document.addEventListener('visibilitychange', visibility)
+    return () => document.removeEventListener('visibilitychange', visibility)
+  }, [effort, session])
   useEffect(() => {
     if (attempt.submittedAt && focusFeedback.current) {
       focusFeedback.current = false
@@ -167,6 +191,8 @@ export function CasePlayer({
     }
   }, [attempt.submittedAt])
   function save(next: AttemptSnapshot) {
+    if (!attempt.submittedAt) next = { ...next, effort: effort.snapshot() }
+    latest.current = next
     session.recordAttempt(next)
     setAttempt(next)
   }
@@ -177,7 +203,11 @@ export function CasePlayer({
     save({ ...attempt, answers })
   }
   return (
-    <article className="qp-case">
+    <article
+      className="qp-case"
+      onPointerDownCapture={() => effort.interact()}
+      onKeyDownCapture={() => effort.interact()}
+    >
       <h3>{c.title}</h3>
       <p className="outline-badge">{connectionLabels[c.connection]}</p>
       <p>

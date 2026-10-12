@@ -94,6 +94,14 @@ export type LearningEvent =
   | Recommendation
   | Feedback
 export interface StoredEvent {
+  timing?: {
+    issueId: string
+    anchorId: string
+    anchorReceivedAt: string
+    dueAt: string
+    issuedAt: string
+    provenance: 'server-receipt'
+  } | null
   event: LearningEvent
   digest: string
   receivedAt: string | null
@@ -109,7 +117,7 @@ export interface SkillProjection {
   errors: string[]
   hypothesis: 'uncertain' | 'supported' | 'contested'
   counterevidence: string[]
-  retention: 'unknown' | 'due' | 'device-clock-only'
+  retention: 'unknown' | 'due' | 'device-clock-only' | 'server-timed-self-study'
   dueAt: string | null
 }
 export interface Projection {

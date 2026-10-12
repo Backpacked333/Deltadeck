@@ -6,8 +6,24 @@ import { classifySettlement, catchUpSettlements } from '../src/settlement'
 import { problemsWith } from '../src/verify'
 import { handFixture, settlementFixture } from './settlement-fixtures'
 import { env } from 'cloudflare:test'
+import { applyRating } from '../src/rating'
 
 describe('F07 rated evidence', () => {
+  it('finalization pause retries without certificate or rating mutations', async () => {
+    const network = vi.spyOn(globalThis, 'fetch')
+    try {
+      expect(
+        await applyRating(
+          { ...env, TRUST_PAUSE_RATING_FINALIZATION: 'true' },
+          { matchId: 'paused', players: [] },
+          Date.now(),
+        ),
+      ).toEqual({ ok: false, status: 503 })
+      expect(network).not.toHaveBeenCalled()
+    } finally {
+      network.mockRestore()
+    }
+  })
   it('replays exact archived all-in equity; alteration, missing adjustment and non-finite values cannot verify', async () => {
     const h = await handFixture(undefined, 1, 'flop')
     expect(await problemsWith(h)).toEqual([])

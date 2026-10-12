@@ -22,6 +22,8 @@ export default function LearningWorkspace({
     id: string
     accountId: string
     epoch: number
+    learningGeneration: number
+    assessmentIssueId?: string
   } | null>(null)
   const [logged, setLogged] = useState<Recommendation | null>(null)
   const [message, setMessage] = useState('')
@@ -95,8 +97,24 @@ export default function LearningWorkspace({
   }
   async function begin(id: string, recommended = false) {
     try {
+      if (!runtime) return
+      const task = taskById.get(id)
+      const issue = task?.holdout
+        ? await runtime.issueAssessment(task.skill)
+        : null
+      if (evidenceRuntime() !== runtime) return
+      if (issue && issue.caseId !== id)
+        throw new Error(
+          'Assessment identity mismatch; refresh account evidence',
+        )
       if (recommended) await feedback('started')
-      if (runtime) setSelected({ id, ...runtime.sync.scope })
+      if (evidenceRuntime() !== runtime) return
+      setSelected({
+        id,
+        ...runtime.sync.scope,
+        learningGeneration: runtime.learningGeneration,
+        ...(issue ? { assessmentIssueId: issue.issueId } : {}),
+      })
       setMessage('')
     } catch (e) {
       setMessage(String(e))
@@ -128,7 +146,8 @@ export default function LearningWorkspace({
   const current =
     selected &&
     selected.accountId === runtime?.sync.scope.accountId &&
-    selected.epoch === runtime.sync.scope.epoch
+    selected.epoch === runtime.sync.scope.epoch &&
+    selected.learningGeneration === runtime.learningGeneration
       ? taskById.get(selected.id)
       : null
   return (
@@ -202,7 +221,9 @@ export default function LearningWorkspace({
             </p>
             <p>
               Prose is not graded. Unaided status is self-reported; device
-              clocks cannot prove delayed completion.
+              clocks cannot prove delayed completion. A server-issued check
+              proves only issuance/receipt timing, not unseen content or
+              retained skill.
             </p>
           </article>
         ))}
@@ -365,7 +386,17 @@ export default function LearningWorkspace({
               ? 'Reserved assessment. Opening hints or prior-family reuse excludes independent evidence.'
               : 'Practice and assessment use different evidence rules. A repeat never becomes fresh by changing numbers.'}
           </p>
-          <CasePlayer caseRecord={current.case} session={session} />
+          <p>
+            Effort records visible, recently active browser time, excluding
+            hidden time and idle periods over 60 seconds. It is client-reported,
+            not proof of attention.
+          </p>
+          <CasePlayer
+            key={`${selected?.accountId}:${selected?.epoch}:${selected?.learningGeneration}:${current.case.id}:${selected?.assessmentIssueId ?? 'practice'}`}
+            caseRecord={current.case}
+            session={session}
+            assessmentIssueId={selected?.assessmentIssueId}
+          />
         </section>
       ) : null}
       <details>

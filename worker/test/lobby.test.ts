@@ -72,6 +72,32 @@ const lobbyState = () =>
   })
 
 describe('the queue', () => {
+  it('F14 admission pause rejects rated queues while casual remains available', async () => {
+    const setPause = (value: string) =>
+      runInDurableObject(lobbyStub(env), (instance) => {
+        ;(
+          instance as unknown as {
+            env: { TRUST_PAUSE_RATED_ADMISSION?: string }
+          }
+        ).env.TRUST_PAUSE_RATED_ADMISSION = value
+      })
+    await setPause('true')
+    try {
+      const client = await lobby('pause-test')
+      client.send({ t: 'queue', kind: 'hu-rated' })
+      expect(await client.next((f) => f.t === 'error')).toMatchObject({
+        t: 'error',
+        code: 'rating_unavailable',
+        message: expect.stringContaining('paused'),
+      })
+      client.send({ t: 'queue', kind: 'hu-casual' })
+      expect(await client.next((f) => f.t === 'queued')).toMatchObject({
+        t: 'queued',
+      })
+    } finally {
+      await setPause('false')
+    }
+  })
   it('pairs two waiting players at one new table, both seated', async () => {
     const { matchId, la } = await pair('alice', 'bob')
     expect(matchId).toMatch(/^[0-9a-f-]{36}$/)

@@ -870,6 +870,10 @@ All 22 baseline migration filenames (in execution order), with the defining/repl
 | `20261011100000_practice_history.sql` | Direct owner DML; practice guard silently refuses downgrade, curriculum timestamp winner. |
 | `20261012000000_avatars.sql` | Avatar/report functions; unrelated, preserve. |
 
+Integration status and actual tests are indexed in [trust-release-evidence.md](trust-release-evidence.md).
+The integration also adds `20261012040000_learning_measurement.sql` for qualified
+effort and server-issued delayed-check timing; this does not award retained status.
+
 New migrations in reserved order: `20261012010000_learning_revisions.sql` (sync),
 `20261012020000_verified_settlement.sql` (rating), `20261012030000_learning_evidence.sql`
 (learning). No production application is authorized. Reader expansion → local migration/

@@ -8,7 +8,7 @@ This is an **educational web app played for play money only**, not a gambling se
 
 ## Run locally
 
-Requirements: Node.js **22.12+** and npm (`.nvmrc` pins Node 22 LTS; Node 24 also works).
+Requirements: Node.js **22.12+** and npm (`.nvmrc` pins Node 22 LTS). This integration was validated with **Node 24**; use `nvm use 24` for the commands below.
 
 ```sh
 npm ci
@@ -16,6 +16,65 @@ npm run dev          # http://localhost:5173
 ```
 
 The practice table, the lessons and Progress need a signed-in account; the landing page, its first challenge hand, the ladder, profiles and match reviews do not. `.env.example` lists the two browser-safe values that point a local build at a Supabase project for sign-in. Without them, practise locally as a development identity: in the browser console run `sessionStorage.setItem('qp.devToken', 'dev.me.local')` and reload (nothing is saved to an account then).
+
+Use a separate development Supabase project, never a production service key in
+the browser. Static Vite preview has no account backend by default. The Worker
+can provide browser-safe `/api/config`; without `SUPABASE_SECRET_KEY`, local
+live games are not archived to an account database. `DEV_AUTH_SECRET` is local
+only, never production. No production setup is required for unit/SQL/Worker tests.
+
+### Trust integration status
+
+See [release evidence, F01–F17, compatibility and runbooks](docs/trust-release-evidence.md)
+for actual checks and release boundaries. This branch is **not a production
+release or a completed human pilot**. Recorded app acceptance, deployed schema
+parity and staged cutover remain required; passing local tests does not prove
+production correctness, real-device smoothness/recovery or learning efficacy.
+
+- Live tables own decision deadlines, membership generations, immutable hand
+  completion and bounded presentation. Seat commands distinguish sent, accepted
+  and completed; reconnect recovers the server journal rather than reapplying
+  an uncertain command. No trainer coaching is injected into live decisions.
+- Rated results require current verified hand evidence, terminal proof and a
+  matching settlement certificate. Missing evidence stays pending; failed
+  evidence is quarantined; legacy proofless matches are not silently certified.
+  A five-minute scheduled scan backs up queue delivery without entering the
+  betting path. Ratings never default to 1500 when the account read failed.
+- Account sync uses exact digest/revision acknowledgements and compare-and-set
+  conflict preservation. Initial-read/size/quota/schema failures remain visible
+  and exportable. Sign-out waits for registered producers; unresolved work
+  requires retry, saved-export confirmation or explicit second-confirmation
+  discard. Merely having a local record is not an account-save receipt.
+- `#learn/targeted` is three-skill **qualified self-study**, with fixed manual
+  practice and shadow selection by default. Exposing a limited recommendation
+  requires an enabled operator-created protocol/targeted assignment and learner
+  consent. Family exhaustion is explicit; repeats are not fresh assessment.
+  Seven-day checks require server-issued receipt-based timing. Visible/active
+  monotonic browser effort is client-reported, not proof of attention. Neither
+  timing nor practice outcomes unlock a retained-skill claim.
+
+The four additive trust migrations follow avatars, in filename order:
+`learning_revisions`, `verified_settlement`, `learning_evidence`, then
+`learning_measurement` (`20261012010000` through `20261012040000`). Apply only
+after approved parity/cutover review. Older account writers fail closed; do not
+restore timestamp overwrite or direct-table writes to make old clients appear saved.
+
+Safe capability controls are operator-owned Worker variables (exact string
+`true`): `TRUST_PAUSE_RATED_ADMISSION` pauses new rated pairing while preserving
+active memberships and casual play; `TRUST_PAUSE_RATING_FINALIZATION` returns a
+retryable result without rating writes, preserving durable pending work. Neither
+disables the certificate gate. Setting a pilot protocol's `enabled=false` pauses
+recommendation exposure; it does not change evidence into proof. No bypass flag
+exists for betting correctness, private-card redaction or revision CAS.
+
+Reproduce checks with `npm run typecheck`, `npm run typecheck:worker`,
+`npm run lint`, `npm test`, `npm run worker:test`, `npm run build`. The build
+enforces a **150 kB gzip entry budget**. For isolated headless storage probes,
+run `npx playwright install chromium`, then
+`INDEXEDDB_BROWSER_TESTS=1 npx vitest run src/net/syncOutbox.test.ts src/curriculum/learning/cleanup.test.ts`.
+`VISUAL= npm run e2e -- --project=desktop --project=mobile --project=live` runs
+CLI regressions against preview/local Worker and fake account responses, not
+production or real two-device cloud sync.
 
 ### The landing page
 
@@ -310,13 +369,13 @@ Queries worth saving in the Logs view: `evt = hand_end` grouped by day (hands/da
 **Deploys.** Deploy the Worker before the site: the host-only `invite` frame reaches an old client that is hosting a game. `POST /api/matches` now takes an optional `{"listed":boolean}` body (400 for unknown keys, a wrong type or non-JSON) and answers `201 {matchId, code, listed}`, or `503 busy` after 5 code collisions. Cloudflare builds and deploys `main` on every push; `.github/workflows/deploy-check.yml` then waits for that build and compares production with the commit, file by file (`npm run verify:deploy` does the same by hand). Before a deploy that adds queues or migrations:
 
 - **Queues:** the deploy creates any queue `wrangler.jsonc` names as a producer, and both are. If the build's token may not create queues, the build fails and the old version keeps serving; then run `npx wrangler queues create <name>`.
-- **Migrations:** apply new `supabase/migrations/*` first, or the verify consumer fails. Then rename the repo file to the version Supabase recorded (`list_migrations`), so the repo and the live history stay identical.
+- **Migrations:** inventory deployed bodies/schema/grants as well as ledger versions before applying approved new migrations. Historical production timestamps differ from some source filenames; do not rename history or stamp versions to pretend parity. The protected-writer trust cutover needs mixed-client testing and a deliberate admission window; see the [release runbook](docs/trust-release-evidence.md). Never roll back by restoring an unsafe writer or certificate bypass.
 
 ## Deliberate boundaries
 
 - **The trainer is not money-safe:** practice against Atlas runs entirely in the browser with `Math.random`, and its state is inspectable in developer tools. Online play is designed to be server-authoritative instead, and is still play money only.
 - **Not a solver:** Atlas is a transparent practice opponent. Grades reflect a simplified one-decision model of Atlas, not game-theory-optimal play.
-- **Heads-up only:** bets are capped at the effective stack, so side pots never arise.
+- **Trainer heads-up only:** practice bets are capped at the effective stack. The separate authoritative online engine supports 2–6 players and side pots.
 - **Not a certification:** the lessons are an introduction to risk thinking, not a quantitative-finance curriculum.
 
 Next steps should come from learner feedback: multi-street EV, opponent styles learned from your own play, more lessons, and optional cloud sync of progress through the existing `SyncAdapter` seam.

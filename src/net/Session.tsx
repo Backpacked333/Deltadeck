@@ -74,7 +74,10 @@ export default function SessionKeeper({
         // Offline, supabase-js has no session to give but keeps the stored
         // one for later: only a missing key means signed out.
         if (!stored(key)) {
-          generation++; user = null; sync.current?.stop(); sync.current = null
+          generation++
+          user = null
+          sync.current?.stop()
+          sync.current = null
           forgetAccount()
         }
         return
@@ -92,6 +95,18 @@ export default function SessionKeeper({
       })
       sync.current = next
       next.note(latest.current)
+      void import('../curriculum/learning/runtime')
+        .then(({ startLearningEvidence }) => {
+          if (live && generation === mine && activeSync() === next)
+            startLearningEvidence()
+        })
+        .catch(() => {
+          if (live && generation === mine)
+            next.reportSourceBlocked(
+              'evidence',
+              'Evidence module unavailable; reload before signing out',
+            )
+        })
       void next.start()
       try {
         const player = await loadPlayer(online.client, userId)
@@ -138,26 +153,72 @@ export default function SessionKeeper({
     saving: 'Saving to your account…',
     saved_to_account: 'Saved to your account',
     offline_local_changes: 'Offline — account save pending',
-    conflict: 'Both versions preserved — choose how to resolve learning changes',
+    conflict:
+      'Both versions preserved — choose how to resolve learning changes',
     blocked: 'Account save blocked — export your work before leaving',
-    unable_to_verify: 'Unable to verify account history — new work is retained on this device',
+    unable_to_verify:
+      'Unable to verify account history — new work is retained on this device',
   }
-  return <aside aria-label="Learning save status" className="live-status">
-    <p role="status">{labels[status]}</p>
-    {['unable_to_verify', 'offline_local_changes', 'blocked'].includes(status) &&
-      <button className="btn btn-outline" onClick={() => void current.flush(3000)}>Retry account save</button>}
-    {current.hasUnclaimed() && <div>
-      <p>Guest work is unclaimed. Import it into account {current.userId} only if it is yours.</p>
-      <button className="btn btn-outline" disabled={status === 'checking_account' || status === 'unable_to_verify'}
-        onClick={() => current.claimGuest(current.userId)}>Import my guest work into this account</button>
-    </div>}
-    {current.conflicts().map((conflict) => <details key={conflict.key}>
-      <summary>Learning conflict: {conflict.key}</summary>
-      <p>Neither version was silently overwritten. Export before choosing if you need to keep both.</p>
-      <pre>{JSON.stringify({ local: conflict.local, account: conflict.remote }, null, 2)}</pre>
-      {conflict.reason !== 'deleted_on_account' && <button className="btn btn-outline"
-        onClick={() => current.resolveConflict(conflict.key, 'local')}>Use this device version</button>}
-      <button className="btn btn-outline" onClick={() => current.resolveConflict(conflict.key, 'remote')}>Use account version</button>
-    </details>)}
-  </aside>
+  return (
+    <aside aria-label="Learning save status" className="live-status">
+      <p role="status">{labels[status]}</p>
+      {['unable_to_verify', 'offline_local_changes', 'blocked'].includes(
+        status,
+      ) && (
+        <button
+          className="btn btn-outline"
+          onClick={() => void current.flush(3000)}
+        >
+          Retry account save
+        </button>
+      )}
+      {current.hasUnclaimed() && (
+        <div>
+          <p>
+            Guest work is unclaimed. Import it into account {current.userId}{' '}
+            only if it is yours.
+          </p>
+          <button
+            className="btn btn-outline"
+            disabled={
+              status === 'checking_account' || status === 'unable_to_verify'
+            }
+            onClick={() => current.claimGuest(current.userId)}
+          >
+            Import my guest work into this account
+          </button>
+        </div>
+      )}
+      {current.conflicts().map((conflict) => (
+        <details key={conflict.key}>
+          <summary>Learning conflict: {conflict.key}</summary>
+          <p>
+            Neither version was silently overwritten. Export before choosing if
+            you need to keep both.
+          </p>
+          <pre>
+            {JSON.stringify(
+              { local: conflict.local, account: conflict.remote },
+              null,
+              2,
+            )}
+          </pre>
+          {conflict.reason !== 'deleted_on_account' && (
+            <button
+              className="btn btn-outline"
+              onClick={() => current.resolveConflict(conflict.key, 'local')}
+            >
+              Use this device version
+            </button>
+          )}
+          <button
+            className="btn btn-outline"
+            onClick={() => current.resolveConflict(conflict.key, 'remote')}
+          >
+            Use account version
+          </button>
+        </details>
+      ))}
+    </aside>
+  )
 }

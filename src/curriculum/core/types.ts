@@ -181,6 +181,8 @@ export type ExperimentPhase =
   | 'reflected'
   | 'archived'
 export interface AttemptSnapshot {
+  effort?: import('./effort').EffortSnapshot
+  assessmentIssueId?: string
   id: string
   unitId?: UnitId
   experienceId?: ExperienceId

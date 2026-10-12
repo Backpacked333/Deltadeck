@@ -17,24 +17,20 @@ through `DurableOutbox`. The participant includes already-started capture in its
 barrier. Rejected enqueues are never called durable. Unsupported data is blocked
 and exportable. Account epoch checks guard late responses and in-memory sessions.
 
-**Parent integration:** also invoke the lazy initializer once from the account-ready
-bootstrap, outside this lane's ownership:
-
-```ts
-void import('./curriculum/learning/runtime').then(m => m.startLearningEvidence())
-```
-
-Without that call, first-time trainer-only use is not observed until learning is
-opened; only the bounded available practice history can be backfilled. Do not
-claim complete trainer capture before this integration. Use the existing
-revision writer for raw trainer durability regardless.
+The account-ready `SessionKeeper` also lazy-loads the initializer, fencing the
+current live account/sync generation. Trainer-only use is observed without first
+opening learning. Startup still waits for reconciliation; available historical
+practice backfill is bounded, not a claim to recover already discarded history.
+The revision writer remains the raw trainer durability path.
 
 The additive `20261012030000_learning_evidence.sql` migration follows the revision
 migration. RPCs: `ingest_learning_evidence_v1`, `read_learning_evidence_v1`,
 `learning_pilot_consent_v1`; account deletion fences purge dependent evidence.
 `cleanupDeletedEvidence` uses the public `openOutbox` schema-v1 seam to remove
 explicitly server-deleted events and jobs in one epoch-checked transaction;
-unrelated and future-generation work is preserved. No sync/account file is edited.
+unrelated and future-generation work is preserved. The additive
+`20261012040000_learning_measurement.sql` then pins empty search paths, adds
+owner-only assessment issues and receipt-based timing/effort analysis metadata.
 Migration application and release coordination belong to the parent release gate.
 
 ## Rebuild, content and claim limits
@@ -53,9 +49,15 @@ repeated families never become fresh on regrade. Family exhaustion explicitly
 falls back to revisiting for practice or choosing another focus.
 
 Every source remains `client-reported`, with uncertain device completion time.
-Server receipt anchors the earliest review invitation, **not** verified completion
-after the delay. Consequently `retained` is never awarded by this projector.
-Server-issued assessment/timing provenance is future work, not a hidden upgrade.
+Server receipt anchors the earliest review invitation. `issue_learning_assessment_v1`
+requires seven server days after an eligible client-reported business-transfer
+receipt and refuses prior heldout-family exposure. It binds account, family and
+deletion generation; device timestamps cannot accelerate it. The account read
+and analyst export add server issue/receipt provenance. This establishes only
+the interval between receipt and issuance, **not** unseen content, honest effort
+or retained skill: bundled cases remain inspectable and responses self-reported.
+Consequently `retained` is never awarded; `server-timed-self-study` is just timing
+provenance and delayed evidence is still excluded from certification.
 
 ## Shadow and pilot
 
@@ -76,10 +78,14 @@ including non-consent/non-return, arm/stratum, exposure/start/decline records an
 raw outcomes/versions with held-out-family flags. Analysts must resolve
 supersession/invalidation, separate learner and family splits, predeclare missing
 outcome handling, and qualify device-clock data. It is an analysis foundation,
-not a causal estimate. Actual effort instrumentation, server-verified delayed
-assessment, protocol approval, expert content review and a powered efficacy study
-remain release/pilot work. Deletion removes participant-level rows rather than
-retaining a hidden study copy.
+not a causal estimate. CasePlayer checkpoints client-monotonic visible/active
+milliseconds and resumed-session count; hidden time is excluded and active time
+is capped 60 seconds after last interaction. These are not attention measures.
+The service export includes this qualified effort and server-issued timing, not
+raw answers/notes. Certified delayed assessment, protocol approval, expert content
+review and a powered genuine elapsed follow-up study remain release/pilot work.
+Deletion removes participant-level rows/assessment issues rather than retaining
+a hidden study copy.
 
 ## Local checks
 

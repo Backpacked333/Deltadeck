@@ -333,8 +333,8 @@ function DataActions({
   return (
     <div className="data-actions">
       <span>
-        Saved to your account, so it follows you to any device. Export a backup
-        at any time.
+        These results may include unsaved work. Check account save status before
+        switching devices, and export a backup at any time.
       </span>
       {progress.hands.length > 0 && (
         <button

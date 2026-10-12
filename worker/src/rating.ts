@@ -68,6 +68,8 @@ export async function applyRating(
   call: RateCall,
   now: number,
 ): Promise<RateOutcome> {
+  if (env.TRUST_PAUSE_RATING_FINALIZATION === 'true')
+    return { ok: false, status: 503 }
   try {
     const verdict = await classifySettlement(env, call.matchId, { write: true })
     if (

@@ -4,6 +4,7 @@
 // state; a graded hand is never replaced by its provisional copy; at most
 // 1,000 new hands a day; an older device never overwrites newer state; and
 // deleting the account deletes all of it.
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { PGlite } from '@electric-sql/pglite'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -53,15 +54,67 @@ const hand = (id: string, extra: Record<string, unknown> = {}) =>
     ...extra,
   })
 
-/** The browser's upsert: insert, or replace the record with the same id. */
-const upsert = (user: string, id: string, record: string, at = 'now()') =>
-  db.query(
-    `insert into public.practice_hands (user_id, id, played_at, record)
-     values ($1, $2, ${at}, $3::jsonb)
-     on conflict (user_id, id) do update
-       set record = excluded.record, played_at = excluded.played_at`,
-    [user, id, record],
+/** Revision-aware browser writer; direct table writers stay denied. */
+async function revision(
+  user: string,
+  kind: string,
+  id: string,
+  payload: unknown,
+  baseRevision = 0,
+  lifecycle = 'final',
+) {
+  const serialized = JSON.stringify(payload)
+  return (
+    await db.query<{ r: { status: string; reason?: string } }>(
+      'select public.write_learning_revision_v1($1::jsonb) r',
+      [
+        JSON.stringify({
+          protocol: 1,
+          accountId: user,
+          mutationId: uid(),
+          kind,
+          id,
+          payload,
+          serialized,
+          digest: createHash('sha256').update(serialized).digest('hex'),
+          baseRevision,
+          deletionGeneration: 0,
+          lifecycle,
+          supersedesRevision: lifecycle === 'corrected' ? baseRevision : null,
+        }),
+      ],
+    )
+  ).rows[0].r
+}
+async function upsert(user: string, id: string, record: string, at = 'now()') {
+  const payload = JSON.parse(record)
+  if (payload && !Array.isArray(payload))
+    payload.at = (
+      await db.query<{ at: number }>(
+        `select extract(epoch from (${at}))*1000 as at`,
+      )
+    ).rows[0].at
+  const previous = (
+    await db.query<{ revision: number; lifecycle: string }>(
+      "select revision,lifecycle from public.learning_revisions where user_id=$1 and kind='practice_hand' and id=$2",
+      [user, id],
+    )
+  ).rows[0]
+  const lifecycle =
+    payload?.graded === false
+      ? 'provisional'
+      : previous?.lifecycle === 'final'
+        ? 'corrected'
+        : 'final'
+  return revision(
+    user,
+    'practice_hand',
+    id,
+    payload,
+    previous?.revision ?? 0,
+    lifecycle,
   )
+}
 
 const stored = async (user: string, id: string) =>
   (
@@ -83,11 +136,12 @@ describe('practice hands', () => {
     expect(seen.rows.map((r) => r.id)).toEqual(['a:1'])
     await expect(
       as(alice, () => upsert(bob, 'a:2', hand('a:2'))),
-    ).rejects.toThrow(/row-level security/)
-    const removed = await as(alice, () =>
-      db.query(`delete from public.practice_hands where user_id = $1`, [bob]),
-    )
-    expect(removed.affectedRows).toBe(0)
+    ).rejects.toThrow(/account mismatch/)
+    await expect(
+      as(alice, () =>
+        db.query('delete from public.practice_hands where user_id=$1', [bob]),
+      ),
+    ).rejects.toThrow(/permission denied/)
     await expect(
       as(null, () => db.query(`select * from public.practice_hands`)),
     ).rejects.toThrow(/permission denied/)
@@ -114,11 +168,15 @@ describe('practice hands', () => {
   it('takes only an object matching its id, at most 8 KB, never dated ahead', async () => {
     const alice = await player()
     await as(alice, async () => {
-      await expect(upsert(alice, 'a:1', '[]')).rejects.toThrow(/check/)
-      await expect(upsert(alice, 'a:1', hand('a:2'))).rejects.toThrow(/check/)
-      await expect(
-        upsert(alice, 'a:1', hand('a:1', { pad: 'x'.repeat(9000) })),
-      ).rejects.toThrow(/check/)
+      expect(await upsert(alice, 'a:1', '[]')).toMatchObject({
+        status: 'blocked',
+      })
+      expect(await upsert(alice, 'a:1', hand('a:2'))).toMatchObject({
+        status: 'blocked',
+      })
+      expect(
+        await upsert(alice, 'a:1', hand('a:1', { pad: 'x'.repeat(9000) })),
+      ).toMatchObject({ status: 'blocked' })
       await upsert(alice, 'a:1', hand('a:1'), `now() + interval '3 days'`)
     })
     const { rows } = await db.query<{ ahead: boolean }>(
@@ -136,10 +194,15 @@ describe('practice hands', () => {
        from generate_series(1, 1000) n`,
       [alice],
     )
+    await db.query(
+      `insert into public.learning_revisions(user_id,kind,id,revision,generation,serialized,digest,lifecycle) values($1,'practice_hand','h:7',1,0,'{"id":"h:7"}',encode(sha256(convert_to('{"id":"h:7"}','UTF8')),'hex'),'final')`,
+      [alice],
+    )
     await as(alice, async () => {
-      await expect(upsert(alice, 'h:new', hand('h:new'))).rejects.toThrow(
-        /limit reached/,
-      )
+      expect(await upsert(alice, 'h:new', hand('h:new'))).toMatchObject({
+        status: 'blocked',
+        reason: 'daily_cap',
+      })
       await upsert(alice, 'h:7', hand('h:7', { net: 99 }))
     })
     expect(await stored(alice, 'h:7')).toMatchObject({ net: 99 })
@@ -158,17 +221,8 @@ describe('practice hands', () => {
 })
 
 describe('learning state', () => {
-  const save = (user: string, fields: Record<string, string | null>) => {
-    const columns = Object.keys(fields)
-    return db.query(
-      `insert into public.learning_state (user_id, ${columns.join(', ')})
-       values ($1, ${columns.map((_, i) => `$${i + 2}`).join(', ')})
-       on conflict (user_id) do update set ${columns
-         .map((c) => `${c} = excluded.${c}`)
-         .join(', ')}`,
-      [user, ...Object.values(fields)],
-    )
-  }
+  const save = (user: string, fields: Record<string, string | null>) =>
+    revision(user, 'trainer', 'trainer', JSON.parse(fields.trainer ?? '{}'))
   const row = async (user: string) =>
     (
       await db.query<{
@@ -181,37 +235,63 @@ describe('learning state', () => {
       )
     ).rows[0]
 
-  it('an older device never overwrites newer trainer or curriculum state', async () => {
+  it('F09 stale base revision cannot overwrite newer trainer or curriculum, regardless of clocks', async () => {
     const alice = await player()
     await as(alice, async () => {
-      await save(alice, {
-        trainer: '{"lessons": ["equity", "variance"]}',
-        trainer_updated_at: '2026-10-11T12:00:00Z',
-        curriculum: '{"v":2,"b":1}',
-        curriculum_updated_at: '2026-10-11T12:00:00Z',
-      })
-      await save(alice, {
-        trainer: '{"lessons": []}',
-        trainer_updated_at: '2026-10-11T11:00:00Z',
-        curriculum: '{"v":2,"a":1}',
-        curriculum_updated_at: '2026-10-11T13:00:00Z',
-      })
+      expect(
+        await revision(alice, 'trainer', 'trainer', { lessons: ['equity'] }),
+      ).toMatchObject({ status: 'accepted' })
+      expect(
+        await revision(alice, 'trainer', 'trainer', {
+          lessons: [],
+          updatedAt: 9e12,
+        }),
+      ).toMatchObject({ status: 'conflict' })
+      expect(
+        await revision(alice, 'curriculum', 'curriculum', '{"v":2,"a":1}'),
+      ).toMatchObject({ status: 'accepted' })
+      expect(
+        await revision(alice, 'curriculum', 'curriculum', '{"v":2,"b":1}'),
+      ).toMatchObject({ status: 'conflict' })
     })
-    const state = await row(alice)
-    expect(state.trainer).toEqual({ lessons: ['equity', 'variance'] })
-    // Stored byte for byte: the newer curriculum, keys in its own order.
-    expect(state.curriculum).toBe('{"v":2,"a":1}')
+    expect(await row(alice)).toMatchObject({
+      trainer: { lessons: ['equity'] },
+      curriculum: '{"v":2,"a":1}',
+    })
   })
 
-  it('moves the history clear time only forward', async () => {
+  it('F09 clear generations advance server-side and legacy clear timestamps cannot write', async () => {
     const alice = await player()
     await as(alice, async () => {
-      await save(alice, { hands_cleared_at: '2026-10-11T12:00:00Z' })
-      await save(alice, { hands_cleared_at: '2026-10-01T00:00:00Z' })
+      await save(alice, { trainer: '{}' })
+      await expect(
+        db.query(
+          "update public.learning_state set hands_cleared_at='2999-01-01'",
+        ),
+      ).rejects.toThrow(/permission denied/)
+      const clear = (expectedGeneration: number) =>
+        db.query<{ r: { status: string; deletionGeneration: number } }>(
+          'select public.clear_learning_scope_v1($1::jsonb) r',
+          [
+            JSON.stringify({
+              protocol: 1,
+              accountId: alice,
+              mutationId: uid(),
+              scope: 'practice',
+              expectedGeneration,
+            }),
+          ],
+        )
+      expect((await clear(0)).rows[0].r).toMatchObject({
+        status: 'accepted',
+        deletionGeneration: 1,
+      })
+      expect((await clear(0)).rows[0].r).toMatchObject({ status: 'conflict' })
+      expect((await clear(1)).rows[0].r).toMatchObject({
+        status: 'accepted',
+        deletionGeneration: 2,
+      })
     })
-    expect((await row(alice)).hands_cleared_at?.toISOString()).toBe(
-      '2026-10-11T12:00:00.000Z',
-    )
   })
 
   it('is never read or deleted by another player', async () => {
@@ -239,10 +319,9 @@ describe('the account', () => {
     const alice = await player()
     await as(alice, async () => {
       await upsert(alice, 'a:1', hand('a:1'))
-      await db.query(
-        `insert into public.learning_state (user_id, trainer) values ($1, '{}')`,
-        [alice],
-      )
+      expect(await revision(alice, 'trainer', 'trainer', {})).toMatchObject({
+        status: 'accepted',
+      })
     })
     await db.query(`delete from public.players where user_id = $1`, [alice])
     await db.query(`delete from auth.users where id = $1`, [alice])

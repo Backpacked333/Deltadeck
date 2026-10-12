@@ -11,6 +11,12 @@ import { PGlite } from '@electric-sql/pglite'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { migrationFiles, MIGRATIONS_DIR, SUPABASE_STUB } from './harness'
 
+import { certifiedRatingFixture } from './rating-fixture'
+
+const certificates = new Map<
+  string,
+  Awaited<ReturnType<typeof certifiedRatingFixture>>
+>()
 const ALICE = '11111111-1111-4111-8111-111111111111'
 const BOB = '22222222-2222-4222-8222-222222222222'
 const CAROL = '44444444-4444-4444-8444-444444444444'
@@ -42,6 +48,25 @@ const players = [
 
 /** A rated match between Alice (seat 0) and Bob, finished with `result`. */
 async function rated(id: string, result: object | null) {
+  if (
+    result &&
+    'reason' in result &&
+    result.reason === 'complete' &&
+    'outcomeBySeat' in result
+  ) {
+    const aliceWins =
+      (result.outcomeBySeat as Record<string, string>)[0] === 'win'
+    certificates.set(
+      id,
+      await certifiedRatingFixture(
+        db,
+        id,
+        aliceWins ? BOB : ALICE,
+        aliceWins ? ALICE : BOB,
+      ),
+    )
+    return
+  }
   const start = { id, kind: 'hu-rated', config: {}, players }
   await recordMatch(start)
   if (result) await recordMatch({ ...start, handNo: 40, timeouts: {}, result })
@@ -98,9 +123,15 @@ const apply = (
       [
         JSON.stringify({
           matchId,
+          ...certificates.get(matchId),
           format: 'hu-duplicate',
           modelVersion: 'glicko2.v1',
-          players: rows.map((r) => ({ rd: 300, sigma: 0.06, ...r })),
+          players: rows.map((r) => ({
+            rd: 300,
+            sigma: 0.06,
+            ...r,
+            seat: certificates.get(matchId)?.seats[r.userId],
+          })),
         }),
       ],
     )
@@ -255,26 +286,22 @@ describe('the last match', () => {
     const DAN = '71111111-1111-4111-8111-111111111111'
     const EVE = '72222222-2222-4222-8222-222222222222'
     await db.exec(`insert into auth.users (id) values ('${DAN}'), ('${EVE}')`)
-    const pair = [
-      { seat: 0, userId: DAN },
-      { seat: 1, userId: EVE },
-    ]
-    const finish = async (id: string) => {
-      const start = { id, kind: 'hu-rated', config: {}, players: pair }
-      await recordMatch(start)
-      await recordMatch({ ...start, handNo: 40, timeouts: {}, result: win(0) })
+    const finish = async (id: string, at: string) => {
+      certificates.set(id, await certifiedRatingFixture(db, id, EVE, DAN, at))
     }
     const applyAt = (id: string, version: number, finishedAt: string) =>
       service(() =>
         db.query('select public.apply_rating($1::jsonb)', [
           JSON.stringify({
             matchId: id,
+            ...certificates.get(id),
             format: 'hu-duplicate',
             modelVersion: 'glicko2.v1',
             finishedAt,
             players: [
               {
                 userId: DAN,
+                seat: 1,
                 outcome: 'win',
                 version,
                 rating: 1600,
@@ -283,6 +310,7 @@ describe('the last match', () => {
               },
               {
                 userId: EVE,
+                seat: 0,
                 outcome: 'loss',
                 version,
                 rating: 1400,
@@ -303,8 +331,8 @@ describe('the last match', () => {
       ).rows[0].at
     const jan = '53000000-0000-4000-8000-000000000001'
     const dec = '53000000-0000-4000-8000-000000000002'
-    await finish(jan)
-    await finish(dec)
+    await finish(jan, '2026-01-01T12:00:00Z')
+    await finish(dec, '2025-12-01T12:00:00Z')
     await applyAt(jan, 0, '2026-01-01T12:00:00Z')
     expect(await last()).toBe('2026-01-01')
     // Played earlier, rated later: the last match stays January's.

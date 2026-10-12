@@ -227,11 +227,26 @@ export function project(
               : 'supported'
             : 'uncertain',
         counterevidence: passes.map((e) => e.s.id),
-        retention: all.some((e) => e.s.mode === 'delayed')
-          ? 'device-clock-only'
-          : dueAt && serverNow !== null && serverNow >= Date.parse(dueAt)
-            ? 'due'
-            : 'unknown',
+        retention: all.some(({ s }) => {
+          const row = byId.get(s.id)
+          const timing = row?.timing
+          return (
+            s.mode === 'delayed' &&
+            timing?.provenance === 'server-receipt' &&
+            timing.issueId === s.attempt?.assessmentIssueId &&
+            !!row?.receivedAt &&
+            Date.parse(timing.dueAt) >=
+              Date.parse(timing.anchorReceivedAt) + DELAY_MS &&
+            Date.parse(timing.issuedAt) >= Date.parse(timing.dueAt) &&
+            Date.parse(row.receivedAt) >= Date.parse(timing.issuedAt)
+          )
+        })
+          ? 'server-timed-self-study'
+          : all.some((e) => e.s.mode === 'delayed')
+            ? 'device-clock-only'
+            : dueAt && serverNow !== null && serverNow >= Date.parse(dueAt)
+              ? 'due'
+              : 'unknown',
         dueAt,
       }
     }),

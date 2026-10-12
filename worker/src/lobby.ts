@@ -430,6 +430,12 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
       this.send(ws, { t: 'matched', matchId: active, resumed: true })
       return this.presence()
     }
+    if (kind === 'hu-rated' && this.env.TRUST_PAUSE_RATED_ADMISSION === 'true')
+      return this.reject(
+        ws,
+        'rating_unavailable',
+        'New rated matches are temporarily paused. Casual play remains available.',
+      )
     if (kind === 'hu-rated' && rated !== 'yes')
       return this.reject(
         ws,
@@ -484,6 +490,11 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
     for (const [i, a] of waiting.entries()) {
       if (taken.has(a.userId)) continue
       const kind = kindOf(a)
+      if (
+        kind === 'hu-rated' &&
+        this.env.TRUST_PAUSE_RATED_ADMISSION === 'true'
+      )
+        continue
       let best: { b: Waiting; key: string; count: number; gap: number } | null =
         null
       for (const b of waiting.slice(i + 1)) {

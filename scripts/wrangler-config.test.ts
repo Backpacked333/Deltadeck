@@ -26,9 +26,12 @@ type Queues = {
 const config = ts.parseConfigFileTextToJson(
   'wrangler.jsonc',
   readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8'),
-).config as { ratelimits: RateLimit[]; queues: Queues }
+).config as { ratelimits: RateLimit[]; queues: Queues; triggers: { crons: string[] } }
 
 describe('wrangler.jsonc', () => {
+  it('F07 schedules bounded catch-up even when the queue wake-up is lost', () => {
+    expect(config.triggers.crons).toEqual(['*/5 * * * *'])
+  })
   it('limits each client address to UPGRADES_PER_IP_PER_MINUTE signed-in requests a minute', () => {
     const limiter = config.ratelimits.find((r) => r.name === 'IP_LIMITER')
     expect(limiter?.simple).toEqual({

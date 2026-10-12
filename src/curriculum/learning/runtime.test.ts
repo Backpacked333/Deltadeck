@@ -82,6 +82,7 @@ beforeEach(() => {
   sync = {
     scope: { accountId: OWNER, epoch: 1 },
     reportSourceBlocked: vi.fn(),
+    deletionGenerations: () => ({ practice: 0, learning: 0 }),
   } as unknown as PracticeSync
   mock.sync = sync
   runtime = new EvidenceRuntime(
@@ -91,6 +92,30 @@ beforeEach(() => {
     0,
   )
 })
+it('deletion generation advancing during issue request rejects a late issue without exposing it', async () => {
+  let answer!: (value: unknown) => void
+  rpc.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        answer = resolve
+      }),
+  )
+  const pending = runtime.issueAssessment('incremental')
+  sync.deletionGenerations = () => ({ practice: 0, learning: 1 })
+  answer({
+    data: {
+      status: 'issued',
+      issueId: 'old',
+      caseId: 'targeted-incremental-delayed-warranty',
+    },
+    error: null,
+  })
+  await expect(pending).rejects.toThrow('Account changed')
+  await expect(runtime.emit(submission(OWNER, attempt()))).rejects.toThrow(
+    'Account changed',
+  )
+})
+
 it('F08 writer sends exact protected envelope and refuses cross-account late ACK', async () => {
   const event = submission(OWNER, attempt())
   await runtime.emit(event)
@@ -180,6 +205,7 @@ it('F10 a stale in-memory session cannot be rebound to another account', async (
   const second = {
     scope: { accountId: crypto.randomUUID(), epoch: 2 },
     reportSourceBlocked: vi.fn(),
+    deletionGenerations: () => ({ practice: 0, learning: 0 }),
   } as unknown as PracticeSync
   mock.sync = second
   const other = new EvidenceRuntime(

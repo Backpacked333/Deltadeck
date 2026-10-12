@@ -65,6 +65,143 @@ const clear = (u: string, scope = 'learning') =>
     expectedGeneration: 0,
   })
 describe('F08/F09/F10 private append-only source truth', () => {
+  it('server-issued delay ignores device clocks, binds account/family/generation, and remains qualified self-study', async () => {
+    const u = await player(),
+      other = await player()
+    const anchor = submission(u, attempt('incremental-business-inventory'))
+    const issue = (accountId = u, deletionGeneration = 0) =>
+      rpc('issue_learning_assessment_v1', {
+        protocol: 1,
+        accountId,
+        deletionGeneration,
+        skill: 'incremental',
+        deviceNow: '2999-01-01',
+      })
+    await as(u, async () => {
+      await send(u, anchor)
+      await send(u, evaluateSubmission(anchor))
+      expect(await issue()).toMatchObject({ status: 'waiting' })
+      await expect(issue(other)).rejects.toThrow(/account mismatch/)
+      await expect(
+        db.query(
+          'insert into public.learning_assessment_issues(user_id) values($1)',
+          [u],
+        ),
+      ).rejects.toThrow(/permission denied/)
+    })
+    // Scratch-DB clock fixture, not a client clock or a production mutation.
+    await db.query(
+      "update public.learning_evidence_events set received_at=clock_timestamp()-interval '8 days' where user_id=$1 and id=$2",
+      [u, anchor.id],
+    )
+    let issued: Record<string, unknown> = {}
+    await as(u, async () => {
+      issued = await issue()
+      expect(issued).toMatchObject({
+        status: 'issued',
+        caseId: 'targeted-incremental-delayed-warranty',
+        anchorId: anchor.id,
+      })
+      expect(await issue()).toEqual(issued)
+      const delayed = submission(
+        u,
+        attempt('incremental-delayed-warranty', {
+          id: crypto.randomUUID(),
+          assessmentIssueId: String(issued.issueId),
+          effort: {
+            version: 1,
+            provenance: 'client-monotonic',
+            activeMs: 1234,
+            visibleMs: 5000,
+            sessions: 2,
+          },
+        }),
+      )
+      expect(await send(u, delayed)).toMatchObject({ status: 'accepted' })
+      await send(u, evaluateSubmission(delayed))
+      const data = await read()
+      const rows =
+        data.rows as import('../../src/curriculum/learning/types').StoredEvent[]
+      expect(rows.find((r) => r.event.id === delayed.id)?.timing).toMatchObject(
+        { issueId: issued.issueId, provenance: 'server-receipt' },
+      )
+      const state = project(rows, u).skills.find(
+        (s) => s.skill === 'incremental',
+      )!
+      expect(state.retention).toBe('server-timed-self-study')
+      expect(state.stage).not.toBe('retained')
+      expect(evaluateSubmission(delayed).eligible).toBe(false)
+      const wrong = submission(
+        u,
+        attempt('conditioning-delayed-quality', {
+          id: crypto.randomUUID(),
+          assessmentIssueId: String(issued.issueId),
+        }),
+      )
+      await expect(send(u, wrong)).rejects.toThrow(/invalid assessment issue/)
+    })
+    await as(other, async () => {
+      expect(
+        (await db.query('select * from public.learning_assessment_issues'))
+          .rows,
+      ).toEqual([])
+      const stolen = submission(
+        other,
+        attempt('incremental-delayed-warranty', {
+          id: crypto.randomUUID(),
+          assessmentIssueId: String(issued.issueId),
+        }),
+      )
+      await expect(send(other, stolen)).rejects.toThrow(
+        /invalid assessment issue/,
+      )
+    })
+    await as(u, async () => {
+      await clear(u)
+      expect(
+        (await db.query('select * from public.learning_assessment_issues'))
+          .rows,
+      ).toEqual([])
+      expect(await issue()).toMatchObject({
+        status: 'blocked',
+        reason: 'reconcile_required',
+      })
+      expect(await issue(u, 1)).toMatchObject({
+        status: 'blocked',
+        reason: 'no_transfer_anchor',
+      })
+    })
+  })
+
+  it('a prior heldout exposure blocks new issuance even after the receipt interval', async () => {
+    const u = await player(),
+      anchor = submission(u, attempt('incremental-business-inventory'))
+    await as(u, async () => {
+      await send(u, anchor)
+      await send(u, evaluateSubmission(anchor))
+      await send(u, {
+        ...base(u, 'previewed', anchor.observedAt),
+        kind: 'exposure',
+        sourceId: 'preview',
+        family: 'targeted-incremental-delayed-warranty',
+        reason: 'preview',
+      })
+    })
+    await db.query(
+      "update public.learning_evidence_events set received_at=clock_timestamp()-interval '8 days' where user_id=$1 and id=$2",
+      [u, anchor.id],
+    )
+    await as(u, async () =>
+      expect(
+        await rpc('issue_learning_assessment_v1', {
+          protocol: 1,
+          accountId: u,
+          deletionGeneration: 0,
+          skill: 'incremental',
+        }),
+      ).toMatchObject({ status: 'blocked', reason: 'family_already_exposed' }),
+    )
+  })
   it('F08 exact digest ACK and duplicate delivery; no in-place answer mutation', async () => {
     const u = await player(),
       s = submission(u, attempt()),

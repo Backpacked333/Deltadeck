@@ -148,10 +148,35 @@ export function decodeAttempt(value: unknown): ModelResult<AttemptSnapshot> {
       'phase',
       'parameterHash',
       'searchSummary',
+      'effort',
+      'assessmentIssueId',
     ])
   )
     return failure('attempt', 'Invalid attempt schema.')
   const v = value
+  if (
+    (v.assessmentIssueId !== undefined && !short(v.assessmentIssueId, 100)) ||
+    (v.effort !== undefined &&
+      (!isRecord(v.effort) ||
+        !keys(v.effort, [
+          'version',
+          'provenance',
+          'activeMs',
+          'visibleMs',
+          'sessions',
+        ]) ||
+        v.effort.version !== 1 ||
+        v.effort.provenance !== 'client-monotonic' ||
+        !numberIn(v.effort.activeMs, 0, Number.MAX_SAFE_INTEGER, true) ||
+        !numberIn(
+          v.effort.visibleMs,
+          Number(v.effort.activeMs),
+          Number.MAX_SAFE_INTEGER,
+          true,
+        ) ||
+        !numberIn(v.effort.sessions, 1, Number.MAX_SAFE_INTEGER, true)))
+  )
+    return failure('attempt', 'Invalid qualified effort or assessment issue.')
   if (
     !short(v.id, 100) ||
     !short(v.caseId, 100) ||

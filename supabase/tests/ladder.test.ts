@@ -12,6 +12,8 @@ import { migrationFiles, MIGRATIONS_DIR, SUPABASE_STUB } from './harness'
 let db: PGlite
 
 /** A deterministic uuid for player n. */
+import { certifiedRatingFixture } from './rating-fixture'
+
 const uid = (n: number) =>
   `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
 
@@ -178,24 +180,24 @@ describe('the ladder', () => {
               (date_trunc('month', now() at time zone 'utc') - interval '1 day')::date::text as last`,
     )
     const [{ at, last }] = rows
-    await db.query(
-      `insert into public.matches (id, kind, status, config, finished_at) values ($1, 'hu-rated', 'finished', '{}', $2)`,
-      [id, at],
-    )
-    await db.query(
-      `insert into public.match_players (match_id, user_id, seat, outcome)
-       values ($1, $2, 0, 'win'), ($1, $3, 1, 'loss')`,
-      [id, uid(1), uid(7)],
+    const certificate = await certifiedRatingFixture(
+      db,
+      id,
+      uid(7),
+      uid(1),
+      new Date(at).toISOString(),
     )
     await db.query('select public.apply_rating($1::jsonb)', [
       JSON.stringify({
         matchId: id,
+        ...certificate,
         format: 'hu-duplicate',
         modelVersion: 'glicko2.v1',
         finishedAt: at,
         players: [
           {
             userId: uid(1),
+            seat: 1,
             outcome: 'win',
             version: 0,
             rating: 1810,
@@ -204,6 +206,7 @@ describe('the ladder', () => {
           },
           {
             userId: uid(7),
+            seat: 0,
             outcome: 'loss',
             version: 0,
             rating: 1740,
