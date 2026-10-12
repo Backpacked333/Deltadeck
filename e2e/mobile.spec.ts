@@ -337,14 +337,14 @@ test('the header is solid over a six-seat table on a phone, and keeps its blur o
       ),
     )
   expect(await liveSheet()).toBe(true)
-  await expect.poll(blur).toBe('blur(14px)')
+  await expect.poll(blur).toBe('blur(20px) saturate(1.4)')
   // One pixel wider than the phone rule's 680 px, the six table keeps the
   // blur like every other page.
   await page.goto(`/#play/${SIX_TABLE}`)
   await expect(page.getByText('6-max · Hand 1')).toBeVisible()
   await expect.poll(blur).toBe('none')
   await page.setViewportSize({ width: 681, height: 800 })
-  await expect.poll(blur).toBe('blur(14px)')
+  await expect.poll(blur).toBe('blur(20px) saturate(1.4)')
 })
 
 test('the header fits a 320 px phone, signed out and signed in', async ({

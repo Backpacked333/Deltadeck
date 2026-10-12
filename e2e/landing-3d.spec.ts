@@ -58,7 +58,7 @@ test('a phone gets the same table, inside the screen', async ({ browser }) => {
     isMobile: true,
     hasTouch: true,
   })
-  await page.goto('/')
+  await page.goto('/?stage=3d')
   const box = page.locator('.stage-box')
   await expect(box).toBeVisible()
   await expect(page.getByRole('group', { name: /Your decision/ })).toBeVisible({

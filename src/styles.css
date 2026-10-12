@@ -2867,6 +2867,10 @@ input[type='range']:disabled {
   border-color: var(--brand-2);
   background: var(--positive-soft);
 }
+/* The muted line keeps its contrast on the selected row's tint. */
+.compare-row.on .compare-name small {
+  color: var(--text-2);
+}
 .compare-name {
   display: flex;
   flex-direction: column;
@@ -5006,6 +5010,15 @@ button.range-cell:focus-visible {
   }
   .presets button {
     flex: 1;
+    min-width: 0;
+    padding: 7px 6px;
+  }
+  .act {
+    min-width: 0;
+    padding: 10px 12px;
+  }
+  .action-status strong {
+    font-size: 18px;
   }
   .guess-controls {
     grid-template-columns: 1fr auto;

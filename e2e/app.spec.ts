@@ -100,7 +100,8 @@ test('dark theme and reduced motion still render the table', async ({
   const background = await page.evaluate(
     () => getComputedStyle(document.body).backgroundColor,
   )
-  expect(background).toBe('rgb(12, 19, 17)')
+  // The void: dark first.
+  expect(background).toBe('rgb(11, 10, 16)')
   await expect(page.locator('.board .pcard')).toHaveCount(5)
 })
 
@@ -119,16 +120,41 @@ for (const colorScheme of ['light', 'dark'] as const)
         name: 'Foundations for defensible decisions',
       }),
     ).toBeVisible()
-    // The curriculum's own palette is light-only and its contrast is tracked
-    // separately; here we gate the other rules and dark-mode legibility.
+    // The curriculum's generated palette (palette.css) follows the theme; its
+    // contrast is tracked separately, so here we gate the other rules and the
+    // heading's legibility on the workspace.
     const curriculum = await new AxeBuilder({ page })
       .include('.curriculum-workspace')
       .disableRules(['color-contrast'])
       .analyze()
-    const heading = await page
+    const contrast = await page
       .getByRole('heading', { name: 'Foundations for defensible decisions' })
-      .evaluate((el) => getComputedStyle(el).color)
-    expect(heading).not.toMatch(/rgb\((2[0-5]\d), (2[0-5]\d), (2[0-5]\d)\)/)
+      .evaluate((el) => {
+        const rgb = (c: string) =>
+          c
+            .match(/[\d.]+/g)!
+            .slice(0, 3)
+            .map(Number)
+        const lum = (c: string) => {
+          const [r, g, b] = rgb(c).map((v) => {
+            const x = v / 255
+            return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4
+          })
+          return 0.2126 * r + 0.7152 * g + 0.0722 * b
+        }
+        // The first ancestor with a background of its own.
+        let at: Element | null = el
+        let bg = 'rgba(0, 0, 0, 0)'
+        while (at && /rgba\(0, 0, 0, 0\)|transparent/.test(bg)) {
+          bg = getComputedStyle(at).backgroundColor
+          at = at.parentElement
+        }
+        if (/rgba\(0, 0, 0, 0\)|transparent/.test(bg))
+          bg = getComputedStyle(document.body).backgroundColor
+        const [a, b] = [lum(getComputedStyle(el).color), lum(bg)]
+        return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)
+      })
+    expect(contrast).toBeGreaterThanOrEqual(4.5)
     results.violations.push(...curriculum.violations)
     const serious = results.violations.filter((v) =>
       ['serious', 'critical'].includes(v.impact ?? ''),
