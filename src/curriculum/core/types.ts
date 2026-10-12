@@ -132,6 +132,7 @@ export type Question = QuestionBase &
   )
 export interface CaseRecord {
   id: string
+  familyId?: string
   unitId: UnitId
   contentVersion: number
   rubricVersion: number

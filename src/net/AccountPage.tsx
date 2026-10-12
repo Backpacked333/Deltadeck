@@ -19,7 +19,8 @@ import { signOutHere, useAuth } from './auth'
 import { NotConfigured } from './AuthGate'
 import { loadPlayer, PLACEHOLDER } from './players'
 import { SignIn } from './SignIn'
-import { activeSync, clearLocalPractice } from './sync'
+import { activeSync, clearLocalPractice, clearPrivateOutbox } from './sync'
+import type { PracticeSync } from './sync'
 import type { SignInMode } from './SignIn'
 import type { Online } from './supabase'
 
@@ -180,13 +181,21 @@ function CallbackFailed({
 export const SIGN_OUT_WAIT_MS = 3000
 
 /** Forgets this browser's account and its practice data, then starts afresh. */
-async function leave(online: Online | null) {
-  clearLocalPractice()
+async function leave(online: Online | null, sync: PracticeSync | null) {
+  sync?.stop()
+  if (sync) await sync.clearDevice()
+  else { await clearPrivateOutbox(); clearLocalPractice() }
   if (online)
     await Promise.race([
       signOutHere(online.client).catch(() => {}),
       new Promise((resolve) => setTimeout(resolve, SIGN_OUT_WAIT_MS)),
     ])
+  // auth's convenience helper intentionally swallows storage errors; privacy cannot.
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const key = localStorage.key(i)!
+    if ((key.startsWith('sb-') && key.endsWith('-auth-token')) || key === 'qp.username') localStorage.removeItem(key)
+  }
+  sessionStorage.removeItem('qp.devToken')
   forgetAccount()
   window.location.replace(window.location.pathname)
 }
@@ -199,24 +208,54 @@ async function leave(online: Online | null) {
  */
 export function SignOut({ online }: { online: Online | null }) {
   const started = useRef(false)
-  const [unsent, setUnsent] = useState(false)
+  const sync = useRef(activeSync())
+  const [problem, setProblem] = useState<string | null>(null)
+  const [busy, setBusy] = useState(true)
+  const [exported, setExported] = useState(false)
+  const [discard, setDiscard] = useState(false)
+  const complete = async () => {
+    setBusy(true)
+    try { await leave(online, sync.current) }
+    catch { setProblem('Privacy cleanup failed. Private data may remain on this browser. Retry cleanup or clear this site’s data before leaving a shared device.'); setBusy(false) }
+  }
+  const retry = async () => {
+    setBusy(true); setProblem(null)
+    try {
+      const result = await sync.current?.flush(SIGN_OUT_WAIT_MS)
+      if (result?.status !== 'saved') {
+        setProblem(`Account save is ${result?.status ?? 'unverified'}. ${result?.reasons.join(' ') ?? 'Account reconciliation has not completed.'}`)
+        setBusy(false)
+      } else await complete()
+    } catch (e) { setProblem(e instanceof Error ? e.message : 'Unable to verify account save.'); setBusy(false) }
+  }
+  const exportWork = async () => {
+    setBusy(true)
+    try {
+      if (!sync.current) throw new Error('Wait for the account to initialize before exporting.')
+      const blob = await sync.current.exportAccount()
+      const url = URL.createObjectURL(blob), a = document.createElement('a')
+      a.href = url; a.download = `deltadeck-recovery-${Date.now()}.json`
+      a.click(); setTimeout(() => URL.revokeObjectURL(url), 60_000)
+      setExported(true)
+    } catch (e) { setProblem(e instanceof Error ? e.message : 'Export failed. Your work has not been removed.') }
+    finally { setBusy(false) }
+  }
   useEffect(() => {
     if (started.current) return
     started.current = true
-    void (async () => {
-      const sync = activeSync()
-      if (sync && !(await sync.flush(SIGN_OUT_WAIT_MS))) setUnsent(true)
-      else await leave(online)
-    })()
+    void retry()
+    // This route captures one sign-out attempt; buttons explicitly retry it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [online])
-  if (unsent)
+  if (!busy)
     return (
       <div className="empty live-empty" role="alert">
-        <h3>Some practice is not saved to your account yet</h3>
+        <h3>Your account save is not verified</h3>
         <p>
-          We could not reach the server, so your latest hands or lessons are
-          only in this browser. Signing out now removes them from it.
+          Your latest hands, lessons or conflicting versions may only be in this browser.
+          Stay signed in and retry, save a recovery export, or explicitly discard unsaved work.
         </p>
+        <p>{problem}</p>
         <div className="live-actions">
           <button
             className="btn btn-primary"
@@ -226,10 +265,20 @@ export function SignOut({ online }: { online: Online | null }) {
           </button>
           <button
             className="btn btn-outline"
-            onClick={() => void leave(online)}
+            onClick={() => void retry()}
           >
-            Sign out anyway
+            Wait and retry save
           </button>
+          <button className="btn btn-outline" onClick={() => void exportWork()}>Export and sign out</button>
+          {exported && <div>
+            <p>The recovery file contains private learning data. Verify the download and keep it secure before continuing.</p>
+            <button className="btn btn-outline" onClick={() => void complete()}>I saved the export — sign out</button>
+          </div>}
+          <button className="btn btn-outline" onClick={() => setDiscard(true)}>Discard unsaved work and sign out</button>
+          {discard && <div>
+            <p>This permanently removes this browser’s unsaved work and recovery copies. It does not delete data already saved to your account.</p>
+            <button className="btn btn-outline" onClick={() => void complete()}>Confirm permanent discard and sign out</button>
+          </div>}
         </div>
       </div>
     )
