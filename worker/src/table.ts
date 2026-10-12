@@ -8,6 +8,7 @@ import {
   fromBase64,
   publicSlots,
   revealSlots,
+  salts,
   toBase64,
 } from '../../src/engine/deck'
 import { act, assertInvariants, isOver, startHand } from '../../src/engine/hand'
@@ -18,11 +19,13 @@ import { buyIn, rebuyTo, SIX_BLINDS } from '../../src/engine/stacks'
 import type { RevealedSlot } from '../../src/engine/deck'
 import { EngineError } from '../../src/engine/types'
 import type { HandState, SeatId } from '../../src/engine/types'
+import { GAME_CODE_RE, GAME_ID_RE } from '../../src/shared/gameCode'
 import {
   CLOSE_ABUSE,
   CLOSE_ELSEWHERE,
   CLOSE_GONE,
   CLOSE_RATE_LIMITED,
+  GAME_HOST_MAX,
   MAX_FRAME,
   parseClientMsg,
   PROTOCOL,
@@ -59,6 +62,14 @@ import {
 } from './deadlines'
 import type { Deadline } from './deadlines'
 import type { WorkerEnv } from './env'
+import { newRequestId } from './gamecode'
+import {
+  DECLINED_MAX,
+  OPEN_HEARTBEAT_MS,
+  REQUEST_TTL_MS,
+  REQUESTS_PER_GAME,
+  RESERVE_MS,
+} from './games'
 import { FrameBudget, ILLEGAL_PER_HAND } from './limits'
 import { lobbyStub } from './lobby'
 import type { RematchAnswer } from './lobby'
@@ -265,6 +276,35 @@ type Match = {
   rematch?: Rematch
   /** Rated, once applied: each seat's rating change (P1-12). */
   rating?: Record<SeatId, RatingChange>
+  /**
+   * An invite table the Worker made, until its guest sits (ADR amendment
+   * 2026-10-12, "Live games"). Never part of a frame the seats get: only the
+   * host's `invite` frame (inviteFrame) says what is in it.
+   */
+  invite?: Invite
+}
+/**
+ * The game's code and list handle (the lobby holds the rows that find this
+ * table by them), who has asked for the other seat, and who holds it.
+ * Everything is in the match's one write, so a restart keeps it, and
+ * `idle()` wipes it with the rest.
+ */
+type Invite = {
+  code: string
+  gameId: string
+  listed: boolean
+  /**
+   * The account the host accepted holds the seat until `until` (table
+   * clock), so the lobby's `matched` can reach it before a stranger with the
+   * link takes the seat. Lapses lazily (liveInvite): no deadline of its own.
+   */
+  reserved?: { userId: string; username: string; until: number }
+  /** Accounts the host declined, oldest first (DECLINED_MAX). */
+  declined: string[]
+  /** Open requests (REQUESTS_PER_GAME), by an id the host's frame names. */
+  requests: { id: string; userId: string; username: string; at: number }[]
+  /** When the lobby was last told the game is open (table clock); 0 before. */
+  reportedAt: number
 }
 type Rematch = {
   state: RematchState
@@ -318,6 +358,14 @@ export type InitBody = {
   kind?: MatchKind
   /** Set by the lobby: the rated match this one is a rematch of. */
   rematchOf?: string
+  /**
+   * Set by the Worker's invite route only (never from a client): the code
+   * and list handle the lobby gave this game, and whether it is listed.
+   * All three or none; only a casual heads-up invite takes them.
+   */
+  code?: string
+  gameId?: string
+  listed?: boolean
 }
 /**
  * For the lobby's one-table-per-account rule: `playing`, or `starting` (a
@@ -437,6 +485,24 @@ export class TableDO extends DurableObject<WorkerEnv> {
     // opponent or one would make a Player without a stack or status.
     if (body.kind === 'six-casual' && (body.opponent || body.startWithinMs))
       return json({ error: 'six tables start empty' }, 400)
+    // An invite's code, handle and listing come together, from the Worker,
+    // and only for the table a friend opens by link: a pairing or a six
+    // table with them would be one the lobby could list.
+    const invited =
+      body.code !== undefined ||
+      body.gameId !== undefined ||
+      body.listed !== undefined
+    if (
+      invited &&
+      (!GAME_CODE_RE.test(String(body.code)) ||
+        !GAME_ID_RE.test(String(body.gameId)) ||
+        typeof body.listed !== 'boolean' ||
+        body.kind !== undefined ||
+        body.opponent ||
+        body.startWithinMs ||
+        body.rematchOf)
+    )
+      return json({ error: 'not an invite' }, 400)
     const handsTotal =
       Number.isInteger(body.handsTotal) &&
       body.handsTotal! >= 1 &&
@@ -469,6 +535,18 @@ export class TableDO extends DurableObject<WorkerEnv> {
         : {}),
       ...(rated ? { adjusted: { 0: 0, 1: 0 }, adjustedThrough: 0 } : {}),
       ...(rated && body.rematchOf ? { rematchOf: body.rematchOf } : {}),
+      ...(invited
+        ? {
+            invite: {
+              code: body.code!,
+              gameId: body.gameId!,
+              listed: body.listed!,
+              declined: [],
+              requests: [],
+              reportedAt: 0,
+            },
+          }
+        : {}),
     }
     // A six table starts empty: everyone, its creator too, takes a seat
     // with `sit`.
@@ -533,6 +611,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
       // Invite link: the first other account to open it takes the empty seat.
       if (match.status !== 'waiting' || match.players.length >= 2)
         return json({ error: 'table full' }, 403)
+      // The seat the host accepted someone for is theirs for a minute,
+      // whatever link or code a stranger holds (ADR amendment 2026-10-12,
+      // "Live games"). Checked here and again after the claim: the host's
+      // Accept can land while the claim is awaited.
+      if (this.heldFor(userId)) return json({ error: 'table full' }, 403)
       // One table per account: someone playing elsewhere is sent back there.
       const elsewhere = await lobbyStub(this.env).claim(userId, match.id)
       if (elsewhere) return this.refuse(4409, elsewhere)
@@ -541,13 +624,23 @@ export class TableDO extends DurableObject<WorkerEnv> {
       // here would free an account that is now playing at this table.
       player = match.players.find((p) => p.userId === userId)
       if (!player) {
-        if (match.players.length >= 2) {
+        if (match.players.length >= 2 || this.heldFor(userId)) {
           await lobbyStub(this.env).release([userId], match.id)
           return json({ error: 'table full' }, 403)
         }
+        // Whoever pushes into `players` first wins the seat: from the check
+        // above to here nothing is awaited, and a later Accept finds the
+        // table full (answerJoin).
         player = this.newPlayer(1, { userId, username })
         match.players.push(player)
+        // The seat is filled: the game leaves the lobby's list and its code
+        // stops working. Not awaited here: the guest's start waits on
+        // nothing but its own storage, and the lobby's rows are ordered
+        // behind every report already sent (listingCalls).
+        const invite = match.invite
+        delete match.invite
         await this.ctx.storage.put('match', match)
+        if (invite) this.closeInvite(match.id, invite, userId)
       }
     }
     if (player) await this.back(player)
@@ -584,6 +677,12 @@ export class TableDO extends DurableObject<WorkerEnv> {
       match.status = 'playing'
       await this.startNextHand()
     } else if (player) this.broadcast('state', { skip: server })
+    // The host, here (again) while the table waits for its guest: their
+    // prompt, and the lobby hears the game is open now.
+    if (player?.seat === 0 && this.hostWaits()) {
+      this.sendInvite()
+      await this.reportOpenNow()
+    }
     return new Response(null, {
       status: 101,
       webSocket: client,
@@ -632,6 +731,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
       return this.sendMatchEnd(ws)
     }
     if (msg.t === 'rematch') return this.pressRematch(ws, userId)
+    if (msg.t === 'join_answer') return this.answerJoin(ws, userId, msg)
     if (msg.t === 'sit') return this.sit(ws, msg.seat)
     if (msg.t === 'stand') return this.stand(ws)
     if (msg.t === 'rebuy') return this.rebuy(ws)
@@ -1512,6 +1612,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
       // Six-casual: a change the throttle held back goes out now if its
       // window has passed; it has no alarm of its own.
       await this.sendHeldReport()
+      await this.tickInvite()
       await this.armAlarm()
     } catch (error) {
       logEvent('error', {
@@ -1894,11 +1995,15 @@ export class TableDO extends DurableObject<WorkerEnv> {
       netBySeat: hand.result!.netBySeat,
       showdown: hand.result!.showdown,
     }
-    const { leaves } = await commitDeck(stored.deck, secret)
+    // The 52 salts once: the commitment and every opening below need the
+    // same ones (this ran 4 times a hand, on the action that ends it).
+    const saltList = await salts(secret)
+    const { leaves } = await commitDeck(stored.deck, secret, saltList)
     const slots = await revealSlots(
       stored.deck,
       secret,
       publicSlots({ config: hand.config, board: hand.board, shown }),
+      saltList,
     )
     const reveal: Reveal = {
       handNo: match.handNo,
@@ -1908,12 +2013,12 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const holeSlots = dealSlots(hand.config).holes
     const userOf = (seat: SeatId) => this.userIn(seat)!
     const own: Record<string, RevealedSlot[]> = {}
-    for (const p of hand.players)
-      own[userOf(p.seat)] = await revealSlots(
-        stored.deck,
-        secret,
-        holeSlots[p.seat],
-      )
+    const opened = await Promise.all(
+      hand.players.map((p) =>
+        revealSlots(stored.deck, secret, holeSlots[p.seat], saltList),
+      ),
+    )
+    hand.players.forEach((p, i) => (own[userOf(p.seat)] = opened[i]))
     if (this.recordable()) {
       // A rated hand's record waits for its luck (settleLuck).
       const key = match.adjusted
@@ -2238,11 +2343,12 @@ export class TableDO extends DurableObject<WorkerEnv> {
     const listing = this.listing
     const held =
       this.seatable() && this.match!.status === 'waiting' && listing?.pending
+    // An invite table's own wake (the heartbeat) takes the same deadline
+    // kind: one table is never both (inviteWake is null for a six table).
+    const at = held ? listing!.reportedAt + REPORT_MS : this.inviteWake()
     this.deadlines = [
       ...this.deadlines.filter((d) => d.kind !== 'report'),
-      ...(held
-        ? [{ kind: 'report' as const, at: listing!.reportedAt + REPORT_MS }]
-        : []),
+      ...(at === null ? [] : [{ kind: 'report' as const, at }]),
     ]
   }
 
@@ -2287,6 +2393,328 @@ export class TableDO extends DurableObject<WorkerEnv> {
     })
     this.listingCalls = sent
     return sent
+  }
+
+  // ---- Invite tables: open games (ADR amendment 2026-10-12, "Live games") ------
+  //
+  // An invite table waits for one guest. The link seats whoever opens it
+  // first, the lobby's code the same, and the list lets a stranger ASK the
+  // host, who answers. This table's join() stays the only place seat 1 is
+  // decided: an Accept does not seat anyone, it holds the seat for the
+  // accepted account (RESERVE_MS) and join() refuses everyone else meanwhile.
+  //
+  // Nothing here is on the move path: no lobby call is awaited in
+  // applyActionNow (a test reads its source), and the seating path awaits
+  // none either (closeGame is queued, not awaited).
+
+  /**
+   * The invite as it stands now: requests older than REQUEST_TTL_MS are
+   * dropped and a reservation that ran out is cleared. Called first by every
+   * path that reads or changes the invite, so a lapse needs no deadline of
+   * its own and every frame is accurate when it is built (the alarm that
+   * the heartbeat arms, tickInvite, only tells the host sooner).
+   */
+  private liveInvite() {
+    const invite = this.match?.invite
+    if (!invite) return null
+    const t = this.clock()
+    invite.requests = invite.requests.filter((r) => t - r.at < REQUEST_TTL_MS)
+    if (invite.reserved && t >= invite.reserved.until) delete invite.reserved
+    return invite
+  }
+
+  /** Whether the seat is held for an account other than `userId`. */
+  private heldFor(userId: string) {
+    const reserved = this.liveInvite()?.reserved
+    return !!reserved && reserved.userId !== userId
+  }
+
+  /** Whether an invite table still waits, with only its host seated. */
+  private hostWaits() {
+    const match = this.match
+    return (
+      !!match?.invite &&
+      match.status === 'waiting' &&
+      match.players.length === 1
+    )
+  }
+
+  /**
+   * The host's whole prompt, built fresh: the code, whether it is listed,
+   * who has asked (a name and an age, never an account) and who holds the
+   * seat. Each frame replaces the last. It carries the table's seq without
+   * advancing it: it is not part of the game's state.
+   */
+  private inviteFrame(): ServerMsg {
+    const invite = this.liveInvite()!
+    const t = this.clock()
+    return {
+      t: 'invite',
+      seq: this.seq,
+      matchId: this.matchId(),
+      code: invite.code,
+      listed: invite.listed,
+      requests: invite.requests.map((r) => ({
+        id: r.id,
+        username: r.username,
+        ageMs: t - r.at,
+      })),
+      reservedFor: invite.reserved?.username ?? null,
+    }
+  }
+
+  /** Sends the host their prompt (only the host, only while the table waits). */
+  private sendInvite() {
+    if (!this.hostWaits()) return
+    const host = this.match!.players[0].userId
+    const frame = this.inviteFrame()
+    for (const ws of this.openSockets())
+      if (this.userOf(ws) === host) this.send(ws, frame)
+  }
+
+  /**
+   * RPC from the lobby: `userId` asks the host for the other seat. Decided
+   * and recorded before the first await, so the checks and the change are
+   * one step. 'no' when this is not an open invite (no longer waiting, a
+   * seat held, no room for another request, the host away: a request
+   * nobody sees would only age), and 'declined' when the host said no
+   * already, without telling the host again. `username` is the lobby's, the
+   * account's own, never the client's.
+   */
+  async requestJoin(
+    userId: string,
+    username: string,
+  ): Promise<'ok' | 'declined' | 'no'> {
+    const match = this.match
+    const invite = this.liveInvite()
+    if (
+      !match ||
+      !invite ||
+      !this.hostWaits() ||
+      invite.reserved ||
+      userId === match.players[0].userId ||
+      !this.connected(match.players[0].userId)
+    )
+      return 'no'
+    const at = invite.requests.findIndex((r) => r.userId === userId)
+    if (at < 0 && invite.requests.length >= REQUESTS_PER_GAME) return 'no'
+    if (invite.declined.includes(userId)) return 'declined'
+    const request = {
+      id: newRequestId(),
+      userId,
+      username: username.slice(0, GAME_HOST_MAX),
+      at: this.clock(),
+    }
+    // One entry each: asking again replaces the first and renews its age.
+    if (at >= 0) invite.requests[at] = request
+    else invite.requests.push(request)
+    await this.ctx.storage.put('match', match)
+    this.sendInvite()
+    return 'ok'
+  }
+
+  /** RPC from the lobby: `userId` withdrew their request. */
+  async cancelRequest(userId: string): Promise<void> {
+    const invite = this.liveInvite()
+    if (!invite) return
+    const kept = invite.requests.filter((r) => r.userId !== userId)
+    if (kept.length === invite.requests.length) return
+    invite.requests = kept
+    await this.ctx.storage.put('match', this.match)
+    this.sendInvite()
+  }
+
+  /**
+   * `join_answer`: the host accepts or declines one request, named by the id
+   * their prompt gave. Only the host answers (anyone else is `illegal`).
+   * An answer to a request that is not there (answered already, lapsed, or
+   * the table filled) changes nothing and sends the host their prompt again.
+   *
+   * Decline: the account is remembered, so asking again is refused without
+   * a second prompt. Accept: the seat is held for that account, the other
+   * requests are told the seat went, and the lobby is asked to send the
+   * accepted account `matched`. From the check to the change nothing is
+   * awaited, so two accepts hold one seat and a stranger's join() either
+   * pushed first (the accept then finds the table full) or sees the hold.
+   */
+  private async answerJoin(
+    ws: WebSocket,
+    userId: string,
+    msg: { requestId: string; accept: boolean },
+  ) {
+    const match = this.match!
+    // A six table has no host: whoever sits in the lowest seat is not one.
+    if (
+      match.config.kind !== 'hu-casual' ||
+      match.players[0]?.userId !== userId
+    )
+      return this.illegal(ws, userId, 'Only the host answers a join request')
+    const invite = this.liveInvite()
+    // The table filled or never had an invite: a late answer, not abuse.
+    if (!invite) return
+    const request = invite.requests.find((r) => r.id === msg.requestId)
+    const free = this.hostWaits() && !invite.reserved
+    if (!request || (msg.accept && !free)) return this.sendInvite()
+    const id = match.id
+    invite.requests = invite.requests.filter((r) => r !== request)
+    if (!msg.accept) {
+      invite.declined = [
+        ...invite.declined.filter((u) => u !== request.userId),
+        request.userId,
+      ].slice(-DECLINED_MAX)
+      await this.ctx.storage.put('match', match)
+      this.sendInvite()
+      void this.toLobbyList(id, 'lobby_answer', (lobby) =>
+        lobby.answerRequest(request.userId, id, 'declined'),
+      )
+      return
+    }
+    const reserved = {
+      userId: request.userId,
+      username: request.username,
+      until: this.clock() + RESERVE_MS,
+    }
+    invite.reserved = reserved
+    const others = invite.requests
+    invite.requests = []
+    await this.ctx.storage.put('match', match)
+    this.sendInvite()
+    for (const other of others)
+      void this.toLobbyList(id, 'lobby_answer', (lobby) =>
+        lobby.answerRequest(other.userId, id, 'taken'),
+      )
+    // Awaited, but not on a move: it says whether the requester has a lobby
+    // socket to send `matched` to. With none, the seat goes back to the host
+    // at once rather than after RESERVE_MS.
+    let delivered = false
+    try {
+      delivered = await lobbyStub(this.env).answerRequest(
+        request.userId,
+        id,
+        'accepted',
+      )
+    } catch (error) {
+      logEvent('error', {
+        matchId: id,
+        reason: 'lobby_answer',
+        detail: describeError(error),
+      })
+    }
+    if (!delivered && this.match?.invite?.reserved === reserved) {
+      delete this.match.invite.reserved
+      await this.ctx.storage.put('match', this.match)
+      this.sendInvite()
+    }
+  }
+
+  /**
+   * The invite table's work when its alarm runs (the heartbeat's, or the
+   * first request or reservation to lapse): the host's prompt loses what
+   * lapsed, and the lobby hears the game is still open once OPEN_HEARTBEAT_MS
+   * have passed since it last did. Only while the host is here: with no
+   * socket there are no heartbeats, and GAME_STALE_MS in the lobby is what
+   * takes the game off the list. Not on any move's path.
+   */
+  private async tickInvite() {
+    const match = this.match
+    if (!match || !this.hostWaits()) return
+    const invite = match.invite!
+    const requests = invite.requests.length
+    const reserved = invite.reserved
+    this.liveInvite()
+    const lapsed =
+      requests !== invite.requests.length || reserved !== invite.reserved
+    const here = this.connected(match.players[0].userId)
+    const t = this.clock()
+    const beat = here && t >= invite.reportedAt + OPEN_HEARTBEAT_MS
+    if (beat) invite.reportedAt = t
+    if (lapsed || beat) await this.ctx.storage.put('match', match)
+    if (lapsed && here) this.sendInvite()
+    if (beat) this.sendOpenReport()
+  }
+
+  /**
+   * The host is here (again) at a waiting invite table: the lobby is told
+   * the game is open now, and the heartbeat's clock starts from this. It also
+   * revives a game the lobby pruned while the host was away (reportOpen).
+   */
+  private async reportOpenNow() {
+    const match = this.match!
+    match.invite!.reportedAt = this.clock()
+    await this.ctx.storage.put('match', match)
+    await this.armAlarm()
+    this.sendOpenReport()
+  }
+
+  /**
+   * The game is open: tells the lobby, through the ordered `listingCalls`
+   * and without waiting (no frame waits on the lobby). If the lobby had to
+   * give the game another code (the old one was taken while its row was
+   * pruned), the table adopts it and tells the host.
+   */
+  private sendOpenReport() {
+    const match = this.match
+    const invite = match?.invite
+    if (!match || !invite) return
+    const tableId = match.id
+    const host = match.players[0]
+    const report = {
+      gameId: invite.gameId,
+      code: invite.code,
+      hostId: host.userId,
+      hostName: host.username,
+      listed: invite.listed,
+    }
+    void this.toLobbyList(tableId, 'lobby_open', async (lobby) => {
+      const answer = await lobby.reportOpen(tableId, report)
+      const now = this.match
+      if (
+        !answer.code ||
+        now?.id !== tableId ||
+        now.invite?.code !== report.code
+      )
+        return
+      now.invite.code = answer.code
+      await this.ctx.storage.put('match', now)
+      this.sendInvite()
+    })
+  }
+
+  /**
+   * The seat is filled (or the table ends): the game leaves the lobby, and
+   * the requests still open are told the seat went. Queued behind every
+   * report this table sent, so none can list the game again after it.
+   */
+  private closeInvite(tableId: string, invite: Invite, seated?: string) {
+    void this.closeOpen(tableId)
+    for (const request of invite.requests)
+      if (request.userId !== seated)
+        void this.toLobbyList(tableId, 'lobby_answer', (lobby) =>
+          lobby.answerRequest(request.userId, tableId, 'taken'),
+        )
+  }
+
+  private closeOpen(tableId: string) {
+    return this.toLobbyList(tableId, 'lobby_close', (lobby) =>
+      lobby.closeGame(tableId),
+    )
+  }
+
+  /**
+   * An invite table's next wake: the heartbeat, or the first request or
+   * reservation to lapse, whichever comes first; null unless the table waits
+   * with its host here. Run by syncReport.
+   */
+  private inviteWake(): number | null {
+    const match = this.match
+    if (!match || !this.hostWaits() || !this.connected(match.players[0].userId))
+      return null
+    const invite = match.invite!
+    return Math.min(
+      invite.reportedAt + OPEN_HEARTBEAT_MS,
+      ...invite.requests.map((r) => r.at + REQUEST_TTL_MS),
+      ...(invite.reserved ? [invite.reserved.until] : []),
+    )
   }
 
   // ---- Six-casual sessions ---------------------------------------------------
@@ -2548,6 +2976,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     // input gate: no sit (or deal) lands between the decision and the
     // deletion that would wipe it.
     const listed = match?.config.kind === 'six-casual' ? match.id : null
+    const open = match?.invite ? match.id : null
     for (const ws of this.ctx.getWebSockets())
       try {
         ws.close(CLOSE_GONE, 'closed')
@@ -2573,6 +3002,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
     // report sent before. If it is lost, the lobby drops the entry once
     // stale.
     if (listed) await this.unlist(listed)
+    // An invite nobody joined leaves the lobby for the same reason: behind
+    // every heartbeat it sent, so none can list the game again.
+    if (open) await this.closeOpen(open)
     return true
   }
 
@@ -2608,6 +3040,10 @@ export class TableDO extends DurableObject<WorkerEnv> {
             : { 0: 'win', 1: 'loss' }
           : outcomes(match.adjusted, match.config.blinds.bb)
     this.seq++
+    // Normally gone when the seat filled; an invite that is still here is
+    // closed with the match.
+    const invite = match.invite
+    delete match.invite
     this.logFinish(match, reason, forfeit, noShow)
     this.setGameDeadline({ kind: 'idle', at: this.clock() + IDLE_MS })
     this.deadlines = this.deadlines.filter((d) => d.kind !== 'grace')
@@ -2638,6 +3074,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
     this.expectArchive(writes)
     await this.ctx.storage.put(writes)
     await this.armAlarm()
+    if (invite) this.closeInvite(match.id, invite)
     this.broadcast('state')
     // A six table that ends (an engine fault) tells only its seats.
     for (const ws of this.openSockets())

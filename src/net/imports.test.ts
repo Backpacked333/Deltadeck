@@ -43,10 +43,12 @@ describe('src/net imports', () => {
     }
   })
 
-  // The six-seat ring and the table list are reached only through the
+  // The six-seat ring, the table list and the open games (the list, the host's
+  // code and requests, the join-by-code page) are reached only through the
   // lazy online chunk: an import from anywhere else could pull them into
-  // the entry bundle (ADR, "Table UI (P2-05)"; clarifications from PR-25).
-  it('are the only ones to import the six-seat ring and the table list', () => {
+  // the entry bundle (ADR, "Table UI (P2-05)"; clarifications from PR-25;
+  // amendment 2026-10-12, "Live games").
+  it('are the only ones to import the six-seat ring, the table list and the open games', () => {
     const src = new URL('../', import.meta.url)
     const files = readdirSync(src, { recursive: true, encoding: 'utf8' })
       .map((f) => f.replaceAll('\\', '/'))
@@ -56,7 +58,7 @@ describe('src/net imports', () => {
       const source = readFileSync(new URL(file, src), 'utf8')
       expect(
         source.match(
-          /(from |import\()'[^']*\/(SixRing|SeatPlate|TableList)'/,
+          /(from |import\()'[^']*\/(SixRing|SeatPlate|TableList|GameList|HostInvite|JoinByCode)'/,
         )?.[0],
         `${file} imports the ring or the list`,
       ).toBeUndefined()

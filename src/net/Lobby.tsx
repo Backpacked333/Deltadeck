@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { BookOpen, Link2, Swords, Trophy, Users } from 'lucide-react'
+import { BookOpen, DoorOpen, Link2, Swords, Trophy, Users } from 'lucide-react'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { MatchKind } from '../shared/protocol'
 import { AccuracyPanel } from './AccuracyPanel'
-import { createMatch, fetchActiveMatch } from './api'
+import { createGame, createMatch, fetchActiveMatch } from './api'
 import type { Identity } from './api'
+import { GameList } from './GameList'
 import type { LobbyState } from './lobbyClient'
 import { TableList } from './TableList'
 import type { QuickSit } from './TableList'
@@ -68,6 +69,9 @@ export function Lobby({
   }, [arrival])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // "Show in open games": off unless ticked, so a friend's table stays a
+  // link (ADR amendment 2026-10-12, "Live games").
+  const [listed, setListed] = useState(false)
   const [active, setActive] = useState<string | null>(null)
 
   useEffect(() => {
@@ -93,7 +97,11 @@ export function Lobby({
   const playFriend = async () => {
     setBusy(true)
     setError(null)
-    const result = await createMatch(identity.getToken, fetcher)
+    // Unlisted is the request the server has always had, byte for byte; only
+    // a listed game sends a body (and so does only what the host chose).
+    const result = listed
+      ? await createGame(identity.getToken, { listed: true }, fetcher)
+      : await createMatch(identity.getToken, fetcher)
     setBusy(false)
     if (result.ok) window.location.hash = `#play/${result.matchId}`
     else {
@@ -166,11 +174,33 @@ export function Lobby({
           >
             {busy ? 'Opening a table…' : 'Play a friend by link'}
           </button>
+          <label className="live-check">
+            <input
+              type="checkbox"
+              checked={listed}
+              disabled={busy}
+              aria-describedby="listed-help"
+              onChange={(e) => setListed(e.target.checked)}
+            />
+            Show in open games
+          </label>
+          <p id="listed-help" className="live-muted">
+            Others can then ask to join. Needs a confirmed email.
+          </p>
           {error && (
             <p className="live-error" role="alert">
               {error}
             </p>
           )}
+        </article>
+        <article className="panel live-card live-card-wide">
+          <DoorOpen size={22} />
+          <h2>Open games</h2>
+          <p>
+            Heads-up games their hosts listed. Ask to join, or type a code you
+            were given. 20 hands, play money.
+          </p>
+          <GameList state={state} connection={connection} />
         </article>
         <article className="panel live-card">
           <Users size={22} />

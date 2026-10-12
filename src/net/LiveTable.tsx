@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Copy } from 'lucide-react'
 import { ActionBar } from '../components/table/ActionBar'
+import type { Sending } from '../components/table/ActionBar'
 import { Table } from '../components/table/Table'
 import { toHeroGame } from '../engine/project'
 import type { SeatId } from '../engine/types'
@@ -21,13 +22,15 @@ import { useRunout } from '../state/runout'
 import { inviteLink } from './api'
 import type { Identity } from './api'
 import type { TableState } from './client'
+import { HostInvite } from './HostInvite'
 import { MatchEnd } from './MatchEnd'
 import { matchOverText } from './matchResult'
 import { ReviewLive } from './ReviewLive'
 import { SixTable } from './SixTable'
 import type { Passed, QuickSit } from './TableList'
 import { TurnClock } from './TurnClock'
-import { useTable } from './useTable'
+import { useRtt, useTable } from './useTable'
+import type { RttStore } from './heartbeat'
 
 const noop = () => {}
 const keep = () => {}
@@ -59,8 +62,19 @@ export function LiveTable({
   quickSit?: QuickSit | null
   setQuickSit?: (next: QuickSit | null) => void
 }) {
-  const { state, act, rematch, sit, resync, rebuy, stand, sitOut, sitIn } =
-    useTable(matchId, identity.getToken)
+  const {
+    state,
+    act,
+    rematch,
+    sit,
+    resync,
+    rebuy,
+    stand,
+    sitOut,
+    sitIn,
+    answer,
+    rtt,
+  } = useTable(matchId, identity.getToken)
   const { taking, arrived } = useSitOnArrival(
     matchId,
     state,
@@ -156,7 +170,7 @@ export function LiveTable({
   const opponent = table.players.find((p) => p.seat !== seat)
   return (
     <div className="play-column live-table">
-      <MatchBar table={table} seat={seat} view={view} state={state} />
+      <MatchBar table={table} seat={seat} view={view} state={state} rtt={rtt} />
       {view && isSeated(view) ? (
         <LiveHand
           view={view}
@@ -171,9 +185,31 @@ export function LiveTable({
           table={table}
           seat={seat}
           ended={state.ended}
+          invite={state.invite}
+          open={state.status === 'open'}
+          answer={answer}
         />
       )}
     </div>
+  )
+}
+
+/**
+ * The player's round trip to the table as a dot: green under 80 ms, amber
+ * under 200, red above, the figure in its tooltip. Reads its own store, so
+ * a ping every few seconds re-renders this and nothing else.
+ */
+function Signal({ store }: { store: RttStore | null }) {
+  const ms = useRtt(store)
+  if (ms === null) return null
+  const level = ms < 80 ? 'good' : ms < 200 ? 'fair' : 'poor'
+  return (
+    <span
+      className={`live-signal live-signal-${level}`}
+      role="img"
+      aria-label={`Connection ${ms} ms`}
+      title={`${ms} ms`}
+    />
   )
 }
 
@@ -182,11 +218,13 @@ function MatchBar({
   seat,
   view,
   state,
+  rtt,
 }: {
   table: MatchInfo
   seat: SeatId
   view: SeatView | null
   state: TableState
+  rtt: RttStore | null
 }) {
   const opponent = table.players.find((p) => p.seat !== seat)
   return (
@@ -220,6 +258,7 @@ function MatchBar({
             : 'Reconnecting…'}
         </span>
       )}
+      <Signal store={rtt} />
     </div>
   )
 }
@@ -229,11 +268,17 @@ function WaitingRoom({
   table,
   seat,
   ended,
+  invite,
+  open,
+  answer,
 }: {
   matchId: string
   table: MatchInfo
   seat: SeatId
   ended: TableState['ended']
+  invite: TableState['invite']
+  open: boolean
+  answer: (requestId: string, accept: boolean) => boolean
 }) {
   const link = inviteLink(matchId)
   const [copied, setCopied] = useState(false)
@@ -307,6 +352,7 @@ function WaitingRoom({
               {copied ? 'Copied' : 'Copy link'}
             </button>
           </div>
+          <HostInvite invite={invite} answer={answer} open={open} />
         </>
       ) : (
         <p className="live-muted">The first hand deals in a moment.</p>
@@ -355,12 +401,37 @@ function LiveHand({
     return () => window.clearTimeout(timer)
   }, [state.error])
 
-  const onAct = (kind: 'fold' | 'continue' | 'raise') => {
+  // The move just sent, shown at once on its button and in the status line
+  // (ActionBar `sending`). Local to this decision: it ends when the server
+  // answers (pending clears), and a snapshot of a later decision is not it.
+  const [sent, setSent] = useState<({ decision: string } & Sending) | null>(
+    null,
+  )
+  const sending: Sending | null =
+    state.pending && sent?.decision === decision
+      ? { kind: sent.kind, label: sent.label }
+      : null
+  useEffect(() => {
+    if (!state.pending) setSent(null)
+  }, [state.pending])
+
+  const chips = (n: number) => Math.round(n).toLocaleString('en-US')
+  const onAct = (kind: Sending['kind']) => {
     if (!yourTurn) return
-    if (kind === 'fold') act({ type: 'fold' })
-    else if (kind === 'continue')
-      act({ type: legal.canCheck ? 'check' : 'call' })
-    else if (legal.canRaise) act({ type: 'raise', to: raiseTo })
+    let label: string
+    let sentOk = false
+    if (kind === 'fold') {
+      label = 'Fold'
+      sentOk = act({ type: 'fold' })
+    } else if (kind === 'continue') {
+      label = legal.canCheck ? 'Check' : `Call ${chips(legal.toCall)}`
+      sentOk = act({ type: legal.canCheck ? 'check' : 'call' })
+    } else if (legal.canRaise) {
+      const betting = Math.max(...game.bets) === 0
+      label = `${betting ? 'Bet' : 'Raise to'} ${chips(raiseTo)}`
+      sentOk = act({ type: 'raise', to: raiseTo })
+    } else return
+    if (sentOk) setSent({ decision, kind, label })
   }
 
   const ended = state.ended
@@ -418,6 +489,7 @@ function LiveHand({
         onReview={noop}
         revealing={runout.revealing}
         versus={{ opponent, next, rated: view.match.kind === 'hu-rated' }}
+        sending={sending}
       />
       {ended?.outcomeBySeat ? (
         <MatchEnd

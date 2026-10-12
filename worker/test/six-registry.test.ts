@@ -499,6 +499,11 @@ describe('reporting to the lobby', () => {
     expect(sent(matchId).at(-1)).toEqual(counts(3, 30, 2))
   })
 
+  // Live games (ADR amendment 2026-10-12): a heads-up invite table the Worker
+  // made reports too, but to its own list of open games (reportOpen, closeGame:
+  // games.test.ts), never as a six table. So "never reports" is narrowed to
+  // the six list: reportTable and removeTable, on rated tables, on tables made
+  // without an invite, and on an invite table made through the route.
   it('a heads-up table never reports, nor leaves a list it was never on', async () => {
     const sent = watchReports()
     const removed = vi.spyOn(LobbyDO.prototype, 'removeTable')
@@ -549,6 +554,29 @@ describe('reporting to the lobby', () => {
     expect((await storageOf(matchId)).keys).not.toContain('listing')
     await settled(matchId)
     expect(sent(matchId)).toEqual([])
+    expect(await entryOf(matchId)).toBeUndefined()
+  })
+})
+
+describe('the six list and the open games', () => {
+  it('an invite table made through the route reports as an open game, never as a six table', async () => {
+    const sent = watchReports()
+    const removed = vi.spyOn(LobbyDO.prototype, 'removeTable')
+    const opened = vi.spyOn(LobbyDO.prototype, 'reportOpen')
+    const made = await createMatch('inv-reg-a')
+    const { matchId } = (await made.json()) as { matchId: string }
+    const a = await connect(matchId, 'inv-reg-a')
+    await a.next((f) => f.t === 'welcome')
+    await settled(matchId)
+    // It told the open games (the host came), and the six list nothing.
+    expect(opened.mock.calls.map(([id]) => id)).toEqual([matchId])
+    const b = await connect(matchId, 'inv-reg-b')
+    await a.next(isState(1))
+    await b.next(isState(1))
+    await settled(matchId)
+    expect((await storageOf(matchId)).keys).not.toContain('listing')
+    expect(sent(matchId)).toEqual([])
+    expect(removed.mock.calls.filter(([id]) => id === matchId)).toEqual([])
     expect(await entryOf(matchId)).toBeUndefined()
   })
 })
@@ -1125,29 +1153,41 @@ describe('the exposure gate', () => {
 
   it('the invite route takes no kind from the client', async () => {
     // Neither the query string nor a JSON body makes an invite a six table.
-    const asks = [
-      { query: '?kind=six-casual', body: undefined },
-      { query: '', body: JSON.stringify({ kind: 'six-casual' }) },
-    ]
-    for (const { query, body } of asks) {
-      const made = await SELF.fetch(`${ORIGIN}/api/matches${query}`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token('kind-c')}`,
-          'Content-Type': 'application/json',
-        },
-        body,
-      })
-      expect(made.status).toBe(201)
-      const { matchId } = (await made.json()) as { matchId: string }
-      const { match } = await peek(matchId)
-      expect(
-        (match as unknown as { config: { kind: string } }).config.kind,
-      ).toBe('hu-casual')
+    // The route's body is now `{ listed }` and nothing else (live games, ADR
+    // amendment 2026-10-12), so a body that names a kind is refused outright
+    // rather than ignored, and no table is made for it.
+    const free = () =>
       // One table per account: free it for the next ask.
-      await runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
+      runInDurableObject(lobbyStub(env), (_: LobbyDO, state) =>
         state.storage.delete('active:kind-c'),
       )
+    const headers = {
+      Authorization: `Bearer ${token('kind-c')}`,
+      'Content-Type': 'application/json',
+    }
+    const query = await SELF.fetch(`${ORIGIN}/api/matches?kind=six-casual`, {
+      method: 'POST',
+      headers,
+    })
+    expect(query.status).toBe(201)
+    const { matchId } = (await query.json()) as { matchId: string }
+    const { match } = await peek(matchId)
+    expect((match as unknown as { config: { kind: string } }).config.kind).toBe(
+      'hu-casual',
+    )
+    await free()
+    for (const body of [
+      JSON.stringify({ kind: 'six-casual' }),
+      JSON.stringify({ listed: true, kind: 'six-casual' }),
+    ]) {
+      const refused = await SELF.fetch(`${ORIGIN}/api/matches`, {
+        method: 'POST',
+        headers,
+        body,
+      })
+      expect(refused.status).toBe(400)
+      // Nothing was made: the lobby holds no table for the account.
+      expect(await lobbyHolds('kind-c')).toBeUndefined()
     }
   })
 

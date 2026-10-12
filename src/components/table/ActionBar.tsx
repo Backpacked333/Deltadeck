@@ -37,6 +37,15 @@ export type ActionMath = {
   foldProbability?: number
   bestKind?: 'fold' | 'continue' | 'raise'
 }
+/**
+ * A live move sent and not yet acknowledged: which button was pressed and
+ * how the move reads ("Call 10"). The bar says so and marks that button, so
+ * the click is seen at once, a round trip before the server's snapshot.
+ */
+export type Sending = {
+  kind: 'fold' | 'continue' | 'raise'
+  label: string
+}
 export type GuessProps = {
   show: boolean
   value: number
@@ -170,6 +179,7 @@ export function ActionBar({
   onReview,
   revealing = false,
   versus,
+  sending = null,
 }: {
   game: ActionHand
   legal: ReturnType<typeof legalActions>
@@ -195,6 +205,12 @@ export function ActionBar({
    * and no break-even figure (integrity v1, HU AC6).
    */
   versus?: { opponent: string; next: string; rated?: boolean }
+  /**
+   * Live only: the move in flight. The buttons stay disabled and keep their
+   * names (a screen reader hears the same buttons); the status line says
+   * what was sent, and the bar is `aria-busy` until the server answers.
+   */
+  sending?: Sending | null
 }) {
   const result = game.result
   if (result && revealing)
@@ -245,30 +261,41 @@ export function ActionBar({
   const canAct = yourTurn && !paused
   const show = math.revealed && math.ready
   return (
-    <div className="action-bar">
+    <div
+      className={`action-bar ${sending ? 'is-sending' : ''}`}
+      aria-busy={sending ? true : undefined}
+    >
       <div className="action-status" aria-live="polite">
-        <span className={`status-dot ${canAct ? 'live' : 'wait'}`} />
-        <strong>
-          {paused
-            ? 'Table paused'
-            : canAct
-              ? 'Your move'
-              : `${versus?.opponent ?? 'Atlas'} to act`}
-        </strong>
-        <span className="muted">
-          {canAct
-            ? facing
-              ? versus?.rated
-                ? `${chips(legal.toCall)} to call into ${chips(game.pot)}`
-                : `${chips(legal.toCall)} to call into ${chips(game.pot)} · break-even ${pct(math.breakEven)}`
-              : 'You can check for free'
-            : 'No rush. Think in probabilities.'}
-        </span>
+        <span
+          className={`status-dot ${canAct && !sending ? 'live' : 'wait'}`}
+        />
+        {sending ? (
+          <strong>{`Sending ${sending.label}…`}</strong>
+        ) : (
+          <>
+            <strong>
+              {paused
+                ? 'Table paused'
+                : canAct
+                  ? 'Your move'
+                  : `${versus?.opponent ?? 'Atlas'} to act`}
+            </strong>
+            <span className="muted">
+              {canAct
+                ? facing
+                  ? versus?.rated
+                    ? `${chips(legal.toCall)} to call into ${chips(game.pot)}`
+                    : `${chips(legal.toCall)} to call into ${chips(game.pot)} · break-even ${pct(math.breakEven)}`
+                  : 'You can check for free'
+                : 'No rush. Think in probabilities.'}
+            </span>
+          </>
+        )}
       </div>
       {heroTurn && guess.show && <GuessBar guess={guess} />}
       <div className="action-buttons" data-tour="actions">
         <button
-          className={`act act-fold ${show && math.bestKind === 'fold' ? 'act-best' : ''}`}
+          className={`act act-fold ${show && math.bestKind === 'fold' ? 'act-best' : ''} ${sending?.kind === 'fold' ? 'act-sent' : ''}`}
           disabled={!canAct}
           onClick={() => onAct('fold')}
         >
@@ -276,7 +303,7 @@ export function ActionBar({
           <span className="act-sub">{show ? 'EV 0' : 'Step away'}</span>
         </button>
         <button
-          className={`act act-call ${show && math.bestKind === 'continue' ? 'act-best' : ''}`}
+          className={`act act-call ${show && math.bestKind === 'continue' ? 'act-best' : ''} ${sending?.kind === 'continue' ? 'act-sent' : ''}`}
           disabled={!canAct}
           onClick={() => onAct('continue')}
         >
@@ -302,7 +329,7 @@ export function ActionBar({
           </span>
         </button>
         <button
-          className={`act act-raise ${show && math.bestKind === 'raise' ? 'act-best' : ''}`}
+          className={`act act-raise ${show && math.bestKind === 'raise' ? 'act-best' : ''} ${sending?.kind === 'raise' ? 'act-sent' : ''}`}
           disabled={!canAct || !legal.canRaise}
           onClick={() => onAct('raise')}
         >

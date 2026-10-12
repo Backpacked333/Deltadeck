@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 // Load and integrity smoke: 20 WebSocket clients (10 tables at a time) play
 // 500 hands against a running server and check every frame. Prints ack
-// latency p50/p95/p99 and the invariants; exits 1 above 300 ms p95 or on any
-// broken invariant.
+// latency p50/p95/p99 (an act to the state that acknowledges it), the link
+// round trip of a `ping` a second (so the table's own time is the ack less
+// that), and the invariants; exits 1 above 300 ms p95 or on any broken
+// invariant. Run it before and after a change to table placement or to the
+// hand-end work to see what moved.
 //
 //   npm run worker:dev -- --var DEV_AUTH_SECRET:smoke-local-secret-0001
 //   npm run smoke                     # or: node scripts/smoke-ws.mjs

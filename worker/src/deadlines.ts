@@ -46,6 +46,12 @@ export type Deadline =
    * (REPORT_MS after the last report). It does nothing itself: every alarm
    * ends by sending a held report that is due (ADR, clarifications from
    * PR-24, decision 6).
+   *
+   * An invite table waiting for its guest, with its host connected: `at` is
+   * the next heartbeat to the lobby (OPEN_HEARTBEAT_MS after the last), or
+   * sooner when a join request or a reservation lapses, so the host's
+   * prompt follows. Again it does nothing itself: every alarm ends with the
+   * invite's tick (ADR amendment 2026-10-12, "Live games").
    */
   | { kind: 'report'; at: number }
 

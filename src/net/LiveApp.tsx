@@ -1,4 +1,4 @@
-// The online area: #lobby, #play/<matchId> and #welcome/onboard (sign-up
+// The online area: #lobby, #play/<matchId>, #join/<code> and #welcome/onboard (sign-up
 // from the landing page), the account pages #signup and #signin, a sign-in
 // provider's return (?code=…), and the public pages:
 // #ladder[/month], #u/<username> and #match/<matchId>. Lazy-loaded so the
@@ -10,10 +10,12 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { replaceRoute, takeAuthReturn } from '../lib/authReturn'
 import { backFromSignIn } from '../lib/landing'
 import { useHash } from '../lib/navigation'
+import { normaliseCode } from '../shared/gameCode'
 import { AccountPage, AuthCallback, HOME_ROUTE, SignOut } from './AccountPage'
 import { devIdentity } from './api'
 import type { Identity } from './api'
 import { AuthGate } from './AuthGate'
+import { JoinByCode, JoinFailed } from './JoinByCode'
 import { Ladder } from './Ladder'
 import { LiveTable } from './LiveTable'
 import { Lobby } from './Lobby'
@@ -26,6 +28,11 @@ import type { QuickSit } from './TableList'
 import './live.css'
 
 const PLAY = /^#play\/([0-9a-f-]{36})$/
+/**
+ * A game's code as a link (`#join/ABC234`, typed codes may carry a hyphen).
+ * Bare `#join` is what a spent link leaves in the address bar.
+ */
+const JOIN = /^#join(?:\/([0-9A-Za-z-]{6,8}))?$/
 const LADDER = /^#ladder(\/month)?$/
 const PROFILE = /^#u\/([a-z0-9_]{3,20})$/
 const REVIEW = /^#match\/([0-9a-f-]{36})$/
@@ -35,6 +42,7 @@ const ACCOUNT = /^#sign(up|in)$/
 /** Routes this area draws itself; a provider's return to any other finishes here. */
 const OWN = [
   PLAY,
+  JOIN,
   LADDER,
   PROFILE,
   REVIEW,
@@ -46,6 +54,9 @@ const OWN = [
 export default function LiveApp() {
   const hash = useHash()
   const matchId = hash.match(PLAY)?.[1] ?? null
+  const join = hash.match(JOIN)
+  // The typed form (any case, a hyphen) cleaned; null when it is no code.
+  const joinCode = join?.[1] ? normaliseCode(join[1]) : null
   const ladder = hash.match(LADDER)
   const profile = hash.match(PROFILE)?.[1] ?? null
   const review = hash.match(REVIEW)?.[1] ?? null
@@ -166,6 +177,12 @@ export default function LiveApp() {
   const content = (identity: Identity): ReactNode =>
     onboarding ? (
       <Onboarding identity={identity} client={online?.client ?? null} />
+    ) : join ? (
+      joinCode ? (
+        <JoinByCode key={joinCode} code={joinCode} identity={identity} />
+      ) : (
+        <JoinFailed />
+      )
     ) : matchId ? (
       <LiveTable
         key={matchId}

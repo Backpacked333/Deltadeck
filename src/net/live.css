@@ -961,3 +961,162 @@
   color: var(--text-2);
   font-size: 14px;
 }
+
+/* ---- Live games (ADR amendment 2026-10-12) ----------------------------- */
+/* The open games card spans the grid: a table of games wants the width. */
+.live-card-wide {
+  grid-column: 1 / -1;
+}
+.live-check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-weight: 600;
+}
+.live-check input {
+  width: 18px;
+  height: 18px;
+}
+/* Cells and buttons may wrap, so the list fits a 320 px phone however long
+   an age or a button reads; only a host's name is cut (ellipsis). */
+.live-games td {
+  vertical-align: middle;
+  white-space: normal;
+}
+.live-games .btn {
+  white-space: normal;
+}
+/* Names are other people's: text only, cut short, the whole in the title. */
+.live-host {
+  max-width: 14ch;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+.live-answer {
+  text-align: right;
+  white-space: normal;
+}
+.live-waiting {
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.live-codeform {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.live-codeform h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+.live-row-tight {
+  flex-direction: row;
+}
+.live-code-input {
+  max-width: 11ch;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 1.1rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* The host's waiting room: the code, large, and who asked to join. */
+.live-code {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+.live-code-text {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 2rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  user-select: all;
+}
+.live-requests {
+  display: grid;
+  gap: 8px;
+}
+.live-requests h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+.live-request-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.live-request-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.live-req-text {
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.live-req-buttons {
+  display: flex;
+  gap: 8px;
+}
+/* How long the request has left: drains over the 60 s it lives, started
+   at its age. No script ticks it; reduced motion shows it full. */
+.live-req-age {
+  flex: 1 0 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+.live-req-age i {
+  display: block;
+  height: 100%;
+  background: var(--accent-strong);
+  transform-origin: left;
+  animation: live-drain 60s linear forwards;
+}
+@keyframes live-drain {
+  to {
+    transform: scaleX(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-req-age i {
+    animation: none;
+  }
+}
+
+/* The round trip to the table, in the match bar. */
+.live-signal {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+.live-signal-good {
+  background: var(--positive);
+}
+.live-signal-fair {
+  background: var(--warning);
+}
+.live-signal-poor {
+  background: var(--negative);
+}

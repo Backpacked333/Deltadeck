@@ -504,7 +504,7 @@ describe('rated pairing by rating', () => {
 })
 
 describe('lobby frames', () => {
-  it('queued/matched/presence/error/sit_at/tables carry only allowed keys', async () => {
+  it('queued/matched/presence/error/sit_at/tables/games/join_status carry only allowed keys', async () => {
     // A pairing, then the same player queueing again (matched, resumed).
     const { matchId, la, lb } = await pair('alice', 'bob')
     const from = la.frames.length
@@ -532,6 +532,15 @@ describe('lobby frames', () => {
     lc.send({ t: 'quick_sit' })
     expect(await lc.next((f) => f.t === 'sit_at')).toMatchObject({
       tableId: six,
+    })
+    // The open games (ADR amendment 2026-10-12, "Live games"): the list,
+    // here empty, and the answer to a code that opens nothing. The rest of
+    // their frames are checked in games.test.ts.
+    lc.send({ t: 'games' })
+    expect(await lc.next((f) => f.t === 'games')).toMatchObject({ games: [] })
+    lc.send({ t: 'join_code', code: 'ABC234' })
+    expect(await lc.next((f) => f.t === 'join_status')).toMatchObject({
+      state: 'unavailable',
     })
 
     // Every type the lobby can send was seen, so none goes unchecked.

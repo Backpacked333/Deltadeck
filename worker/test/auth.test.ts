@@ -349,5 +349,33 @@ describe('dev tokens', () => {
     expect(
       await verifyToken(`dev.${'x'.repeat(65)}.${DEV_SECRET}`, devEnv),
     ).toBeNull()
+    // The lobby's keys join an account id to a day or a game with ':', so
+    // an id that held one could name another account's key.
+    expect(await verifyToken(`dev.a:b.${DEV_SECRET}`, devEnv)).toBeNull()
+  })
+})
+
+describe('listing a game (ADR amendment 2026-10-12, "Live games")', () => {
+  /** POST /api/matches asking for a listed game, as the account `sub`. */
+  const askListed = async (sub: string) => {
+    const made = await SELF.fetch(`${ORIGIN}/api/matches`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${await sign({ sub })}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ listed: true }),
+    })
+    expect(made.status).toBe(201)
+    return ((await made.json()) as { listed: boolean }).listed
+  }
+
+  it('needs a confirmed email, as rated play does: any other account gets a game made unlisted, and is told so', async () => {
+    userConfirmed = true
+    expect(await askListed(USER)).toBe(true)
+    expect(await askListed(UNCONFIRMED)).toBe(false)
+    expect(await askListed(ANONYMOUS)).toBe(false)
+    // Auth unreachable: not a refusal to make the game, only not listed.
+    expect(await askListed(AUTH_DOWN)).toBe(false)
   })
 })

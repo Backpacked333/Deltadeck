@@ -1556,6 +1556,24 @@ main {
 .act:disabled {
   opacity: 0.45;
 }
+/* A live move sent, not yet acknowledged (ActionBar `sending`): the button
+   pressed stays lit while the others dim, so the click is seen at once. */
+.action-bar.is-sending .act:disabled {
+  opacity: 0.45;
+}
+.action-bar.is-sending .act.act-sent:disabled {
+  opacity: 1;
+  border-color: var(--accent-strong);
+  background: var(--surface-2);
+}
+.action-bar.is-sending .act.act-sent .act-main {
+  animation: pulse 1.2s infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .action-bar.is-sending .act.act-sent .act-main {
+    animation: none;
+  }
+}
 .act-main {
   white-space: nowrap;
   display: flex;

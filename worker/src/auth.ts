@@ -19,6 +19,45 @@ export const MIN_DEV_SECRET = 16
 const devTokensOn = (env: WorkerEnv) =>
   (env.DEV_AUTH_SECRET?.length ?? 0) >= MIN_DEV_SECRET
 
+/** The key set for this project; made once per isolate (and per URL). */
+function keySet(env: WorkerEnv) {
+  const url = `${env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`
+  if (!jwks || jwksUrl !== url) {
+    jwks = createRemoteJWKSet(new URL(url))
+    jwksUrl = url
+  }
+  return jwks
+}
+
+/** A prime is tried at most this often per isolate, whatever fails. */
+export const PRIME_MIN_MS = 30_000
+let lastPrime = -Infinity
+
+/**
+ * Fetches the project's signing keys ahead of the first sign-in (ADR
+ * amendment 2026-10-12, "Live games"). A fresh isolate has no keys, and the
+ * first token it verifies waits on a round trip to Supabase before anything
+ * else, on the path of a player's first connect. The page asks /api/config
+ * as it loads, long before it connects, so that request primes them
+ * (`ctx.waitUntil`). Verification is untouched: the same pinned algorithm,
+ * issuer and audience. Never throws, and does nothing while the keys are
+ * fresh or a fetch is under way, nor more than once per PRIME_MIN_MS: the
+ * route is open to everyone, and a failing fetch must not become a fetch per
+ * request.
+ */
+export async function primeKeys(env: WorkerEnv) {
+  if (!env.SUPABASE_URL) return
+  const keys = keySet(env)
+  const t = now()
+  if (keys.fresh || keys.reloading || t - lastPrime < PRIME_MIN_MS) return
+  lastPrime = t
+  try {
+    await keys.reload()
+  } catch {
+    // The first real verification asks again.
+  }
+}
+
 /** The account id for a token, or null when it does not verify. */
 export async function verifyToken(
   token: string,
@@ -32,13 +71,9 @@ export async function verifyToken(
       ? userId
       : null
   }
-  const url = `${env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`
-  if (!jwks || jwksUrl !== url) {
-    jwks = createRemoteJWKSet(new URL(url))
-    jwksUrl = url
-  }
+  const keys = keySet(env)
   try {
-    const { payload } = await jwtVerify(token, jwks, {
+    const { payload } = await jwtVerify(token, keys, {
       issuer: `${env.SUPABASE_URL}/auth/v1`,
       audience: 'authenticated',
       // Pinned: rejects alg confusion and the HS256 legacy API keys.

@@ -5,6 +5,7 @@ import { PROTOCOL } from '../../src/shared/protocol'
 import {
   bearerToken,
   identify,
+  primeKeys,
   ratedEligibility,
   readSubprotocols,
 } from './auth'
@@ -16,6 +17,7 @@ import { profilePage } from './profile'
 import { sharePage } from './share'
 import { challengeRoute } from './challenge'
 import { originAllowed } from './origin'
+import { regionHint } from './region'
 import type { InitBody } from './table'
 import { HANDS_DLQ } from './queues'
 import { handsPerDay } from './stats'
@@ -32,8 +34,55 @@ const MATCH_PATH = /^\/ws\/table\/([0-9a-f-]{36})$/
 const LIMITED =
   /^\/(ws\/|c\/|api\/(matches|me|events|challenge\/(score|claim|shared\/[0-9a-f]{32})|school\/(start|confirm))$)/
 
+/** The largest `POST /api/matches` body read: `{"listed":true}` is 15 bytes. */
+const MATCH_BODY_MAX = 256
+
+/**
+ * The options of `POST /api/matches`: an absent or empty body is the plain
+ * invite the client has always asked for (unlisted); otherwise a JSON object
+ * with `listed` and nothing else. Null for anything else, which is a 400:
+ * the body is never logged, and `kind` is not read from it (nor from
+ * anywhere in the request), so a client cannot ask for another sort of table.
+ */
+async function readMatchOptions(
+  request: Request,
+): Promise<{ listed: boolean } | null> {
+  let text = ''
+  if (request.body) {
+    // Read at most MATCH_BODY_MAX bytes: a larger body is refused unread.
+    const reader = request.body.getReader()
+    const decoder = new TextDecoder()
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      text += decoder.decode(value, { stream: true })
+      if (text.length > MATCH_BODY_MAX) {
+        await reader.cancel()
+        return null
+      }
+    }
+  }
+  if (!text.trim()) return { listed: false }
+  let body: unknown
+  try {
+    body = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null
+  const keys = Object.keys(body)
+  if (keys.some((key) => key !== 'listed')) return null
+  const { listed } = body as { listed?: unknown }
+  if (listed !== undefined && typeof listed !== 'boolean') return null
+  return { listed: listed === true }
+}
+
 export default {
-  async fetch(request: Request, env: WorkerEnv): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: WorkerEnv,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
     const { pathname } = new URL(request.url)
 
     const moved = canonicalRedirect(request, env.CANONICAL_ORIGIN)
@@ -44,11 +93,16 @@ export default {
 
     // Browser-safe settings for the online area, so the static build needs
     // no environment variables.
-    if (pathname === '/api/config')
+    if (pathname === '/api/config') {
+      // The page asks this as it loads, before any sign-in: the signing keys
+      // are fetched now, off this response, so the first connect of a fresh
+      // isolate does not wait on them.
+      ctx.waitUntil(primeKeys(env))
       return json({
         supabaseUrl: env.SUPABASE_URL,
         supabaseKey: env.SUPABASE_PUBLISHABLE_KEY,
       })
+    }
 
     // Hands per day from the archive, for the operator (README §Operations).
     if (pathname === '/api/stats') return handsPerDay(env)
@@ -62,13 +116,35 @@ export default {
     }
 
     // Create a heads-up table and a link to share. The creator takes seat 0.
+    // The table also gets a code, and is listed if the caller asks and may
+    // (ADR amendment 2026-10-12, "Live games").
     if (pathname === '/api/matches' && request.method === 'POST') {
-      const who = await identify(bearerToken(request), env)
+      const token = bearerToken(request)
+      const who = await identify(token, env)
       if (!who) return json({ error: 'unauthorized' }, 401)
+      const options = await readMatchOptions(request)
+      if (!options) return json({ error: 'bad request' }, 400)
+      // Where the host is: the table is made near them, since every move of
+      // the game goes to it. Only the creating /init uses the hint.
+      // (request.cf is typed for outgoing requests too; an incoming one
+      // carries the caller's location, and none at all in local tests.)
+      const hint = regionHint(
+        request.cf as IncomingRequestCfProperties | undefined,
+      )
+      // Listing needs what rated play needs, a confirmed email: a free
+      // anonymous account could otherwise fill the list. Without it the game
+      // is made, unlisted, and the answer says so.
+      const mayList =
+        options.listed &&
+        (await ratedEligibility(token!, who.userId, env)) === 'yes'
       const matchId = crypto.randomUUID()
       // One table per account: finish the one you are playing first. And a
       // daily cap, so one account cannot create tables without end.
-      const verdict = await lobbyStub(env).createMatch(who.userId, matchId)
+      const lobby = lobbyStub(env)
+      const verdict = await lobby.createMatch(who.userId, matchId, {
+        listed: mayList,
+        hostName: who.username,
+      })
       if (verdict.active)
         return json({ error: 'active', matchId: verdict.active }, 409)
       if (verdict.retryAfter) {
@@ -83,16 +159,45 @@ export default {
           { 'Retry-After': String(verdict.retryAfter) },
         )
       }
-      const body: InitBody = { matchId, creator: who }
-      const created = await tableStub(env, matchId).fetch(
-        'https://table/init',
-        {
-          method: 'POST',
-          body: JSON.stringify(body),
-        },
+      // Five codes in a row were taken: a moment later there will be a free one.
+      if (
+        verdict.refused ||
+        !verdict.code ||
+        !verdict.gameId ||
+        verdict.listed === undefined
       )
-      return created.ok
-        ? json({ matchId }, 201)
+        return json({ error: 'busy' }, 503, { 'Retry-After': '2' })
+      // The code, handle and listing are the Worker's: nothing here comes
+      // from the request but what it asked for, and the lobby (a full list
+      // makes a game unlisted) decides whether it is listed.
+      const { code, listed } = verdict
+      const body: InitBody = {
+        matchId,
+        creator: who,
+        code,
+        gameId: verdict.gameId,
+        listed,
+      }
+      let created: Response | null = null
+      try {
+        created = await tableStub(env, matchId, hint).fetch(
+          'https://table/init',
+          { method: 'POST', body: JSON.stringify(body) },
+        )
+      } catch (error) {
+        // It may have been made: the rows stay, and with no heartbeat go
+        // stale (GAME_STALE_MS).
+        logEvent('error', {
+          matchId,
+          reason: 'table_init',
+          detail: describeError(error),
+        })
+      }
+      // Refused: no table, so no game. The rows go and the day's create is
+      // given back.
+      if (created && !created.ok) await lobby.createFailed(who.userId, matchId)
+      return created?.ok
+        ? json({ matchId, code, listed }, 201)
         : json({ error: 'failed' }, 500)
     }
 

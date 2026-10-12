@@ -5,9 +5,16 @@
 // frame without a line here fails `npm run typecheck:worker`, so no field
 // reaches a client unreviewed.
 import { expect } from 'vitest'
+import {
+  GAME_CODE_RE,
+  GAME_ID_RE,
+  REQUEST_ID_RE,
+} from '../../src/shared/gameCode'
 import type {
   ErrorCode,
+  GameRow,
   HandRecordV1,
+  InviteRequest,
   LobbyMsg,
   MatchKind,
   ServerMsg,
@@ -172,6 +179,18 @@ export const FRAME_KEYS: Record<ServerMsg['t'], string[]> = {
     'until?',
     'next?',
   ]),
+  // The host's prompt at an invite table (ADR amendment 2026-10-12, "Live
+  // games"): its own code, and who asked as a name and an age. Never an
+  // account (INVITE_REQUEST_KEYS), never part of a view or a table.
+  invite: keysOf<Msg<'invite'>>()([
+    't',
+    'seq',
+    'matchId',
+    'code',
+    'listed',
+    'requests',
+    'reservedFor',
+  ]),
 }
 // The lobby socket's frames: presence goes to everyone online and the rest
 // to one socket. They carry counts, a table id and the player's own match,
@@ -189,7 +208,30 @@ export const LOBBY_FRAME_KEYS: Record<LobbyMsg['t'], string[]> = {
   error: keysOf<Lobby<'error'>>()(['t', 'seq', 'code', 'message']),
   sit_at: keysOf<Lobby<'sit_at'>>()(['t', 'seq', 'tableId']),
   tables: keysOf<Lobby<'tables'>>()(['t', 'seq', 'tables']),
+  // The open games: a list handle, a name and an age per row, nothing that
+  // seats (GAME_ROW_KEYS). `join_status` says how a request or a code went.
+  games: keysOf<Lobby<'games'>>()(['t', 'seq', 'games']),
+  join_status: keysOf<Lobby<'join_status'>>()([
+    't',
+    'seq',
+    'state',
+    'expiresInMs?',
+  ]),
 }
+// An open game as the list shows it: the handle that can only ask the host,
+// the host's public name and how long it has waited. No table id, no code,
+// no account.
+export const GAME_ROW_KEYS = keysOf<GameRow>()(['gameId', 'host', 'openForMs'])
+// One join request in the host's prompt: an id the host answers with, a name
+// and an age. The requester's account never reaches a frame.
+export const INVITE_REQUEST_KEYS = keysOf<InviteRequest>()([
+  'id',
+  'username',
+  'ageMs',
+])
+const UUID_ANYWHERE =
+  /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/
+
 // A listed six table: its id and four counts (ADR, clarifications from
 // PR-23 and PR-24). No account, and not the lobby's updatedAt.
 export const TABLE_ROW_KEYS = keysOf<TableRow>()([
@@ -414,6 +456,21 @@ export function checkFrame(f: ServerMsg, kind: MatchKind = 'hu-casual') {
       if (cooldown) expect(Number.isSafeInteger(f[key]), key).toBe(true)
     }
   }
+  if (f.t === 'invite') {
+    // The host's own code (or none), and requests by id, name and age.
+    expect(f.code === null || GAME_CODE_RE.test(f.code), 'invite.code').toBe(
+      true,
+    )
+    expect(typeof f.listed, 'invite.listed').toBe('boolean')
+    expect(f.reservedFor === null || typeof f.reservedFor === 'string').toBe(
+      true,
+    )
+    for (const r of f.requests) {
+      expectKeys(r, INVITE_REQUEST_KEYS, 'invite.requests')
+      expect(r.id, 'invite request id').toMatch(REQUEST_ID_RE)
+      expect(Number.isSafeInteger(r.ageMs) && r.ageMs >= 0, 'ageMs').toBe(true)
+    }
+  }
   if (f.t === 'hand_end') expectKeys(f.record, RECORD_KEYS, 'hand_end.record')
   if (f.t === 'match_end') expectKeys(f.result, RESULT_KEYS, 'match_end.result')
   if (f.t === 'reveal') {
@@ -447,6 +504,33 @@ export function checkLobbyFrame(f: LobbyMsg) {
         'tables row avgPot',
       ).toBe(true)
     }
+  if (f.t === 'games')
+    for (const row of f.games) {
+      expectKeys(row, GAME_ROW_KEYS, 'lobby games row')
+      expect(row.gameId, 'games row gameId').toMatch(GAME_ID_RE)
+      expect(typeof row.host, 'games row host').toBe('string')
+      expect(isCount(row.openForMs), 'games row openForMs').toBe(true)
+    }
+  // The list names nothing that seats: no table id, no code, no account,
+  // under whatever key.
+  if (f.t === 'games' || f.t === 'join_status') {
+    const text = JSON.stringify(f)
+    expect(text, `lobby ${f.t}: a table id`).not.toMatch(UUID_ANYWHERE)
+    expect(
+      keysMatching(/^(matchId|code|userId|hostId)$/, f),
+      `lobby ${f.t}: seating keys`,
+    ).toEqual([])
+  }
+  if (f.t === 'join_status') {
+    expect(
+      ['pending', 'declined', 'unavailable'],
+      'join_status.state',
+    ).toContain(f.state)
+    // A time left goes with a pending request, and with nothing else.
+    expect('expiresInMs' in f, 'join_status.expiresInMs').toBe(
+      f.state === 'pending',
+    )
+  }
   expect(forbiddenKeys(f), `lobby ${f.t}: forbidden keys`).toEqual([])
 }
 
@@ -528,4 +612,9 @@ export const FLOW_TYPES = {
    * after the grace, and the hand plays out.
    */
   reconnect: ['welcome', 'state', 'hand_start', 'hand_end', 'reveal'],
+  /**
+   * games.test.ts: the host of an invite table, from the waiting room
+   * through a request, an accept and the guest's arrival to the first deal.
+   */
+  invite: ['welcome', 'invite', 'state', 'hand_start'],
 } satisfies Record<string, ServerMsg['t'][]>

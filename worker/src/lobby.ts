@@ -15,6 +15,25 @@
 //                           sent to a client)
 //   quicksit:<day>:<userId> { tokens, at }  the account's quick-sit budget
 //                           (the day before's carries over; older go)
+//
+// Open games (ADR amendment 2026-10-12, "Live games"): every invite table
+// the Worker makes has a code, and may be listed. The lobby keeps only what
+// finds it, and never sends any of these whole:
+//
+//   open:<matchId>          { gameId, code, hostId, hostName, listed,
+//                           openedAt, updatedAt }  (never sent: the list's
+//                           rows are built by name, gameRow)
+//   code:<CODE>             matchId  (never sent; deleted with open:)
+//   gameid:<gameId>         matchId  (never sent; deleted with open:)
+//   joinreq:<userId>        { matchId, gameId, at }  the account's one
+//                           pending join request (never sent; ignored and
+//                           dropped once REQUEST_TTL_MS old)
+//   codefail:<day>:<userId> bucket: failed code lookups, per account
+//   codefail:global         bucket: failed code lookups, all accounts
+//   joinask:<day>:<userId>  bucket: join requests, per account
+//   gameslist:<day>:<userId> bucket: reads of the list, per account
+//                           (the buckets are stored, like quick-sit's, and
+//                           the day before's carries over; older go)
 import { DurableObject } from 'cloudflare:workers'
 import {
   CLOSE_ABUSE,
@@ -28,8 +47,30 @@ import type { ErrorCode, LobbyMsg, MatchKind } from '../../src/shared/protocol'
 import type { RatedEligibility } from './auth'
 import { now } from './clock'
 import type { WorkerEnv } from './env'
+import { GAME_CODE_RE, GAME_ID_RE } from '../../src/shared/gameCode'
+import { newGameCode, newGameId } from './gamecode'
 import {
+  byWaiting,
+  gameRow,
+  GAMES_CACHE_MS,
+  GAMES_MAX,
+  GAMES_RETURNED,
+  isFresh,
+  isOffered,
+  isPrunable,
+  REQUEST_TTL_MS,
+} from './games'
+import type { OpenGame, OpenReport } from './games'
+import {
+  CODE_FAIL_WINDOW_GLOBAL_MS,
+  CODE_FAIL_WINDOW_MS,
+  CODE_FAILS,
+  CODE_FAILS_GLOBAL,
   FrameBudget,
+  GAME_LIST_WINDOW_MS,
+  GAME_LISTS,
+  JOIN_REQUEST_WINDOW_MS,
+  JOIN_REQUESTS,
   MATCH_CREATES_PER_DAY,
   QUICK_SIT_WINDOW_MS,
   QUICK_SITS,
@@ -38,6 +79,8 @@ import {
 import type { Bucket } from './limits'
 import { describeError, logEvent } from './log'
 import { ratingWindow, REPAIR_MS } from './pairing'
+import { DEFAULT_REGION } from './region'
+import type { Region } from './region'
 import { isStale, listTables, REGISTRY_STALE_MS, tableRow } from './registry'
 import type { ListedTable, TableEntry, TableReport } from './registry'
 import type { InitBody, Liveness } from './table'
@@ -50,6 +93,18 @@ export const PAIRS_PER_DAY = 2
 /** Both players must open a paired table within this time. */
 export const START_WITHIN_MS = 30_000
 export { RATING_WINDOW, ratingWindow, REPAIR_MS } from './pairing'
+export {
+  DECLINED_MAX,
+  GAME_PRUNE_MS,
+  GAME_STALE_MS,
+  GAMES_CACHE_MS,
+  GAMES_MAX,
+  GAMES_RETURNED,
+  OPEN_HEARTBEAT_MS,
+  REQUEST_TTL_MS,
+  REQUESTS_PER_GAME,
+  RESERVE_MS,
+} from './games'
 
 /** A player with no rated match yet queues at the default rating. */
 const UNRATED = 1500
@@ -98,6 +153,32 @@ type Created = { at: number; by: string; ready: boolean }
 type Answer = DistributiveOmit<LobbyMsg, 'seq'>
 /** The lobby's answer to a rematch: the new table, or why not. */
 export type RematchAnswer = { matchId: string } | { refused: 'limit' | 'busy' }
+/**
+ * The lobby's answer to `POST /api/matches`: the table it holds for the
+ * caller, why not, or (with open-game options) the code and the list handle
+ * it gave the new game. The handle never goes back to the client.
+ */
+export type CreateAnswer = {
+  active?: string
+  retryAfter?: number
+  refused?: 'busy'
+  code?: string
+  gameId?: string
+  /** Whether the game is listed: what was asked, unless the list is full. */
+  listed?: boolean
+}
+/** What a join request is, until the host answers: which game, and when. */
+type JoinRequest = { matchId: string; gameId: string; at: number }
+/** How a table tells the lobby the host answered a join request. */
+export type RequestAnswer = 'accepted' | 'declined' | 'taken'
+/**
+ * The list as it was last read: the few fields a row is built from, with the
+ * host's account to leave the asker's own game out. Never the code.
+ */
+type GamesSnapshot = {
+  at: number
+  games: Pick<OpenGame, 'gameId' | 'hostId' | 'hostName' | 'openedAt'>[]
+}
 
 const OPEN = 1
 const json = (body: unknown, status = 200) => Response.json(body, { status })
@@ -106,9 +187,18 @@ const DAY_MS = 86_400_000
 const pairKey = (d: string, a: string, b: string) =>
   `pairs:${d}:${[a, b].sort().join(':')}`
 
-export function tableStub(env: WorkerEnv, matchId: string) {
-  // One region at launch; the hint only matters when the object is created.
-  return env.TABLE.get(env.TABLE.idFromName(matchId), { locationHint: 'enam' })
+/**
+ * The hint only matters when the object is created, which is the first call
+ * to it: an invite table gets its host's region there (regionHint, passed on
+ * the creating /init only); every other table, and every later call, uses the
+ * default.
+ */
+export function tableStub(
+  env: WorkerEnv,
+  matchId: string,
+  hint: Region = DEFAULT_REGION,
+) {
+  return env.TABLE.get(env.TABLE.idFromName(matchId), { locationHint: hint })
 }
 
 export function lobbyStub(env: WorkerEnv) {
@@ -153,6 +243,19 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    * it here, rather than open a second table beside it.
    */
   private opening = new Map<string, Promise<void>>()
+  /**
+   * The open games as the last read found them, for GAMES_CACHE_MS: every
+   * `games` frame inside the window is answered from it, and one read in
+   * flight serves every frame that arrives meanwhile, so the cost of the
+   * list is the window's, not the number of players polling. Dropped when a
+   * game closes (a filled game is gone from the next list at once), and a
+   * read that started before that drops its own result (`generation`).
+   */
+  private snapshot: GamesSnapshot | null = null
+  private loading: Promise<GamesSnapshot> | null = null
+  private generation = 0
+  /** Draws a code for a new game; tests replace it to force a collision. */
+  newCode: () => string = () => newGameCode()
 
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env)
@@ -249,6 +352,12 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
         t: 'tables',
         tables: (await this.tables()).map(tableRow),
       })
+    // Open games (ADR amendment 2026-10-12, "Live games"): each answers the
+    // socket that asks and no other, and spends its frame like any message.
+    if (msg?.t === 'games') return this.sendGames(ws)
+    if (msg?.t === 'join_code') return this.joinCode(ws, msg.code)
+    if (msg?.t === 'join_request') return this.joinRequest(ws, msg.gameId)
+    if (msg?.t === 'cancel_request') return this.cancelRequest(ws)
     if (msg?.t === 'dequeue') {
       this.requests.delete(this.who(ws).userId)
       await this.ctx.storage.delete(`queue:${this.who(ws).userId}`)
@@ -289,6 +398,9 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
     if (!this.sockets(ws).some((s) => this.who(s).userId === userId)) {
       this.requests.delete(userId)
       await this.ctx.storage.delete(`queue:${userId}`)
+      // A request nobody is left to see the answer to is withdrawn, so the
+      // host's prompt does not offer a seat to an account that has gone.
+      await this.dropRequest(userId)
     }
     await this.presence(ws)
   }
@@ -499,23 +611,70 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    * table `matchId`, unless they are playing elsewhere (that table's id
    * comes back) or have made MATCH_CREATES_PER_DAY tables today (seconds
    * until the next UTC day come back). Only a table that is made counts.
+   *
+   * With `opts` (ADR amendment 2026-10-12, "Live games") the game also gets a
+   * code and a list handle, and a row that finds it by either. They are drawn
+   * and written here, before the table exists, and in the same write as the
+   * rest: from the first read of `code:` to the put only storage is awaited,
+   * so the input gate holds, and no other create can draw the same code in
+   * between (the lobby is one object). Past GAMES_MAX rows the game is
+   * unlisted, never refused; five codes in a row taken is `busy`.
    */
   createMatch(
     userId: string,
     matchId: string,
-  ): Promise<{ active?: string; retryAfter?: number }> {
+    opts?: { listed: boolean; hostName: string },
+  ): Promise<CreateAnswer> {
     return this.forUsers([userId], async () => {
       const active = await this.liveActive(userId)
       if (active) return { active }
       const creates = await this.createsToday(userId)
       if (creates.made >= MATCH_CREATES_PER_DAY)
         return { retryAfter: creates.retryAfter }
-      await this.ctx.storage.put({
+      const writes: Record<string, unknown> = {
         [creates.key]: creates.made + 1,
         [`active:${userId}`]: matchId,
-      })
+      }
+      let game: { code: string; gameId: string; listed: boolean } | undefined
+      if (opts) {
+        const code = await this.freeCode()
+        if (!code) return { refused: 'busy' }
+        const gameId = newGameId()
+        const listed = opts.listed && (await this.openRows()).length < GAMES_MAX
+        const t = this.clock()
+        writes[`open:${matchId}`] = {
+          gameId,
+          code,
+          hostId: userId,
+          hostName: opts.hostName,
+          listed,
+          openedAt: t,
+          updatedAt: t,
+        } satisfies OpenGame
+        writes[`code:${code}`] = matchId
+        writes[`gameid:${gameId}`] = matchId
+        game = { code, gameId, listed }
+      }
+      await this.ctx.storage.put(writes)
       await this.forgetOldCreates(creates.today)
-      return {}
+      return game ?? {}
+    })
+  }
+
+  /**
+   * The table's /init refused, so the game was never made: its rows go and
+   * the day's create is given back, as `open()` does for a six table. A
+   * call that threw may have made it, so the rows stay and, with no
+   * heartbeat, go stale (GAME_STALE_MS).
+   */
+  createFailed(userId: string, matchId: string): Promise<void> {
+    return this.forUsers([userId], async () => {
+      await this.closeGame(matchId)
+      const creates = await this.createsToday(userId)
+      if (creates.made > 0)
+        await this.ctx.storage.put(creates.key, creates.made - 1)
+      if ((await this.ctx.storage.get(`active:${userId}`)) === matchId)
+        await this.ctx.storage.delete(`active:${userId}`)
     })
   }
 
@@ -581,6 +740,570 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
   /** The table this account should be at, if any. */
   async activeFor(userId: string) {
     return this.liveActive(userId)
+  }
+
+  // ---- Open games (ADR amendment 2026-10-12, "Live games") --------------------
+  //
+  // A game here is an invite table that waits for its friend. Three ids, none
+  // derived from another: the table's id and the code each seat their holder
+  // directly (the table's join() still decides), and the gameId, which the
+  // list shows, only lets its holder ASK the host. So no row of the list
+  // names anything that seats, and approval cannot be bypassed through it.
+
+  /**
+   * Draws a code nobody holds: up to five tries, then null (the Worker
+   * answers 503). Only storage is awaited between the read of `code:<c>` and
+   * the caller's put, so the lobby, one object, cannot hand the same code to
+   * two creates; a code of a stale row is held until the row is pruned.
+   */
+  private async freeCode() {
+    for (let tries = 0; tries < 5; tries++) {
+      const code = this.newCode()
+      if ((await this.ctx.storage.get(`code:${code}`)) === undefined)
+        return code
+    }
+    return null
+  }
+
+  /**
+   * The stored `open:` rows, at most GAMES_MAX, those older than
+   * GAME_PRUNE_MS deleted (with their `code:` and `gameid:` keys) as they are
+   * read: pruning is lazy, so the constructor has no work and a quiet lobby
+   * pays nothing.
+   */
+  private async openRows() {
+    const t = this.clock()
+    const rows = [
+      ...(
+        await this.ctx.storage.list<OpenGame>({
+          prefix: 'open:',
+          limit: GAMES_MAX,
+        })
+      ).entries(),
+    ]
+    const old = rows.filter(([, game]) => isPrunable(game, t))
+    if (old.length)
+      await this.ctx.storage.delete(
+        old.flatMap(([key, game]) => [
+          key,
+          `code:${game.code}`,
+          `gameid:${game.gameId}`,
+        ]),
+      )
+    return rows.filter(([, game]) => !isPrunable(game, t))
+  }
+
+  /**
+   * The table says it is open, with its host, its code and whether it is
+   * listed (RPC from the table, through its ordered `listingCalls`, every
+   * OPEN_HEARTBEAT_MS while the host is connected). An upsert, and the table
+   * is the authority: a row that is there is refreshed; one that was pruned
+   * while the host was away is made again, with its code if that is free or
+   * already this game's. A code another game took meanwhile is replaced by a
+   * fresh one, which comes back for the table to adopt. Because the table
+   * only reports while it waits with one player, and its calls reach here in
+   * order, a heartbeat cannot bring back a game that closeGame removed.
+   */
+  async reportOpen(
+    matchId: string,
+    report: OpenReport,
+  ): Promise<{ code?: string }> {
+    const { gameId, code, hostId, hostName, listed } = report
+    // By value, as for a table's counts: a malformed report is refused whole
+    // (the table logs it, lobby_open), and a row it never replaces goes stale.
+    if (
+      !GAME_CODE_RE.test(code) ||
+      !GAME_ID_RE.test(gameId) ||
+      typeof hostId !== 'string' ||
+      typeof hostName !== 'string' ||
+      typeof listed !== 'boolean'
+    )
+      throw new TypeError('An open report is a code, a handle and a host')
+    const t = this.clock()
+    const key = `open:${matchId}`
+    const row = await this.ctx.storage.get<OpenGame>(key)
+    if (row) {
+      await this.ctx.storage.put(key, {
+        ...row,
+        hostName,
+        listed,
+        updatedAt: t,
+      } satisfies OpenGame)
+      // A code the table does not know (an earlier answer was lost): its.
+      return row.code === code ? {} : { code: row.code }
+    }
+    const holder = await this.ctx.storage.get<string>(`code:${code}`)
+    const free = holder === undefined || holder === matchId
+    const own = free ? code : await this.freeCode()
+    if (!own) throw new Error('No free code')
+    const taken = await this.ctx.storage.get(`gameid:${gameId}`)
+    const handle =
+      taken === undefined || taken === matchId ? gameId : newGameId()
+    await this.ctx.storage.put({
+      [key]: {
+        gameId: handle,
+        code: own,
+        hostId,
+        hostName,
+        listed: listed && (await this.openRows()).length < GAMES_MAX,
+        openedAt: t,
+        updatedAt: t,
+      } satisfies OpenGame,
+      [`code:${own}`]: matchId,
+      [`gameid:${handle}`]: matchId,
+    })
+    return own === code ? {} : { code: own }
+  }
+
+  /**
+   * The game leaves the lobby: its table filled, finished or deleted itself
+   * (RPC from the table, ordered after every report it sent). Idempotent,
+   * and a key goes only if it still points at this game.
+   */
+  async closeGame(matchId: string) {
+    const key = `open:${matchId}`
+    const game = await this.ctx.storage.get<OpenGame>(key)
+    if (!game) return
+    const keys = [`code:${game.code}`, `gameid:${game.gameId}`]
+    const held = await this.ctx.storage.get<string>(keys)
+    await this.ctx.storage.delete([
+      key,
+      ...keys.filter((k) => held.get(k) === matchId),
+    ])
+    // A filled game is gone from the next list at once, not in 2 s.
+    this.generation++
+    this.snapshot = null
+  }
+
+  /**
+   * The host answered a join request (RPC from the table). Only a request
+   * this account still has for this game counts, so a late or repeated
+   * answer does nothing. A decline, or a seat given to someone else, is
+   * sent to the requester; an accept sends them `matched`, as a pairing
+   * does, and says whether any lobby socket of theirs got it (the table
+   * gives the seat back at once if not, rather than hold it for RESERVE_MS).
+   * Not under forUsers: the table awaits this, and the requester's own
+   * request holds that lock while it awaits the table.
+   */
+  async answerRequest(
+    requesterId: string,
+    matchId: string,
+    state: RequestAnswer,
+  ): Promise<boolean> {
+    const key = `joinreq:${requesterId}`
+    const req = await this.ctx.storage.get<JoinRequest>(key)
+    if (
+      !req ||
+      req.matchId !== matchId ||
+      this.clock() - req.at >= REQUEST_TTL_MS
+    )
+      return false
+    await this.ctx.storage.delete(key)
+    if (state !== 'accepted')
+      return this.tell(requesterId, {
+        t: 'join_status',
+        state: state === 'declined' ? 'declined' : 'unavailable',
+      })
+    // Seated elsewhere since they asked: not here as well. The table's claim
+    // at connect would refuse them anyway (4409); this spares the host a
+    // minute's wait.
+    if (await this.liveActive(requesterId)) {
+      this.tell(requesterId, { t: 'join_status', state: 'unavailable' })
+      return false
+    }
+    return this.tell(requesterId, { t: 'matched', matchId, resumed: false })
+  }
+
+  /** Sends `msg` to each lobby socket of `userId`; true if any got it. */
+  private tell(userId: string, msg: Answer) {
+    const sockets = this.ctx
+      .getWebSockets(userId)
+      .filter((ws) => ws.readyState === OPEN)
+    for (const ws of sockets) this.send(ws, msg)
+    return sockets.length > 0
+  }
+
+  // ---- Open games: the list and requests (frames) -------------------------------
+
+  /** The reply to every lookup that finds no game: one frame, whatever the cause. */
+  private unavailable(ws: WebSocket) {
+    this.send(ws, { t: 'join_status', state: 'unavailable' })
+  }
+
+  /**
+   * One of the account's stored buckets: `burst` tokens refilled at that
+   * many per `windowMs`. Like quick-sit's they are in storage (a quiet
+   * lobby hibernates within seconds, and a bucket in memory came back
+   * full), keyed by day so old ones can be pruned, and the day before's
+   * carries over so midnight refills nothing. `userId` null is the one
+   * bucket for every account. The bucket after the spend, or null when dry;
+   * `spend: false` only looks.
+   */
+  private async takeToken(
+    prefix: string,
+    userId: string | null,
+    burst: number,
+    windowMs: number,
+    spend = true,
+  ) {
+    const t = this.clock()
+    const yesterday = day(t - DAY_MS)
+    const keys =
+      userId === null
+        ? [prefix]
+        : [`${prefix}:${day(t)}:${userId}`, `${prefix}:${yesterday}:${userId}`]
+    const stored = await this.ctx.storage.get<Bucket>(keys)
+    const bucket = spendToken(
+      stored.get(keys[0]) ?? stored.get(keys[1]),
+      t,
+      burst,
+      windowMs,
+    )
+    if (!bucket || !spend) return bucket
+    await this.ctx.storage.put(keys[0], bucket)
+    // An account's first spend of the day prunes days before yesterday, at
+    // most one storage delete's worth at a time.
+    if (userId !== null && !stored.has(keys[0])) {
+      const old = await this.ctx.storage.list({
+        prefix: `${prefix}:`,
+        end: `${prefix}:${yesterday}`,
+        limit: 128,
+      })
+      if (old.size) await this.ctx.storage.delete([...old.keys()])
+    }
+    return bucket
+  }
+
+  /**
+   * The open games, to the socket that asks (a `games` frame). The account's
+   * reads are limited (GAME_LISTS); the rows come from `gamesNow`. The
+   * asker's own game is left out here, after the cache, so one list serves
+   * everyone. Nothing is pushed to anyone, and `presence()` is untouched:
+   * the lobby is one object for every player.
+   */
+  private async sendGames(ws: WebSocket) {
+    const { userId } = this.who(ws)
+    if (
+      !(await this.takeToken(
+        'gameslist',
+        userId,
+        GAME_LISTS,
+        GAME_LIST_WINDOW_MS,
+      ))
+    )
+      return this.reject(
+        ws,
+        'rate_limited',
+        'Too many refreshes. Try again in a moment.',
+      )
+    const t = this.clock()
+    let snapshot: GamesSnapshot
+    try {
+      snapshot = await this.gamesNow(t)
+    } catch (error) {
+      logEvent('error', {
+        userId,
+        reason: 'games',
+        detail: describeError(error),
+      })
+      return
+    }
+    this.send(ws, {
+      t: 'games',
+      games: snapshot.games
+        .filter((game) => game.hostId !== userId)
+        .map((game) => gameRow(game, t)),
+    })
+  }
+
+  /**
+   * The listed, fresh games, the longest waiting first, cut to
+   * GAMES_RETURNED: one `storage.list` per GAMES_CACHE_MS however many ask,
+   * and a read in flight is shared by the frames that come meanwhile.
+   */
+  private gamesNow(t: number): Promise<GamesSnapshot> {
+    const cached = this.snapshot
+    if (cached && t >= cached.at && t - cached.at < GAMES_CACHE_MS)
+      return Promise.resolve(cached)
+    if (this.loading) return this.loading
+    const generation = this.generation
+    const load = (async () => {
+      const games = (await this.openRows())
+        .map(([, game]) => game)
+        .filter((game) => isOffered(game, t))
+        .sort(byWaiting)
+        .slice(0, GAMES_RETURNED)
+        // By name: the code never enters the snapshot.
+        .map(({ gameId, hostId, hostName, openedAt }) => ({
+          gameId,
+          hostId,
+          hostName,
+          openedAt,
+        }))
+      const read = { at: t, games }
+      if (generation === this.generation) this.snapshot = read
+      return read
+    })()
+    this.loading = load
+    const done = () => {
+      if (this.loading === load) this.loading = null
+    }
+    load.then(done, done)
+    return load
+  }
+
+  /**
+   * `join_code`: the game with this code, if it is open. A code seats its
+   * holder like the table's link does (the table's join() decides), so
+   * guesses are what is limited: an account's failed lookups, and all
+   * accounts' together (CODE_FAILS, CODE_FAILS_GLOBAL). Every miss (unknown,
+   * stale, full, closed, the asker's own) is the same frame, so a code
+   * cannot be probed for why it failed.
+   */
+  private async joinCode(ws: WebSocket, code: string) {
+    const { userId } = this.who(ws)
+    try {
+      await this.forUsers([userId], () => this.resolveCode(ws, userId, code))
+    } catch (error) {
+      // Never the code: ids and the error's name only.
+      logEvent('error', {
+        userId,
+        reason: 'join_code',
+        detail: describeError(error),
+      })
+      this.unavailable(ws)
+    }
+  }
+
+  private async resolveCode(ws: WebSocket, userId: string, code: string) {
+    // At a table already: back to it, as a queue request would be, and a
+    // lookup that costs nothing.
+    const active = await this.liveActive(userId)
+    if (active)
+      return this.send(ws, { t: 'matched', matchId: active, resumed: true })
+    const mine = await this.takeToken(
+      'codefail',
+      userId,
+      CODE_FAILS,
+      CODE_FAIL_WINDOW_MS,
+      false,
+    )
+    if (!mine) return this.tooManyCodes(ws)
+    const matchId = await this.openByCode(code, userId)
+    if (!matchId) {
+      // A miss spends from both buckets. With the lobby's dry the miss is
+      // refused rather than answered, but a hit is still served: a stranger's
+      // scan must not lock an honest friend out of a code they were given.
+      await this.takeToken('codefail', userId, CODE_FAILS, CODE_FAIL_WINDOW_MS)
+      const all = await this.takeToken(
+        'codefail',
+        null,
+        CODE_FAILS_GLOBAL,
+        CODE_FAIL_WINDOW_GLOBAL_MS,
+      )
+      // The last failure the lobby tolerates this minute: one line, no code.
+      if (all && all.tokens < 1)
+        logEvent('limit_hit', { code: 429, reason: 'code_scan' })
+      return all ? this.unavailable(ws) : this.tooManyCodes(ws)
+    }
+    // A hit costs nothing. The account stops looking for a heads-up opponent
+    // (as quick-sit does), and the seat is not taken here: the client opens
+    // the table, and its join() decides.
+    this.requests.delete(userId)
+    if (await this.ctx.storage.get(`queue:${userId}`)) {
+      await this.ctx.storage.delete(`queue:${userId}`)
+      await this.presence()
+    }
+    await this.dropRequest(userId)
+    this.send(ws, { t: 'matched', matchId, resumed: false })
+  }
+
+  private tooManyCodes(ws: WebSocket) {
+    this.reject(ws, 'rate_limited', 'Too many tries. Wait a few minutes.')
+  }
+
+  /**
+   * The table with this code that still waits for a guest, or null. The row
+   * must be fresh (the host's heartbeat), not the asker's own, and the table
+   * must say it is open: a game whose table filled or died, with the close
+   * lost on its way, is no hit; a dead one is deleted here, as `tables()`
+   * drops its stale entries.
+   */
+  private async openByCode(code: string, userId: string) {
+    const matchId = await this.ctx.storage.get<string>(`code:${code}`)
+    if (!matchId) return null
+    const game = await this.ctx.storage.get<OpenGame>(`open:${matchId}`)
+    if (
+      !game ||
+      game.code !== code ||
+      game.hostId === userId ||
+      !isFresh(game, this.clock())
+    )
+      return null
+    let state: Liveness
+    try {
+      state = await tableStub(this.env, matchId).liveness()
+    } catch (error) {
+      logEvent('error', {
+        matchId,
+        reason: 'join_code_liveness',
+        detail: describeError(error),
+      })
+      return null
+    }
+    if (state === 'over') await this.closeGame(matchId)
+    return state === 'open' ? matchId : null
+  }
+
+  /**
+   * `join_request`: ask the host of a listed game for the other seat. The
+   * handle can only ask: the host answers, and an accept sends the requester
+   * `matched`. At most one request is pending per account, and a host's
+   * decline sticks at the table. Under forUsers, like a claim, and so it
+   * must not itself wait on forUsers for the same account (the table's
+   * answerRequest, which it awaits, does not).
+   */
+  private async joinRequest(ws: WebSocket, gameId: string) {
+    const { userId, username } = this.who(ws)
+    try {
+      await this.forUsers([userId], () =>
+        this.requestSeat(ws, userId, username, gameId),
+      )
+    } catch (error) {
+      logEvent('error', {
+        userId,
+        reason: 'join_request',
+        detail: describeError(error),
+      })
+      this.unavailable(ws)
+    }
+  }
+
+  private async requestSeat(
+    ws: WebSocket,
+    userId: string,
+    username: string,
+    gameId: string,
+  ) {
+    if (
+      !(await this.takeToken(
+        'joinask',
+        userId,
+        JOIN_REQUESTS,
+        JOIN_REQUEST_WINDOW_MS,
+      ))
+    )
+      return this.reject(
+        ws,
+        'rate_limited',
+        'Too many requests. Wait a few minutes.',
+      )
+    const matchId = await this.ctx.storage.get<string>(`gameid:${gameId}`)
+    const game = matchId
+      ? await this.ctx.storage.get<OpenGame>(`open:${matchId}`)
+      : undefined
+    if (
+      !matchId ||
+      game?.gameId !== gameId ||
+      !isOffered(game, this.clock()) ||
+      game.hostId === userId
+    )
+      return this.unavailable(ws)
+    // A host with a game of their own open is not looking for one to join.
+    const t = this.clock()
+    if (
+      (await this.openRows()).some(
+        ([, g]) => g.hostId === userId && isFresh(g, t),
+      )
+    )
+      return this.unavailable(ws)
+    const active = await this.liveActive(userId)
+    if (active)
+      return this.send(ws, { t: 'matched', matchId: active, resumed: true })
+    // One pending request each: asking another game withdraws the first.
+    const key = `joinreq:${userId}`
+    const before = await this.ctx.storage.get<JoinRequest>(key)
+    if (before && before.matchId !== matchId)
+      this.cancelAt(before.matchId, userId)
+    // Written before the table is asked, so a host who answers at once finds
+    // the request; the table's answer can reach answerRequest before this
+    // call returns.
+    const at = this.clock()
+    await this.ctx.storage.put(key, {
+      matchId,
+      gameId,
+      at,
+    } satisfies JoinRequest)
+    let answer: 'ok' | 'declined' | 'no'
+    try {
+      answer = await tableStub(this.env, matchId).requestJoin(userId, username)
+    } catch (error) {
+      logEvent('error', {
+        matchId,
+        userId,
+        reason: 'request_join',
+        detail: describeError(error),
+      })
+      answer = 'no'
+    }
+    const kept = await this.ctx.storage.get<JoinRequest>(key)
+    if (answer !== 'ok') {
+      // Only the request just made: a newer one would have replaced it.
+      if (kept?.at === at) await this.ctx.storage.delete(key)
+      if (answer === 'no') await this.forgetIfOver(matchId)
+      return answer === 'declined'
+        ? this.send(ws, { t: 'join_status', state: 'declined' })
+        : this.unavailable(ws)
+    }
+    // The host answered while this waited, and the requester has the answer:
+    // `pending` after it would undo it.
+    if (!kept || kept.at !== at) return
+    this.send(ws, {
+      t: 'join_status',
+      state: 'pending',
+      expiresInMs: REQUEST_TTL_MS,
+    })
+  }
+
+  /** A game whose table is gone leaves the lobby, as `tables()` drops a stale entry. */
+  private async forgetIfOver(matchId: string) {
+    try {
+      if ((await tableStub(this.env, matchId).liveness()) === 'over')
+        await this.closeGame(matchId)
+    } catch {
+      // Left for GAME_STALE_MS.
+    }
+  }
+
+  /** `cancel_request`: withdraw the pending request, in line with asking it. */
+  private async cancelRequest(ws: WebSocket) {
+    const { userId } = this.who(ws)
+    await this.forUsers([userId], () => this.dropRequest(userId))
+  }
+
+  /**
+   * Withdraws `userId`'s pending join request, if any, and tells its table,
+   * best effort and not awaited: a lost cancel lapses at the table in
+   * REQUEST_TTL_MS.
+   */
+  private async dropRequest(userId: string) {
+    const key = `joinreq:${userId}`
+    const req = await this.ctx.storage.get<JoinRequest>(key)
+    if (!req) return
+    await this.ctx.storage.delete(key)
+    this.cancelAt(req.matchId, userId)
+  }
+
+  private cancelAt(matchId: string, userId: string) {
+    tableStub(this.env, matchId)
+      .cancelRequest(userId)
+      .catch((error) =>
+        logEvent('error', {
+          matchId,
+          reason: 'cancel_request',
+          detail: describeError(error),
+        }),
+      )
   }
 
   // ---- The six-table registry (RPC from tables; P2-08) -----------------------

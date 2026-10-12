@@ -76,6 +76,8 @@ type Seat = {
   pending: { reqId: string; sentAt: number } | null
   seq: number
   closed: boolean
+  /** When each `ping` not yet answered went out, oldest first. */
+  pings: number[]
 }
 
 /** Everything a pair saw of its current hand. */
@@ -96,6 +98,7 @@ class Run {
       hands: 0,
       target: options.hands,
       acks: [],
+      pings: [],
       failures: [],
       leaks: 0,
       commitments: 0,
@@ -154,11 +157,30 @@ class Run {
             headers: { Origin: this.options.target },
           } as unknown as string[],
         )
-        return { token, ws, seat: null, pending: null, seq: 0, closed: false }
+        return {
+          token,
+          ws,
+          seat: null,
+          pending: null,
+          seq: 0,
+          closed: false,
+          pings: [],
+        }
       })
+      // The page's own link check (src/net/heartbeat.ts): a `ping` a second
+      // per socket, whose round trip is the network leg of an ack, so the
+      // time the table itself took is the ack less this.
+      const pinger = setInterval(() => {
+        for (const s of seats)
+          if (s.ws.readyState === WebSocket.OPEN) {
+            s.pings.push(Date.now())
+            s.ws.send('ping')
+          }
+      }, 1000)
       const end = () => {
         if (done) return
         done = true
+        clearInterval(pinger)
         for (const s of seats) s.ws.close(1000, 'smoke done')
         resolve(finished)
       }
@@ -183,6 +205,12 @@ class Run {
           if (!done) end()
         }
         me.ws.onmessage = async (event) => {
+          if (event.data === 'pong') {
+            const sentAt = me.pings.shift()
+            if (sentAt !== undefined)
+              this.result.pings?.push(Date.now() - sentAt)
+            return
+          }
           const msg = JSON.parse(String(event.data)) as ServerMsg
           if (msg.seq < me.seq)
             this.fail(`${matchId}: seq went back ${me.seq} → ${msg.seq}`)
@@ -369,6 +397,12 @@ export async function main(argv: string[]) {
   console.log(
     `ack latency over ${r.acks.length} moves: p50 ${ms(50)} · p95 ${ms(95)} · p99 ${ms(99)} (limit p95 ${ACK_P95_LIMIT_MS} ms)`,
   )
+  if (r.pings?.length) {
+    const link = (p: number) => `${percentile(r.pings!, p)} ms`
+    console.log(
+      `link round trip over ${r.pings.length} pings: p50 ${link(50)} · p95 ${link(95)} (an ack is this plus the table's own time)`,
+    )
+  }
   console.log(
     `invariant failures ${r.failures.length} · leaks ${r.leaks} · commitments ${r.commitments}/${r.hands}`,
   )

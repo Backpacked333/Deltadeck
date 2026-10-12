@@ -1,4 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
+import { PING_EVERY_MS } from './heartbeat'
 import { INITIAL_LOBBY, LobbyConnection } from './lobbyClient'
 
 const noSubscription = () => () => {}
@@ -7,7 +8,7 @@ const noSubscription = () => () => {}
 export function useLobby(getToken: () => Promise<string | null>) {
   const [connection, setConnection] = useState<LobbyConnection | null>(null)
   useEffect(() => {
-    const next = new LobbyConnection(getToken)
+    const next = new LobbyConnection(getToken, { heartbeatMs: PING_EVERY_MS })
     setConnection(next)
     next.start()
     return () => next.stop()
