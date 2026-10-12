@@ -400,3 +400,22 @@ Executed locally with Node **24.21.0** against the repaired source, 2026-10-12:
 The remaining acceptance and release gates above are unchanged. These local
 results are not new evidence of production parity, real-device/browser recovery,
 operational performance or learner effectiveness.
+
+## Final independent review and parent follow-up
+
+Independent review accepted the local implementation at `694262e` after two
+repair rounds. It independently applied all 27 migrations and denied 24 direct
+rating/history DML statements under anon, authenticated and service roles;
+the prior zero-evidence rating forgery no longer worked. Its full frontend run
+passed **1,562 tests** (13 optional IndexedDB tests then separately enabled and
+passed), Worker run passed **529 tests**, and both typechecks, lint and build
+passed. This is local implementation acceptance, not Gate A release approval.
+
+The parent also repaired the nonblocking sign-out initialization race identified
+by that review: Retry and Export may acquire a later-ready sync only for the
+original account, and reject a replacement account/epoch. Three new component
+regressions cover late-ready retry, late-ready export without premature exit,
+and rejection of another account. The changed AccountPage, Session and bootstrap
+suites passed **36 tests**; both typechecks, lint, build and whitespace checks
+passed. Entry remains **146.1 kB gzip**. Recorded browser acceptance and CI follow
+on the combined revision; no production changes have been made.

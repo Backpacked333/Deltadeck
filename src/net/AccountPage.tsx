@@ -177,7 +177,7 @@ function CallbackFailed({
   )
 }
 
-/** How long sign-out waits for the account service before going anyway. */
+/** Maximum wait per save attempt before offering recovery choices. */
 export const SIGN_OUT_WAIT_MS = 3000
 
 /** Forgets this browser's account and its practice data, then starts afresh. */
@@ -209,19 +209,36 @@ async function leave(online: Online | null, sync: PracticeSync | null) {
 export function SignOut({ online }: { online: Online | null }) {
   const started = useRef(false)
   const sync = useRef(activeSync())
+  const account = useRef<string | null | undefined>(sync.current?.scope.accountId)
   const [problem, setProblem] = useState<string | null>(null)
   const [busy, setBusy] = useState(true)
   const [exported, setExported] = useState(false)
   const [discard, setDiscard] = useState(false)
+  const resolveSync = async () => {
+    if (!sync.current) {
+      const session = online ? await online.client.auth.getSession() : null
+      const accountId = session?.data.session?.user.id ?? null
+      if (account.current === undefined) account.current = accountId
+      const latest = activeSync()
+      if (account.current !== accountId || (latest && latest.scope.accountId !== account.current)) {
+        throw new Error('The account changed. Stay signed in and start sign-out again.')
+      }
+      if (accountId) sync.current = latest
+    } else if (activeSync() && activeSync() !== sync.current) {
+      throw new Error('The account changed. Stay signed in and start sign-out again.')
+    }
+    return sync.current
+  }
   const complete = async () => {
     setBusy(true)
-    try { await leave(online, sync.current) }
+    try { await leave(online, await resolveSync()) }
     catch { setProblem('Privacy cleanup failed. Private data may remain on this browser. Retry cleanup or clear this site’s data before leaving a shared device.'); setBusy(false) }
   }
   const retry = async () => {
     setBusy(true); setProblem(null)
     try {
-      const result = await sync.current?.flush(SIGN_OUT_WAIT_MS)
+      const current = await resolveSync()
+      const result = await current?.flush(SIGN_OUT_WAIT_MS)
       if (result?.status !== 'saved') {
         setProblem(`Account save is ${result?.status ?? 'unverified'}. ${result?.reasons.join(' ') ?? 'Account reconciliation has not completed.'}`)
         setBusy(false)
@@ -231,8 +248,9 @@ export function SignOut({ online }: { online: Online | null }) {
   const exportWork = async () => {
     setBusy(true)
     try {
-      if (!sync.current) throw new Error('Wait for the account to initialize before exporting.')
-      const blob = await sync.current.exportAccount()
+      const current = await resolveSync()
+      if (!current) throw new Error('Wait for the account to initialize before exporting.')
+      const blob = await current.exportAccount()
       const url = URL.createObjectURL(blob), a = document.createElement('a')
       a.href = url; a.download = `deltadeck-recovery-${Date.now()}.json`
       a.click(); setTimeout(() => URL.revokeObjectURL(url), 60_000)
