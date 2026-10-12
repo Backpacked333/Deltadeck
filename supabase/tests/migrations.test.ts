@@ -112,6 +112,7 @@ describe('migrations', () => {
       '20261012020000_verified_settlement.sql',
       '20261012030000_learning_evidence.sql',
       '20261012040000_learning_measurement.sql',
+      '20261012050000_rating_write_privileges.sql',
     ])
   })
 })

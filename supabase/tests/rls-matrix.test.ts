@@ -324,13 +324,13 @@ const EXPECTED: Record<string, Record<Who, Cell[]>> = {
   // The accuracy on every profile: anyone reads it, only the server's
   // refresh writes it (supabase/tests/accuracy.test.ts).
   'public.accuracy': { ...PUBLIC_READ, ...SERVICE },
-  // Ratings are public; only apply_rating writes them (ratings.test.ts).
-  'public.ratings': { ...PUBLIC_READ, ...SERVICE },
-  // Append-only for everyone: even the server's update and delete stop at
-  // the trigger (which raises its own error, so the cell reads 'allowed').
+  // F07: public reads; service writes must use the definer-owned rating gate
+  // or abandonment accounting, never direct DML (verified-settlement.test.ts).
+  'public.ratings': { ...PUBLIC_READ, service: [1, D, D, D] },
+  // F07: deny before append-only triggers, including forged history inserts.
   'public.rating_history': {
     ...PUBLIC_READ,
-    service: [1, 'ok', 'allowed', 'allowed'],
+    service: [1, D, D, D],
   },
   // The earlier app's learning tables: strictly per owner.
   'public.profiles': { ...OWN_ONLY, ...SERVICE },

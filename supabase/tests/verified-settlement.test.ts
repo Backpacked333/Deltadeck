@@ -1,7 +1,15 @@
 // @vitest-environment node
 import { readFileSync } from 'node:fs'
 import { PGlite } from '@electric-sql/pglite'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from 'vitest'
 import { migrationFiles, MIGRATIONS_DIR, SUPABASE_STUB } from './harness'
 import {
   handFixture,
@@ -124,6 +132,214 @@ async function rating(
     ...overrides,
   })
 }
+
+describe('F07 rating base-table write fence', () => {
+  const roles = ['anon', 'authenticated', 'service_role'] as const
+  const tables = ['public.ratings', 'public.rating_history'] as const
+  beforeEach(() => db.exec('begin'))
+  afterEach(() => db.exec('rollback'))
+
+  async function deniesWrite(
+    role: string,
+    sql: string,
+    params: unknown[] = [],
+    code = '42501',
+  ) {
+    await db.exec(`savepoint denied_write; set local role ${role}`)
+    try {
+      await expect(db.query(sql, params)).rejects.toMatchObject({ code })
+    } finally {
+      await db.exec(
+        'rollback to savepoint denied_write; release savepoint denied_write',
+      )
+    }
+  }
+
+  it('F07 final catalog allows reads but no table or column write privileges, including BYPASSRLS service_role', async () => {
+    expect(
+      (
+        await db.query<{ rolbypassrls: boolean }>(
+          "select rolbypassrls from pg_roles where rolname='service_role'",
+        )
+      ).rows[0].rolbypassrls,
+    ).toBe(true)
+    for (const role of roles) {
+      for (const table of tables) {
+        for (const permission of [
+          'SELECT',
+          'INSERT',
+          'UPDATE',
+          'DELETE',
+          'TRUNCATE',
+          'REFERENCES',
+          'TRIGGER',
+        ]) {
+          const { rows } = await db.query<{ allowed: boolean }>(
+            'select has_table_privilege($1,$2,$3) allowed',
+            [role, table, permission],
+          )
+          expect(rows[0].allowed, `${role} ${table} ${permission}`).toBe(
+            permission === 'SELECT',
+          )
+        }
+        for (const permission of ['INSERT', 'UPDATE', 'REFERENCES']) {
+          const { rows } = await db.query<{ allowed: boolean }>(
+            'select has_any_column_privilege($1,$2,$3) allowed',
+            [role, table, permission],
+          )
+          expect(rows[0].allowed, `${role} ${table} column ${permission}`).toBe(
+            false,
+          )
+        }
+      }
+    }
+  })
+
+  it('F07 reapplication also removes independent column grants, including PUBLIC', async () => {
+    await db.exec(`
+      grant insert(user_id), update(rating), references(user_id) on public.ratings
+        to public, anon, authenticated, service_role;
+      grant insert(user_id), update(after_rating), references(user_id) on public.rating_history
+        to public, anon, authenticated, service_role;
+    `)
+    const migration = readFileSync(
+      new URL('20261012050000_rating_write_privileges.sql', MIGRATIONS_DIR),
+      'utf8',
+    )
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await db.exec(migration)
+      for (const role of roles)
+        for (const table of tables)
+          for (const permission of ['INSERT', 'UPDATE', 'REFERENCES']) {
+            const { rows } = await db.query<{ allowed: boolean }>(
+              'select has_any_column_privilege($1,$2,$3) allowed',
+              [role, table, permission],
+            )
+            expect(
+              rows[0].allowed,
+              `${role} ${table} column ${permission}`,
+            ).toBe(false)
+          }
+    }
+  })
+
+  it.each(roles)(
+    'F07 %s can read both tables but direct DML is permission-denied',
+    async (role) => {
+      await db.query(
+        "insert into public.ratings(user_id,format) values($1,'6max') on conflict do nothing",
+        [USERS[0]],
+      )
+      await db.query(
+        "insert into public.rating_history(user_id,format,kind,before_rating,before_rd,before_sigma,after_rating,after_rd,after_sigma,model_version) values($1,'6max','reset',1500,350,.06,1500,350,.06,'test')",
+        [USERS[0]],
+      )
+      await db.exec(`set role ${role}`)
+      try {
+        for (const table of tables) {
+          const { rows } = await db.query(
+            `select * from ${table} where user_id=$1`,
+            [USERS[0]],
+          )
+          expect(rows.length).toBeGreaterThan(0)
+        }
+      } finally {
+        await db.exec('reset role')
+      }
+
+      await deniesWrite(
+        role,
+        "insert into public.ratings(user_id,format,rating) values($1,'6max',9999) on conflict(user_id,format) do update set rating=excluded.rating",
+        [USERS[0]],
+      )
+      await deniesWrite(
+        role,
+        "insert into public.rating_history(user_id,format,kind,before_rating,before_rd,before_sigma,after_rating,after_rd,after_sigma,model_version) values($1,'6max','reset',1500,350,.06,9999,350,.06,'forged')",
+        [USERS[0]],
+      )
+      await deniesWrite(
+        role,
+        'update public.ratings set rating=9999 where user_id=$1',
+        [USERS[0]],
+      )
+      await deniesWrite(role, 'delete from public.ratings where user_id=$1', [
+        USERS[0],
+      ])
+      // Empty predicates bypass row triggers, so these prove privileges, not the append-only guard.
+      await deniesWrite(
+        role,
+        'update public.rating_history set after_rating=9999 where false',
+      )
+      await deniesWrite(role, 'delete from public.rating_history where false')
+      for (const table of tables) await deniesWrite(role, `truncate ${table}`)
+    },
+  )
+
+  it('F07 service_role cannot fabricate a zero-evidence history and enter the duplicate-result path', async () => {
+    const id = matchId()
+    await rpc('record_match', {
+      id,
+      kind: 'hu-rated',
+      config: {},
+      players: USERS.map((userId, seat) => ({ userId, seat })),
+      result: {
+        reason: 'complete',
+        outcomeBySeat: { 0: 'draw', 1: 'draw' },
+        adjustedBySeat: { 0: 0, 1: 0 },
+      },
+    })
+    const payload = {
+      matchId: id,
+      format: 'hu-duplicate',
+      modelVersion: 'glicko2.v1',
+      players: USERS.map((userId, seat) => ({
+        userId,
+        seat,
+        outcome: 'draw',
+        version: 0,
+        rating: 9999,
+        rd: 300,
+        sigma: 0.06,
+      })),
+    }
+    await deniesWrite(
+      'service_role',
+      'select public.apply_rating($1::jsonb)',
+      [JSON.stringify(payload)],
+      'P0002',
+    )
+    await deniesWrite(
+      'service_role',
+      "insert into public.rating_history(user_id,format,kind,match_id,outcome,before_rating,before_rd,before_sigma,after_rating,after_rd,after_sigma,model_version) select user_id,'hu-duplicate','match',match_id,'draw',1500,350,.06,9999,300,.06,'glicko2.v1' from public.match_players where match_id=$1",
+      [id],
+    )
+    const { rows } = await db.query<{
+      hands: number
+      proofs: number
+      certificates: number
+      history: number
+    }>(
+      `select
+        (select count(*)::int from public.hands where match_id=$1) hands,
+        (select count(*)::int from private.terminal_proofs where match_id=$1) proofs,
+        (select count(*)::int from private.settlement_certificates where match_id=$1) certificates,
+        (select count(*)::int from public.rating_history where match_id=$1) history`,
+      [id],
+    )
+    expect(rows[0]).toEqual({
+      hands: 0,
+      proofs: 0,
+      certificates: 0,
+      history: 0,
+    })
+    await deniesWrite(
+      'service_role',
+      'select public.apply_rating($1::jsonb)',
+      [JSON.stringify(payload)],
+      'P0002',
+    )
+  })
+})
 
 describe('F07 SQL certificate fence', () => {
   it.each(['cancelled_before_deal', 'engine_fault'] as const)(

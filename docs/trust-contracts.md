@@ -502,6 +502,14 @@ Invalidate unfinalized certificates on source changes; an already applied histor
 immutable, flagged for separately approved dependency-aware correction, never applied twice.
 Do not expose a retained legacy SQL overload or writable base-table route around this gate.
 
+The F07 repair `20261012050000_rating_write_privileges.sql` makes `ratings` and
+`rating_history` SELECT-only for `anon`, `authenticated` and `service_role`,
+revoking both table and independent column privileges (including PUBLIC grants).
+`BYPASSRLS` does not bypass these ACLs. Definer-owned settlement and abandonment
+writers retain their owner access; no RPC signature or duplicate-result policy
+changes. Database owners/superusers remain a privileged operational boundary,
+not fenced clients. This migration does not certify or repair historical rows.
+
 Verifier writes durable settlement-ready job in same transaction as attestation/certificate
 state. Queue message is only a wakeup. Consumer + scheduled bounded catch-up scan converge
 after dropped/duplicate/reordered wakes. Live outbox continues archiving proof and hands;
@@ -873,6 +881,9 @@ All 22 baseline migration filenames (in execution order), with the defining/repl
 Integration status and actual tests are indexed in [trust-release-evidence.md](trust-release-evidence.md).
 The integration also adds `20261012040000_learning_measurement.sql` for qualified
 effort and server-issued delayed-check timing; this does not award retained status.
+The independent F07 repair adds `20261012050000_rating_write_privileges.sql` to
+close direct rating/history DML; local final-catalog and role-switched SQL tests
+exercise this migration after all prior migrations.
 
 New migrations in reserved order: `20261012010000_learning_revisions.sql` (sync),
 `20261012020000_verified_settlement.sql` (rating), `20261012030000_learning_evidence.sql`

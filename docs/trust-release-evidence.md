@@ -22,6 +22,65 @@ two-device account recovery, cloud CPU headroom and an elapsed human study are
 separate gates. Synthetic rating-season tests exercise mathematics/ordering as
 DB owner, not certification of 5,000 real poker matches.
 
+## Independent acceptance repair: F07 rating write privileges
+
+Repair branch: `devin/1791837388-rating-write-gate`, directly based on integrated
+revision `510d71752ad5d88a31c162cdf74d79c55bf52ff0`. Independent acceptance found
+that `service_role` could directly insert/update `ratings` and insert forged
+`rating_history` despite the certificate-gated RPC. This lane reproduced the
+failure locally and adds `20261012050000_rating_write_privileges.sql`; it has
+**not** applied the migration to any production or hosted database.
+
+- Both rating tables are SELECT-only for `anon`, `authenticated` and
+  `service_role`. The migration revokes PUBLIC and role-specific table grants
+  and independently granted column rights, then explicitly restores reads.
+- Authorized `SECURITY DEFINER` settlement and abandonment accounting retain
+  owner privileges. Certificate validation, optimistic rating versions, sorted
+  locks, duplicate-result semantics, RLS and append-only triggers are unchanged.
+  No client/Worker protocol, learning-sync or account-isolation behavior changes.
+- Six new F07 tests in `supabase/tests/verified-settlement.test.ts` cover the
+  final table/column ACL catalog; real SELECT and rejected INSERT/upsert,
+  UPDATE, DELETE and TRUNCATE as all three roles; zero-evidence forged history
+  blocked before it can enter the duplicate-result path; and idempotent
+  migration reapplication after independent column grants, including PUBLIC.
+  Empty UPDATE/DELETE predicates prove privilege denial rather than relying on
+  the row-level append-only trigger. Service-role tests use actual BYPASSRLS.
+- The three service-role/catalog regression tests fail with the new migration
+  omitted (rating upsert and forged history insertion succeed). Restoring
+  it passes the full 23-test settlement suite. The access matrix now requires
+  service-role DML denial, and the ordered migration inventory includes the
+  additive repair; neither fence was weakened to make old tests pass.
+
+Database owners/superusers and separately authorized admin operations are still
+trusted. The migration does not inspect, re-certify or alter pre-existing rating
+rows; it cannot establish whether the old privilege was ever misused. Deployed
+role memberships, ownership, grants and function-body parity require a separate
+authorized cutover check. A rollback must pause rating finalization, **not**
+re-grant the bypass. The parent still owns final browser acceptance and all
+previously listed production, real-device, performance and learning-efficacy
+gates. This repair performs no UI-driven testing or production access.
+
+### F07 execution record
+
+Local Node `v24.21.0`, npm `11.19.0`, lockfile installed with `npm ci`:
+
+| Check | Result on this repair branch |
+| --- | --- |
+| `npx vitest run supabase/tests` | **20 files, 197 tests passed**, including all 23 settlement tests and existing certified-rating/abandonment writer tests. Fresh PGlite applies every source migration. |
+| `npm run worker:test` | **33 files, 529 tests passed** in local workerd. The focused rating/settlement/archive run also passed 33 tests. |
+| `npm run typecheck`; `npm run typecheck:worker`; `npm run lint` | Passed. |
+| `npx prettier --check` for the three changed SQL test files | Passed. |
+| `npm run build` | Passed; entry `index-C4fTm6wG.js` **146.1 kB gzip** / 150 kB budget. Existing mixed static/dynamic solvency import warning remains. |
+| `git diff --check` | Passed. |
+
+The Worker run still emits test-double `supabase.test` DNS/internal-error and
+event-handler-return warnings despite passing; it is not deployed backend
+evidence. The root frontend suite, IndexedDB browser probes and application
+Playwright acceptance were **not rerun by this F07 lane**. Their older execution
+records below are historical, not results for this final revision. SQL tests
+use Supabase role/auth stubs in PGlite, not hosted PostgREST/Auth or independent
+PostgreSQL sessions.
+
 ## Independent acceptance repair: F08 and F10
 
 Repair branch: `devin/1791835277-evidence-repair`, directly based on integrated
@@ -115,7 +174,7 @@ not the proposed names in the original plan. Full suites include more cases.
 | F04 | `worker/test/live-trust.test.ts`: `F04_restore_zero_one_two_sockets retained=%i`; existing table/alarm/reconnect suites | Restoration with zero/one/two retained sockets, absence anchored durably. Real suspend/background/poor-network device acceptance remains. |
 | F05 | `worker/test/live-trust.test.ts`: `F05_host_absent_cancel_reclaims_membership; cancelled frames pass the allowlist`, `F05_cancel_races_first_deal returns game_started when the deal won`; client cancellation tests | Bounded server-owned absence and explicit cancellation outcome; first deal wins legitimately. |
 | F06 | `worker/test/live-trust.test.ts`: `F06_competing_invites_one_playable_table`, `F06_old_release_cannot_erase_new_generation`, `F06_uncommitted_local_fence_cannot_release_ownership`, `F06_crash_after_each_activation_step: reserve/prepare/commit/local-commit replay` | Reserve/prepare/commit/local-commit recovery, generation fencing; TTL is not release authority. |
-| F07 | `worker/test/settlement.test.ts`: exact equity replay, source substitution, zero/gapped manifest, missing archives, quarantine and bounded catch-up. `supabase/tests/verified-settlement.test.ts`: `requires current hand.v2 evidence; rates exactly once, with returned historical result`, `binds source tokens and invalidates certificates on edited luck or private evidence` | Current hand receipts, terminal proof, complete manifest and certificate required by SQL rating gate. Five-minute scheduled catch-up declared/tested. Cloud preflop CPU and queue/backlog SLO remain unmeasured. |
+| F07 | `worker/test/settlement.test.ts`: exact equity replay, source substitution, zero/gapped manifest, missing archives, quarantine and bounded catch-up. `supabase/tests/verified-settlement.test.ts`: certificate, source-token and immutable duplicate-result checks; `F07 rating base-table write fence` tests final catalog, role-switched DML denial, PUBLIC/column grants and forged zero-evidence history. | Current hand receipts, terminal proof, complete manifest and certificate required by SQL rating gate; service_role has no direct rating/history write bypass. Five-minute scheduled catch-up declared/tested. Cloud preflop CPU and queue/backlog SLO remain unmeasured. |
 | F08 | `src/net/sync.test.ts`: `F08_provisional_final_overlap_drains_without_edit`, changed curriculum during ACK, wrong digest, quota/size cap; `supabase/tests/learning-revisions.test.ts`; `src/net/syncOutbox.test.ts` | Exact digest/revision/generation ACK only, stable retry ID, blocked data exportable, real IndexedDB transaction probes. |
 | F09 | `src/net/sync.test.ts`: `F09_both_device_arrival_orders_preserve_or_conflict (%s)`; SQL CAS and deletion generation tests; `src/curriculum/core/integration.test.ts` | Concurrent curriculum snapshots preserve an explicit conflict; device timestamp does not silently choose a winner. Live multi-device Supabase exercise deferred. |
 | F10 | `src/net/Session.test.tsx`: `F10 failed first pull never calls ready and exposes unverified state`; `src/net/AccountPage.test.tsx`: failed initial pull, export failure, storage removal failure, explicit discard; `src/components/progress/ProgressView.test.tsx`: no blanket saved claim | Account/epoch-fenced producers, sign-out participant barrier, retry/export/discard; schema-unsupported account E2E explicitly confirms discard. No automatic data loss masquerading as save success. |
@@ -314,7 +373,7 @@ learning evidence remain separate constructs.
   runtime claim is inferred from these logs.
 - No active Git pre-commit hook was present (`.git/hooks` contains samples only).
 
-## Final independent-repair execution record
+## F08/F10 independent-repair execution record (prior revision)
 
 Executed locally with Node **24.21.0** against the repaired source, 2026-10-12:
 
