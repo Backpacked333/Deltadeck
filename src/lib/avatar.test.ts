@@ -66,7 +66,7 @@ describe('resizeToWebp', () => {
       /image file/,
     )
     await expect(resizeToWebp(photo(MAX_INPUT_BYTES + 1))).rejects.toThrow(
-      /over 5 MB/,
+      /over 100 MB/,
     )
     expect(drawImage).not.toHaveBeenCalled()
   })
