@@ -21,12 +21,12 @@ import type { Rating } from '../../src/rating/glicko2'
 import type { RatingChange, ServerMsg } from '../../src/shared/protocol'
 import { forgetUsernames } from '../src/auth'
 import { RATED_CONFIG } from '../src/rated'
-import { NEXT_HAND_MS } from '../src/table'
 import type { InitBody, TableDO } from '../src/table'
 import { checkFrame, checkFrames, FLOW_TYPES } from './frames'
 import {
   connect,
   elapse,
+  elapseToNextDeal,
   freezeClock,
   isState,
   move,
@@ -186,6 +186,7 @@ async function until(test: () => boolean, ms = 20_000) {
 /** A rated table as the lobby makes one; both seated unless `alone`. */
 async function rated(alone = false) {
   const matchId = crypto.randomUUID()
+  await freezeClock(matchId, T0)
   const body: InitBody = {
     matchId,
     creator: { userId: ALICE, username: 'alice' },
@@ -217,7 +218,7 @@ const passive = (hand: HandState): PlayerAction =>
 const raiseTo = (to: number) => (): PlayerAction => ({ type: 'raise', to })
 
 async function nextHand(matchId: string, alice: Client, handNo: number) {
-  await elapse(matchId, NEXT_HAND_MS)
+  await elapseToNextDeal(matchId)
   await alice.next(isState(handNo))
 }
 
@@ -267,7 +268,7 @@ describe('the rating update', () => {
         await move(matchId, seats, hand!.toAct === 1 ? fold : passive)
       }
     }
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await alice.next((f) => f.t === 'match_end')
     await until(() => !!ratingOf(alice) && !!ratingOf(seats[1]))
 

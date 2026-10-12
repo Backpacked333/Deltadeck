@@ -13,13 +13,13 @@ import type { HandState, PlayerAction, SeatId } from '../../src/engine/types'
 import type { ServerMsg } from '../../src/shared/protocol'
 import { forgetUsernames } from '../src/auth'
 import { GRACE_MS, RATED_CONFIG } from '../src/rated'
-import { NEXT_HAND_MS } from '../src/table'
 import type { InitBody } from '../src/table'
 import { analysisKeys, checkFrames, FLOW_TYPES } from './frames'
 import {
   bySeat,
   connect,
   elapse,
+  elapseToNextDeal,
   freezeClock,
   isState,
   move,
@@ -106,7 +106,7 @@ beforeAll(async () => {
     dealt[handNo] = holesOf((await peek(matchId)).hand!)
   }
   const nextHand = async (handNo: number) => {
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await deal(handNo)
   }
   const playOut = async (choose: (hand: HandState) => PlayerAction) => {
@@ -176,7 +176,7 @@ beforeAll(async () => {
     if (n > 4) await nextHand(n)
     await playOut((hand) => (hand.toAct === 1 ? fold() : passive(hand)))
   }
-  await elapse(matchId, NEXT_HAND_MS)
+  await elapseToNextDeal(matchId)
   await alice2.next((f) => f.t === 'match_end')
   await bob2.next((f) => f.t === 'match_end')
 

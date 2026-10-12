@@ -442,7 +442,6 @@ describe('POST /api/matches', () => {
     expect(together).toHaveLength(1)
     expect(together[0].sort()).toEqual(
       [
-        `active:mk-c`,
         `code:${code}`,
         `creates:${new Date().toISOString().slice(0, 10)}:mk-c`,
         `gameid:${gameId}`,
@@ -1783,21 +1782,24 @@ describe('the seat is decided at the table', () => {
 
   it('a stranger whose claim was under way when the host accepted is refused, and the claim is given back', async () => {
     const game = await openGame('race-host')
-    const claim = LobbyDO.prototype.claim
+    const claim = LobbyDO.prototype.reserveActivation
     let entered = false
     let letGo: () => void = () => {}
     const held = new Promise<void>((resolve) => (letGo = resolve))
-    vi.spyOn(LobbyDO.prototype, 'claim').mockImplementation(async function (
-      this: LobbyDO,
-      userId: string,
-      matchId: string,
-    ) {
-      if (userId === 'race-carol') {
-        entered = true
-        await held
-      }
-      return claim.call(this, userId, matchId)
-    })
+    vi.spyOn(LobbyDO.prototype, 'reserveActivation').mockImplementation(
+      async function (
+        this: LobbyDO,
+        matchId: string,
+        users: string[],
+        id: string,
+      ) {
+        if (users.includes('race-carol')) {
+          entered = true
+          await held
+        }
+        return claim.call(this, matchId, users, id)
+      },
+    )
     // Carol is through the table’s first check and waits on the lobby...
     const carol = tryConnect(game.matchId, 'race-carol')
     await eventually(async () => entered)

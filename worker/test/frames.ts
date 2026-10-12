@@ -66,6 +66,8 @@ const allOf =
  * `npm run typecheck:worker`, and checkFrame refuses a code not listed.
  */
 export const ERROR_CODES = allOf<ErrorCode>()([
+  'upgrade_required',
+  'rating_unavailable',
   'not_your_turn',
   'illegal',
   'stale',
@@ -106,6 +108,26 @@ const LOBBY_ERROR_CODES: ErrorCode[] = ['tables_full']
 
 // Exactly the keys each frame type may carry (optional ones marked '?').
 export const FRAME_KEYS: Record<ServerMsg['t'], string[]> = {
+  command_outcome: keysOf<Msg<'command_outcome'>>()([
+    't',
+    'v',
+    'commandId',
+    'disposition',
+    'effect',
+    'stateVersion',
+    'reason',
+    'scope',
+    'seq',
+    'matchId',
+  ]),
+  cancel_start_result: keysOf<Msg<'cancel_start_result'>>()([
+    't',
+    'commandId',
+    'status',
+    'stateVersion',
+    'seq',
+    'matchId',
+  ]),
   welcome: keysOf<Msg<'welcome'>>()([
     't',
     'seq',
@@ -114,6 +136,10 @@ export const FRAME_KEYS: Record<ServerMsg['t'], string[]> = {
     'seat',
     'table',
     'view',
+    'ownControl?',
+    'completion?',
+    'start?',
+    'presentation?',
   ]),
   state: keysOf<Msg<'state'>>()([
     't',
@@ -122,6 +148,10 @@ export const FRAME_KEYS: Record<ServerMsg['t'], string[]> = {
     'serverNow',
     'table',
     'view',
+    'ownControl?',
+    'completion?',
+    'start?',
+    'presentation?',
   ]),
   // Six-casual adds `seats` (each dealt seat's stack, by seat number) and
   // the blind seats: all public at the deal (six-only, RULES).
@@ -144,6 +174,7 @@ export const FRAME_KEYS: Record<ServerMsg['t'], string[]> = {
     'matchId',
     'handNo',
     'record',
+    'completion?',
   ]),
   // `own`: this seat's two hole slots, opened for this seat only.
   reveal: keysOf<Msg<'reveal'>>()([
@@ -372,7 +403,8 @@ const SLOT_KEYS = keysOf<Msg<'reveal'>['slots'][number]>()([
   'salt',
 ])
 /** Keys that would mean a hidden card or a secret is on the wire. */
-const FORBIDDEN_KEYS = /^(deck|secret|holes|holesByUser|salts?Secret|hand)$/
+const FORBIDDEN_KEYS =
+  /^(deck|secret|holes|holesByUser|salts?Secret|terminalProof|completedHands|timeoutEvidence|absences|interruptedArchive|archiveDigest|recordDigest)$/
 /** Keys that would mean analysis is on the wire (the lab as RTA). */
 const ANALYSIS_KEYS =
   /^(equity|equities|ev|evs|evLost|ev_lost|callEV|raiseEV|range|ranges|grade|grades|accuracy|luck|allInAt|bestKind|foldProbability|breakEven)$/i
@@ -403,8 +435,26 @@ function keysMatching(test: RegExp, value: unknown, path = ''): string[] {
 }
 
 /** Paths of keys, at any depth, that name a hidden card or a secret. */
-export const forbiddenKeys = (value: unknown) =>
-  keysMatching(FORBIDDEN_KEYS, value)
+export const forbiddenKeys = (value: unknown) => [
+  ...keysMatching(FORBIDDEN_KEYS, value),
+  ...invalidHandKeys(value),
+]
+
+function invalidHandKeys(value: unknown, path = ''): string[] {
+  if (Array.isArray(value))
+    return value.flatMap((v, i) => invalidHandKeys(v, `${path}[${i}]`))
+  if (!value || typeof value !== 'object') return []
+  return Object.entries(value).flatMap(([k, v]) => [
+    ...(k === 'hand' &&
+    v !== null &&
+    (!v ||
+      typeof v !== 'object' ||
+      Object.keys(v).sort().join() !== 'handNo,matchId,tableId')
+      ? [`${path}.hand`]
+      : []),
+    ...invalidHandKeys(v, `${path}.${k}`),
+  ])
+}
 
 /** Paths of keys, at any depth, that name an analysis value. */
 export const analysisKeys = (value: unknown) =>
@@ -422,6 +472,65 @@ export function checkFrame(f: ServerMsg, kind: MatchKind = 'hu-casual') {
   expectKeys(f, forKind(FRAME_KEYS[f.t], six, rules), f.t)
   expect(forbiddenKeys(f), `${f.t}: forbidden keys`).toEqual([])
   if (f.t === 'welcome' || f.t === 'state') {
+    if (f.ownControl) {
+      expectKeys(
+        f.ownControl,
+        [
+          'scope',
+          'stateVersion',
+          'pendingIntent',
+          'standing',
+          'commandOutcomes',
+        ],
+        `${f.t}.ownControl`,
+      )
+      if (f.ownControl.scope)
+        expectKeys(
+          f.ownControl.scope,
+          [
+            'tableId',
+            'activationId',
+            'membershipGeneration',
+            'seat',
+            'seatGeneration',
+          ],
+          'scope',
+        )
+      if (f.ownControl.pendingIntent)
+        expectKeys(
+          f.ownControl.pendingIntent,
+          ['commandId', 'kind', 'acceptedAtVersion', 'appliesAfter'],
+          'pendingIntent',
+        )
+      for (const o of f.ownControl.commandOutcomes)
+        expectKeys(
+          o,
+          [
+            't',
+            'v',
+            'commandId',
+            'disposition',
+            'effect',
+            'stateVersion',
+            'reason',
+            'scope',
+          ],
+          'commandOutcome',
+        )
+    }
+    if (f.presentation) {
+      expectKeys(
+        f.presentation,
+        ['completion', 'currentDecision', 'serverNow'],
+        'presentation',
+      )
+      if (f.presentation.currentDecision)
+        expectKeys(
+          f.presentation.currentDecision,
+          ['decision', 'stateVersion', 'startedAt', 'deadlineAt'],
+          'currentDecision',
+        )
+    }
     expect(f.table.kind === 'six-casual', `${f.t}.table.kind`).toBe(six)
     // Only a six table has sockets without a seat (welcome.seat null).
     if (f.t === 'welcome' && !six) expect(f.seat, 'welcome.seat').not.toBeNull()
@@ -558,6 +667,7 @@ export function checkFrames(frames: ServerMsg[], kind?: MatchKind) {
  * test file its own copy of this module and runs the files in parallel.
  */
 export const FLOW_TYPES = {
+  cancelStart: ['welcome', 'state', 'match_end', 'cancel_start_result'],
   /** leaks.test.ts: a casual match with a showdown, a fold and junk. */
   casual: [
     'welcome',
@@ -598,18 +708,42 @@ export const FLOW_TYPES = {
    * six.test.ts: stands mid-hand and between hands, a re-sit refused for
    * its cooldown, and a stand from a socket without a seat.
    */
-  stand: ['welcome', 'state', 'hand_start', 'hand_end', 'reveal', 'error'],
+  stand: [
+    'welcome',
+    'state',
+    'hand_start',
+    'hand_end',
+    'reveal',
+    'error',
+    'command_outcome',
+  ],
   /**
    * six.test.ts: rebuys refused (no seat, in the hand, not below 100 bb)
    * and granted between hands, seen by a socket without a seat too.
    */
-  rebuy: ['welcome', 'state', 'hand_start', 'hand_end', 'reveal', 'error'],
+  rebuy: [
+    'welcome',
+    'state',
+    'hand_start',
+    'hand_end',
+    'reveal',
+    'error',
+    'command_outcome',
+  ],
   /**
    * six-sitout.test.ts: sit_out and sit_in refused without a seat, a
    * sit_out during a hand, a bust and its no_chips sit_in, and a sit_in
    * that deals at a waiting table, seen by a socket without a seat too.
    */
-  sitOut: ['welcome', 'state', 'hand_start', 'hand_end', 'reveal', 'error'],
+  sitOut: [
+    'welcome',
+    'state',
+    'hand_start',
+    'hand_end',
+    'reveal',
+    'error',
+    'command_outcome',
+  ],
   /**
    * six-reconnect.test.ts: a player dealt into a hand, one seated but not
    * dealt in and a socket without a seat drop during it and come back

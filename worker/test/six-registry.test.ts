@@ -42,6 +42,7 @@ import {
   createMatch,
   createTable,
   elapse,
+  elapseToNextDeal,
   eventually,
   freezeClock,
   isState,
@@ -107,7 +108,12 @@ async function slowLobby(matchId: string) {
     const lobbyOf = (id: DurableObjectId) => {
       const lobby = real.get(id, { locationHint: 'enam' })
       return {
-        claim: (userId: string, table: string) => lobby.claim(userId, table),
+        reserveActivation: (table: string, users: string[], id: string) =>
+          lobby.reserveActivation(table, users, id),
+        commitActivation: (id: string) => lobby.commitActivation(id),
+        releaseMembership: (
+          refs: Parameters<typeof lobby.releaseMembership>[0],
+        ) => lobby.releaseMembership(refs),
         release: (userIds: string[], table: string) =>
           lobby.release(userIds, table),
         reportTable: async (tableId: string, report: TableReport) => {
@@ -211,7 +217,7 @@ const potOf = (hand: HandState) =>
 
 /** The next deal is due: the clock moves past the pause after a hand. */
 async function dealNext(matchId: string, client: Client, handNo: number) {
-  await elapse(matchId, NEXT_HAND_MS)
+  await elapseToNextDeal(matchId)
   await client.next(isState(handNo))
 }
 
@@ -380,7 +386,10 @@ describe('reporting to the lobby', () => {
     await settled(matchId)
     expect(sent(matchId)).toEqual([counts(1, null, 0), counts(2, 20, 2)])
     expect(await listingOf(matchId)).toMatchObject({ pending: false })
-    // 30 s more, before any alarm: A stands, and the stand itself reports.
+    // Keep the table between hands even when the due deal is reconciled.
+    await sitOut(b)
+    await elapseToNextDeal(matchId)
+    // 30 s more: A stands, and the stand itself reports.
     await setClock(matchId, (await clockOf(matchId)) + REPORT_MS)
     expect(await standUp(a)).toMatchObject({ seat: null })
     await settled(matchId)
@@ -396,7 +405,7 @@ describe('reporting to the lobby', () => {
     await playOut(matchId, { 0: a, 2: b }, fold)
     // B sits out between hands; the next deal finds one player, and waits.
     await sitOut(b)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).match.status).toBe('waiting')
     // The first alarm after the window sends what was held, and leaves
     // nothing held.
@@ -484,15 +493,15 @@ describe('reporting to the lobby', () => {
       zero.stack += two.stack - 10
       two.stack = 10
     })
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     const two = (await peek(matchId)).hand!
     expect(two.config.handNo).toBe(2)
     expect(two.actions).toEqual([])
     expect(two.street).toBe('showdown')
     expect(potOf(two)).toBe(20)
-    // After the window C sits, which reports before any other hand is
-    // dealt (one that split hand 2's pot could deal hand 3 over at the
-    // deal too): the average is over both hands, (40 + 20) / 2.
+    // Keep the due next-deal reconciliation from completing another hand.
+    await sitOut(a)
+    // After the window C sits: the average is (40 + 20) / 2.
     await setClock(matchId, (await clockOf(matchId)) + REPORT_MS)
     await sitDown(matchId, 'deal-c', 4)
     await settled(matchId)
@@ -519,7 +528,7 @@ describe('reporting to the lobby', () => {
     // (its storage is wiped at the end, which would hide a stray key).
     expect((await storageOf(matchId)).keys).not.toContain('listing')
     // A heads-up match ends at the deal after its last hand.
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await a.next((f) => f.t === 'match_end')
     await freezeClock(matchId)
     await elapse(matchId, IDLE_MS)
@@ -592,7 +601,7 @@ describe('leaving the list', () => {
     await playOut(matchId, { 1: a, 4: b }, fold)
     await standUp(a)
     await standUp(b)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).match.status).toBe('waiting')
     // IDLE_MS on, the session ends; the table stays IDLE_MS more, listed
     // with nobody seated (quick-sit may still send a player there). The
@@ -754,7 +763,7 @@ describe('leaving the list', () => {
     await settled(matchId)
     expect(await entryOf(matchId)).toBeDefined()
     await playOut(matchId, { 0: a, 3: b }, fold)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await a.next((f) => f.t === 'match_end')
     // The removal follows the lobby's release; once it is sent, whatever
     // the table sends to the list has landed, and the table is not on it.
@@ -777,7 +786,7 @@ describe('leaving the list', () => {
     // lobby has not answered; the next deal halts the table.
     await setClock(matchId, (await clockOf(matchId)) + REPORT_MS)
     await playOut(matchId, { 0: a, 3: b }, fold)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await a.next((f) => f.t === 'match_end')
     await until(
       'the table asked to leave the list',
@@ -922,13 +931,13 @@ describe('when the lobby fails', () => {
     // waits behind it. 30 s on, hand 1 ends with a report due.
     await setClock(matchId, (await clockOf(matchId)) + REPORT_MS)
     await promptly('hand 1', playOut(matchId, seats, fold))
-    await promptly('the alarm that deals hand 2', elapse(matchId, NEXT_HAND_MS))
+    await promptly('the alarm that deals hand 2', elapseToNextDeal(matchId))
     await a.next(isState(2))
     // Hand 2 ends inside the window, held; 30 s on, the alarm that deals
     // hand 3 sends it, and completes all the same.
     await promptly('hand 2', playOut(matchId, seats, fold))
     await setClock(matchId, (await clockOf(matchId)) + REPORT_MS)
-    await promptly('the alarm that deals hand 3', elapse(matchId, NEXT_HAND_MS))
+    await promptly('the alarm that deals hand 3', elapseToNextDeal(matchId))
     await a.next(isState(3))
     expect((await peek(matchId)).match.status).toBe('playing')
     expect(lobby.seen.reports).toBe(1)
@@ -1024,7 +1033,7 @@ describe('restarts and sessions', () => {
     // B stands; the table waits, and IDLE_MS on its session ends (the idle
     // check that ends it refreshes the entry).
     await standUp(b)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await elapse(matchId, IDLE_MS)
     const { match } = await peek(matchId)
     expect(match as unknown as { sessionOver?: boolean }).toMatchObject({

@@ -17,6 +17,8 @@ import {
 } from 'vitest'
 import { dealSlots, fromBase64, verifyDeal } from '../../src/engine/deck'
 import type { HandRecordV1 } from '../../src/shared/protocol'
+import type { TerminalProofV1 } from '../../src/shared/protocol'
+import { evidenceDigest } from '../src/live-evidence'
 import { forgetUsernames } from '../src/auth'
 import { START_WITHIN_MS } from '../src/lobby'
 import { IDLE_MS } from '../src/deadlines'
@@ -161,7 +163,7 @@ describe('the archive', () => {
     const { matchId, seats } = await table(1)
     await foldHand(matchId, seats)
     await elapse(matchId, NEXT_HAND_MS)
-    await until(() => calls.length === 3)
+    await until(() => calls.length === 4)
     const secret = 'sb_secret_test'
     const carrying = sent.filter(
       (r) =>
@@ -176,7 +178,7 @@ describe('the archive', () => {
     for (const r of carrying)
       expect(r.url).toMatch(
         new RegExp(
-          `^${env.SUPABASE_URL}/rest/v1/rpc/(record_(match|hand|incident)|audit_hand|verify_hand)$`,
+          `^${env.SUPABASE_URL}/rest/v1/rpc/(record_(match|hand|incident|terminal)|audit_hand|verify_hand)$`,
         ),
       )
     // Username lookups go out with the publishable key, never the secret.
@@ -195,13 +197,14 @@ describe('the archive', () => {
     await foldHand(matchId, seats)
     await until(() => calls.length === 3)
     await elapse(matchId, NEXT_HAND_MS) // no hand 3: the match ends
-    await until(() => calls.length === 4)
+    await until(() => calls.length === 5)
 
     expect(calls.map((c) => c.rpc)).toEqual([
       'record_match',
       'record_hand',
       'record_hand',
       'record_match',
+      'record_terminal',
     ])
     expect(calls[0].p).toMatchObject({
       id: matchId,
@@ -243,6 +246,19 @@ describe('the archive', () => {
     ).toBe(true)
 
     const end = calls[3].p
+    const proof = calls[4].p.proof as TerminalProofV1
+    expect(proof).toMatchObject({
+      reason: 'complete',
+      cause: 'hand_limit',
+      matchId,
+    })
+    expect(proof.completedHands.map((entry) => entry.handNo)).toEqual([1, 2])
+    for (const [i, entry] of proof.completedHands.entries()) {
+      expect(entry.recordDigest).toBe(
+        await evidenceDigest(calls[i + 1].p.record),
+      )
+      expect(entry.archiveDigest).toBe(await evidenceDigest(calls[i + 1].p))
+    }
     expect(end.result).toMatchObject({ reason: 'complete' })
     expect(end.timeouts).toEqual({ 0: 0, 1: 0 })
     expect(await outbox(matchId)).toEqual([])
@@ -269,6 +285,7 @@ describe('the archive', () => {
       'record_match',
       'record_hand',
       'record_match',
+      'record_terminal',
     ])
     expect(await outbox(matchId)).toEqual([])
   })
@@ -337,7 +354,7 @@ describe('the archive', () => {
     await connect(matchId, ALICE)
     await freezeClock(matchId)
     await elapse(matchId, START_WITHIN_MS)
-    await until(() => calls.length === 1)
+    await until(() => calls.length === 2)
     expect(calls[0]).toMatchObject({
       rpc: 'record_match',
       p: {
@@ -364,12 +381,13 @@ describe('the archive', () => {
       'outbox:0001:hand',
       'outbox:0001:verify',
       'outbox:9999:end',
+      'outbox:9999:proof',
     ])
     expect((await peek(matchId)).match?.status).toBe('finished')
     failing = false
     // The next retry empties the outbox; the next idle check cleans up.
     await elapse(matchId, 300_000)
-    await until(() => calls.length === 3)
+    await until(() => calls.length === 4)
     await elapse(matchId, IDLE_MS)
     expect(await storageOf(matchId)).toEqual({ keys: [], alarm: null })
   })
@@ -407,6 +425,7 @@ describe('the archive', () => {
       ['record_match', null],
       ['record_hand', 2],
       ['record_match', 2],
+      ['record_terminal', null],
       ['record_incident', 1],
     ])
     const incident = calls.find((c) => c.rpc === 'record_incident')!.p
@@ -426,6 +445,40 @@ describe('the archive', () => {
     expect(toQueue.map((m) => m.handNo)).toEqual([2])
     expect(refusals).toBe(12)
     expect(await outbox(matchId)).toEqual([])
+  })
+
+  it('never parks terminal proof or skips past it to rating after repeated permanent refusals', async () => {
+    let refusals = 0
+    respond = (rpc) => {
+      if (rpc !== 'record_terminal') return null
+      refusals++
+      return Response.json({ code: 'PGRST202' }, { status: 404 })
+    }
+    const { matchId, seats } = await table(1)
+    await foldHand(matchId, seats)
+    await elapse(matchId, NEXT_HAND_MS)
+    await seats[0].next((f) => f.t === 'match_end')
+    await until(() => refusals > 0)
+    const rating = {
+      rpc: 'apply_rating',
+      body: { matchId, players: [], finishedAt: 0 },
+      attempts: 0,
+    }
+    await runInDurableObject(stub(matchId), async (_table: TableDO, state) => {
+      await state.storage.put('outbox:9999:rate', rating)
+    })
+    for (let i = 0; i < 13; i++) {
+      const before = refusals
+      await elapse(matchId, 300_000)
+      await until(() => refusals > before)
+    }
+    const pending = new Map(await outbox(matchId))
+    expect(pending.get('outbox:9999:proof')).toMatchObject({
+      rpc: 'record_terminal',
+      refused: expect.any(Number),
+    })
+    expect(pending.get('outbox:9999:rate')).toEqual(rating)
+    expect((await storageOf(matchId)).keys).not.toContain('parked:9999:proof')
   })
 
   it('reports each parked call of a match separately', async () => {

@@ -76,6 +76,7 @@ beforeAll(() => {
       const p = JSON.parse(String(init!.body)).p
       switch (fn) {
         case 'record_match':
+        case 'record_terminal':
           return new Response(null, { status: 204 })
         case 'record_hand':
           fake.archived.push(p.id)
@@ -209,6 +210,7 @@ describe('the hand queue, end to end', () => {
       'outbox:0002:hand',
       'outbox:0002:verify',
       'outbox:9999:end',
+      'outbox:9999:proof',
     ])
     fake.down = false
     await elapse(matchId, 300_000)

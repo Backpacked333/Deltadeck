@@ -37,6 +37,7 @@ import {
   createMatch,
   createTable,
   elapse,
+  elapseToNextDeal,
   freezeClock,
   isState,
   lobby,
@@ -178,7 +179,7 @@ async function nextHand(
   const handNo = ended.config.handNo
   const first = Object.values(clients)[0]
   await first.next((f) => f.t === 'reveal' && f.handNo === handNo)
-  await elapse(matchId, NEXT_HAND_MS)
+  await elapseToNextDeal(matchId)
   await first.next(isState(handNo + 1))
   return ended
 }
@@ -283,7 +284,7 @@ describe('sitting down at a six table', () => {
     const reveal = await c.next((f) => f.t === 'reveal' && f.handNo === 1)
     expect(reveal.t === 'reveal' && reveal.own).toBeUndefined()
 
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await c.next(isState(2))
     const two = (await peek(matchId)).hand!
     // Dealt in at 100 bb, with the others' stacks carried from hand 1.
@@ -613,7 +614,9 @@ describe('six seats before showdown', () => {
         out.push(
           JSON.stringify(f)
             .replaceAll(f.matchId, '<match>')
-            .replace(/[0-9a-f]{64}/g, '<commitment>'),
+            .replace(/[0-9a-f]{64}/g, '<commitment>')
+            .replace(/"activationId":"[^"]+"/g, '"activationId":"<activation>"')
+            .replace(/"membershipGeneration":\d+/g, '"membershipGeneration":1'),
         )
       }
       return out
@@ -689,7 +692,7 @@ describe('a six table between players', () => {
       await new Promise((r) => setTimeout(r, 5))
     }
     // Both gone: the next deal waits instead of playing hands by timeout.
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     let { match } = await peek(matchId)
     expect(match.status).toBe('waiting')
     expect(match.handNo).toBe(1)
@@ -721,7 +724,7 @@ describe('a six table between players', () => {
       winner.stack += loser.stack
       loser.stack = 0
     })
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     const { match } = await peek(matchId)
     expect(match.status).toBe('waiting')
     const stacks = () =>
@@ -816,7 +819,7 @@ describe('standing up at a six table', () => {
 
     // Free now: a new player takes it and is dealt in at hand 3.
     expect(await trySit(next, 2)).toMatchObject({ t: 'welcome', seat: 2 })
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     const three = (await peek(matchId)).hand!
     expect(three.config.seats.map((s) => s.seat)).toEqual([0, 2, 4])
     expect(clients[2].frames.some((f) => f.t === 'hand_start')).toBe(true)
@@ -951,7 +954,7 @@ describe('standing up at a six table', () => {
     expect(again.closed).toBeNull()
 
     // Hand 3 deals the new player its own cards in seat 1.
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     const three = (await peek(matchId)).hand!
     await again.next(isState(3))
     const mine = viewsOf(again.frames, 3).at(-1)!
@@ -1151,11 +1154,19 @@ describe('standing up at a six table', () => {
       const lobbyOf = (id: DurableObjectId) => {
         const lobby = real.get(id, { locationHint: 'enam' })
         return {
-          claim: async (userId: string, table: string) => {
-            const granted = await lobby.claim(userId, table)
-            asked.push(await instance.liveness(userId))
+          reserveActivation: async (
+            table: string,
+            userIds: string[],
+            id: string,
+          ) => {
+            const granted = await lobby.reserveActivation(table, userIds, id)
+            asked.push(await instance.liveness(userIds[0]))
             return granted
           },
+          commitActivation: (id: string) => lobby.commitActivation(id),
+          releaseMembership: (
+            refs: Parameters<typeof lobby.releaseMembership>[0],
+          ) => lobby.releaseMembership(refs),
           release: (userIds: string[], table: string) =>
             lobby.release(userIds, table),
         }
@@ -1212,16 +1223,21 @@ describe('standing up at a six table', () => {
       const lobbyOf = (id: DurableObjectId) => {
         const lobby = real.get(id, { locationHint: 'enam' })
         return {
-          claim: (userId: string, table: string) => {
+          reserveActivation: (table: string, userIds: string[], id: string) => {
             calls.push('claim')
-            return lobby.claim(userId, table)
+            return lobby.reserveActivation(table, userIds, id)
           },
-          release: async (userIds: string[], table: string) => {
+          commitActivation: (id: string) => lobby.commitActivation(id),
+          releaseMembership: async (
+            refs: Parameters<typeof lobby.releaseMembership>[0],
+          ) => {
             calls.push('release')
             await held
-            await lobby.release(userIds, table)
+            await lobby.releaseMembership(refs)
             calls.push('released')
           },
+          release: (userIds: string[], table: string) =>
+            lobby.release(userIds, table),
         }
       }
       ;(instance as unknown as { env: typeof env }).env = {
@@ -1325,7 +1341,7 @@ describe('standing up at a six table', () => {
     expect(analysisKeys(all)).toEqual([])
     // Sockets without a seat heard of every sit and stand, never of a hand.
     for (const f of watcher.frames) {
-      expect(['welcome', 'state', 'error']).toContain(f.t)
+      expect(['welcome', 'state', 'error', 'command_outcome']).toContain(f.t)
       if (f.t === 'welcome' || f.t === 'state') expect(f.view).toBeNull()
     }
     const roster = watcher.frames.flatMap((f) =>
@@ -1496,7 +1512,7 @@ describe('rebuying at a six table', () => {
 
     // The next deal settles hand 2's stacks and keeps the top-up: hand 3
     // plays 2,000 against 2,030, 30 chips more than were at the table.
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await clients[0].next(isState(3))
     const three = (await peek(matchId)).hand!
     expect(three.config.seats).toEqual([
@@ -1535,7 +1551,7 @@ describe('rebuying at a six table', () => {
     }
     await back[0].next((f) => f.t === 'welcome' && f.seat === 0)
     await back[2].next((f) => f.t === 'welcome' && f.seat === 2)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await back[0].next(isState(2))
     expect((await peek(matchId)).hand!.config.seats).toEqual([
       { seat: 0, stack: 2000 },
@@ -1558,7 +1574,7 @@ describe('rebuying at a six table', () => {
     await move(matchId, clients, () => ({ type: 'fold' }))
     await clients[2].next((f) => f.t === 'reveal' && f.handNo === 1)
     await bust(matchId, 2, 0)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await clients[2].next(isState(2))
     const two = (await peek(matchId)).hand!
     expect(two.config.seats).toEqual([
@@ -1606,7 +1622,7 @@ describe('rebuying at a six table', () => {
     await clients[2].next((f) => f.t === 'reveal' && f.handNo === 1)
     await bust(matchId, 2, 0)
     // One funded player: the table waits.
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).match.status).toBe('waiting')
 
     const granted = await rebuy(clients[2])
@@ -1648,7 +1664,7 @@ describe('rebuying at a six table', () => {
       1980, 2020,
     ])
     // Dealt: hand 2 plays those stacks, and the roster keeps them.
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     const two = await clients[0].next(isState(2))
     expect((await peek(matchId)).hand!.config.seats).toEqual([
       { seat: 0, stack: 1980 },
@@ -1670,17 +1686,21 @@ describe('rebuying at a six table', () => {
     await move(matchId, clients, () => ({ type: 'fold' }))
     await clients[0].next((f) => f.t === 'reveal' && f.handNo === 1)
     expect(await standUp(clients[0])).toMatchObject({ seat: null })
-    // The cooldown is over before the next deal, as it never is in play
-    // (2 minutes against 3 s), but nothing enforces that. The account
-    // sits again, in seat 1, with the buy-in a new seat brings.
-    await setClock(matchId, 1_800_000_000_000 + SIT_COOLDOWN_MS)
+    // Clear the cooldown to isolate stack settlement. Advancing the real
+    // clock beyond the next deal now reconciles that deal before the sit.
+    await runInDurableObject(stub(matchId), (table: TableDO) => {
+      const inside = table as unknown as {
+        match: { cooldowns: Record<string, unknown> }
+      }
+      delete inside.match.cooldowns['ra-0']
+    })
     const back = await trySit(clients[0], 1)
     expect(back).toMatchObject({ t: 'welcome', seat: 1 })
     expect(rosterStack(back, 1)).toBe(2000)
     expect(rosterStack(back, 2)).toBe(2010)
     // Hand 2 settles hand 1's stacks into those dealt into it, and deals
     // the account its new seat's 2,000: 6,010 at the table, as brought.
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await clients[2].next(isState(2))
     expect((await peek(matchId)).hand!.config.seats).toEqual([
       { seat: 1, stack: 2000 },
@@ -1733,7 +1753,7 @@ describe('rebuying at a six table', () => {
       (f) => f.t === 'state' && rosterStack(f, 0) === 2000,
       seen,
     )
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await clients[4].next(isState(2))
     const two = (await peek(matchId)).hand!
 
@@ -1742,7 +1762,7 @@ describe('rebuying at a six table', () => {
     expect(analysisKeys(all)).toEqual([])
     // The socket without a seat heard of the rebuy, never of a hand.
     for (const f of watcher.frames) {
-      expect(['welcome', 'state', 'error']).toContain(f.t)
+      expect(['welcome', 'state', 'error', 'command_outcome']).toContain(f.t)
       if (f.t === 'welcome' || f.t === 'state') expect(f.view).toBeNull()
     }
     const heard = JSON.stringify(watcher.frames)
@@ -1813,7 +1833,7 @@ describe('six clients over many hands', () => {
       await clients[seats[0]].next(
         (f) => f.t === 'reveal' && f.handNo === ended.config.handNo,
       )
-      await elapse(matchId, NEXT_HAND_MS)
+      await elapseToNextDeal(matchId)
       if (n < 200) await clients[0].next(isState(n + 1))
     }
     expect(played).toBe(200)
@@ -1933,7 +1953,7 @@ describe('six clients over many hands', () => {
         away = null
         counts.back++
       }
-      await elapse(matchId, NEXT_HAND_MS)
+      await elapseToNextDeal(matchId)
     }
     expect(counts).toEqual({ stands: 22, newcomers: 11, refused: 11, back: 11 })
     expect((await seated(matchId)).length).toBe(6)
@@ -2052,7 +2072,7 @@ describe('six clients over many hands', () => {
           counts.refused++
         }
       }
-      await elapse(matchId, NEXT_HAND_MS)
+      await elapseToNextDeal(matchId)
       await clients[0].next(isState(n + 1))
     }
     // The seeded decks make every count exact: busts, top-ups from 0
@@ -2254,7 +2274,7 @@ describe('six sessions', () => {
     await standUp(b)
     await standUp(c)
     await drained(matchId)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).match.status).toBe('waiting')
     // No hand has started for just under IDLE_MS: the session is open.
     await elapse(matchId, IDLE_MS - NEXT_HAND_MS - 1)
@@ -2341,12 +2361,12 @@ describe('six sessions', () => {
     // after it, so its cooldown spans the rotation.
     await jumpTo(matchId, 998)
     const d = await sitDown(matchId, D, 0)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).hand!.config.handNo).toBe(999)
     await playOut(matchId, { ...clients, 0: d }, () => ({ type: 'fold' }))
     expect(await standUp(d)).toMatchObject({ seat: null })
     await drained(matchId)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     // Hand 1000, the last of the session: the first to act spends 25 s, so
     // 5 s of their bank, then everyone checks or calls it down.
     const last1000 = (await peek(matchId)).hand!
@@ -2368,7 +2388,7 @@ describe('six sessions', () => {
     expect(before).toContainEqual([spender, 25_000])
     await drained(matchId)
     const from = a.frames.length
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
 
     // Hand 1000 dealt and archived: the session ended, and the next deal is
     // hand 1 of a new one, under a new matchId.
@@ -2453,7 +2473,7 @@ describe('six sessions', () => {
       await playOut(matchId, clients, passive)
       await drained(matchId)
       expect(await decks(matchId), `hand ${n} archived`).toEqual([])
-      await elapse(matchId, NEXT_HAND_MS)
+      await elapseToNextDeal(matchId)
     }
     // Not archived (dev accounts): a hand's deck goes as the hand ends.
     const dev = await sixTable()
@@ -2479,7 +2499,7 @@ describe('six sessions', () => {
     state.down = true
     await playOut(matchId, { 0: a, 2: b }, () => ({ type: 'fold' }))
     await standUp(b)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).match.status).toBe('waiting')
     // Idle past IDLE_MS, but its calls are still queued: it stays open.
     await elapse(matchId, IDLE_MS)
@@ -2512,15 +2532,15 @@ describe('six sessions', () => {
     const players = { 0: a, 4: c }
     await playOut(matchId, players, () => ({ type: 'fold' }))
     await jumpTo(matchId, 1500)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).hand!.config.handNo).toBe(1501)
     await playOut(matchId, players, () => ({ type: 'fold' }))
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).hand!.config.handNo).toBe(1502)
     expect(id()).toBe(second)
     await playOut(matchId, players, () => ({ type: 'fold' }))
     await jumpTo(matchId, 9000)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     // Hand "9000" is over and nothing more is dealt while calls wait.
     expect((await peek(matchId)).hand!.config.handNo).toBe(1502)
     // The waiting calls are the second session's, keyed by its number, so
@@ -2528,7 +2548,7 @@ describe('six sessions', () => {
     const waiting = await outbox(matchId)
     expect(waiting).toContain('outbox:0002.1502:hand')
     expect(waiting.every((k) => k.startsWith('outbox:0002.'))).toBe(true)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).hand!.config.handNo).toBe(1502)
     expect(ends(calls)).toHaveLength(1)
     // They drain: the session ends, and a new one deals its hand 1.
@@ -2563,7 +2583,7 @@ describe('six sessions', () => {
     expect((await peek(matchId)).hand!.toAct).toBe(2)
     await timeOut(matchId)
     await playOut(matchId, clients, () => ({ type: 'fold' }))
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     hand = (await peek(matchId)).hand!
     expect(hand.config.handNo).toBe(3)
     // Hand 3: A acts (its run of misses resets), and later times out.
@@ -2576,7 +2596,7 @@ describe('six sessions', () => {
     await standUp(b)
     await standUp(c)
     await drained(matchId)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await elapse(matchId, IDLE_MS)
     await eventually(async () => ends(calls).length === 1)
     // Session totals by account (record_match v6 reads them by user id),
@@ -2596,7 +2616,7 @@ describe('six sessions', () => {
     state.down = true
     await standUp(a)
     await standUp(b)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).match.status).toBe('waiting')
     // IDLE_MS on: the session is closed, but its end is still queued, so
     // the table stays.
@@ -2644,7 +2664,7 @@ describe('six sessions', () => {
     await a.next((f) => f.t === 'reveal' && f.handNo === 1)
     // B stands; the table waits, and its one-hand session ends idle.
     expect(await standUp(b)).toMatchObject({ seat: null })
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await elapse(matchId, IDLE_MS)
     expect(await sessionOver(matchId)).toBe(true)
     // C sits: the next session deals its own hand 1, which is under way.
@@ -2680,7 +2700,7 @@ describe('six sessions', () => {
     await a.next(isState(1))
     await playOut(matchId, { 0: a, 2: b }, () => ({ type: 'fold' }))
     await standUp(b)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).match.status).toBe('waiting')
     // Five minutes on, the last player stands too.
     const stoodAfter = NEXT_HAND_MS + 300_000
@@ -2711,7 +2731,7 @@ describe('six sessions', () => {
     await standUp(a)
     await standUp(b)
     await drained(matchId)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).match.status).toBe('waiting')
     // An idle check that finds the session not due (as when a flush was
     // still draining the outbox as it looked), then nobody seated and
@@ -2738,7 +2758,7 @@ describe('six sessions', () => {
     await playOut(matchId, { 0: a, 2: b }, () => ({ type: 'fold' }))
     await standUp(b)
     await drained(matchId)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await elapse(matchId, IDLE_MS)
     await eventually(async () => ends(calls).length === 1)
     await drained(matchId)
@@ -2763,7 +2783,7 @@ describe('six sessions', () => {
     await standUp(a)
     await standUp(b)
     await drained(matchId)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await elapse(matchId, IDLE_MS)
     await eventually(async () => ends(calls).length === 1)
     // Seated at the end, but never dealt in: not named, so no row for a
@@ -2810,7 +2830,7 @@ describe('a six table that halts', () => {
     const clients = await seatAll(matchId, [0, 3], 'halt')
     await clients[0].next(isState(1))
     await playOut(matchId, clients, () => ({ type: 'fold' }))
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     for (const seat of [0, 3])
       expect(
         await clients[seat].next((f) => f.t === 'match_end'),

@@ -44,6 +44,7 @@ import {
   QUICK_SIT_TABLES,
 } from '../../src/shared/protocol'
 import type { ErrorCode, LobbyMsg, MatchKind } from '../../src/shared/protocol'
+import type { ActivationV1, MembershipRef } from '../../src/shared/protocol'
 import type { RatedEligibility } from './auth'
 import { now } from './clock'
 import type { WorkerEnv } from './env'
@@ -64,6 +65,7 @@ import {
   isPrunable,
   OPEN_ROWS_READ,
   REQUEST_TTL_MS,
+  RESERVE_MS,
 } from './games'
 import type { OpenGame, OpenReport } from './games'
 import {
@@ -217,7 +219,7 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
   /** The lobby's clock; tests move it. */
   clock: () => number = now
   /** A player's current rating; tests replace it. */
-  ratingOf: (userId: string) => Promise<number> = (userId) =>
+  ratingOf: (userId: string) => Promise<RatingLookup> = (userId) =>
     currentRating(this.env, userId)
   /**
    * Every player shares this object: each account gets a frame budget. And
@@ -440,9 +442,21 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
     const waiting = (await this.ctx.storage.get(key)) as Waiting | undefined
     // Asking again for the same kind keeps the place; another kind starts over.
     if (!waiting || kindOf(waiting) !== kind) {
-      const rating = kind === 'hu-rated' ? await this.ratingOf(userId) : null
+      const lookup = kind === 'hu-rated' ? await this.ratingOf(userId) : null
       // Cancelled, gone or superseded while the rating was read.
       if (!current()) return
+      if (lookup?.status === 'unavailable')
+        return this.reject(
+          ws,
+          'rating_unavailable',
+          'Rating lookup unavailable. Retry or choose casual play.',
+        )
+      const rating =
+        lookup === null
+          ? null
+          : lookup.status === 'unrated'
+            ? UNRATED
+            : lookup.rating
       await this.ctx.storage.put(key, {
         userId,
         username,
@@ -564,12 +578,19 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
     rematchOf?: string,
   ) {
     const matchId = crypto.randomUUID()
+    const activation = await this.reserveUnlocked(
+      matchId,
+      [a.userId, b.userId],
+      crypto.randomUUID(),
+    )
+    if ('busy' in activation) return null
     const body: InitBody = {
       matchId,
       creator: { userId: a.userId, username: a.username },
       opponent: { userId: b.userId, username: b.username },
       startWithinMs: START_WITHIN_MS,
       kind,
+      activation,
       ...(rematchOf ? { rematchOf } : {}),
     }
     const created = await tableStub(this.env, matchId).fetch(
@@ -585,8 +606,6 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
       return null
     }
     await this.ctx.storage.put({
-      [`active:${a.userId}`]: matchId,
-      [`active:${b.userId}`]: matchId,
       [pairs]: count + 1,
     })
     await this.ctx.storage.delete([`queue:${a.userId}`, `queue:${b.userId}`])
@@ -599,6 +618,148 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
   }
 
   // ---- One active table per account (RPC from the Worker and tables) ---------
+
+  reserveActivation(
+    tableId: string,
+    userIds: string[],
+    id: string,
+  ): Promise<ActivationV1 | { busy: string }> {
+    return this.forUsers(userIds, () =>
+      this.reserveUnlocked(tableId, userIds, id),
+    )
+  }
+
+  private async reserveUnlocked(
+    tableId: string,
+    userIds: string[],
+    id: string,
+  ): Promise<ActivationV1 | { busy: string }> {
+    if (!userIds.length || new Set(userIds).size !== userIds.length)
+      throw new Error('Invalid activation members')
+    const previous = await this.ctx.storage.get<ActivationV1>(
+      `activation:${id}`,
+    )
+    if (previous) {
+      if (
+        previous.tableId !== tableId ||
+        previous.members
+          .map((m) => m.userId)
+          .sort()
+          .join() !== [...userIds].sort().join()
+      )
+        throw new Error('Activation identity reused')
+      return previous
+    }
+    for (const userId of userIds) {
+      const active = await this.liveActive(userId, tableId)
+      if (active && active !== tableId) return { busy: active }
+      const claim = await this.ctx.storage.get<
+        MembershipRef & { activationId: string }
+      >(`membership:${userId}`)
+      if (claim) return { busy: claim.tableId }
+    }
+    return this.ctx.storage.transaction(async (txn) => {
+      const members: MembershipRef[] = []
+      const writes: Record<string, unknown> = {}
+      for (const userId of userIds) {
+        const generation =
+          ((await txn.get<number>(`generation:${userId}`)) ?? 0) + 1
+        const ref = { userId, tableId, generation }
+        members.push(ref)
+        writes[`generation:${userId}`] = generation
+        writes[`membership:${userId}`] = { ...ref, activationId: id }
+        writes[`active:${userId}`] = tableId
+      }
+      const ticket: ActivationV1 = {
+        v: 1,
+        id,
+        tableId,
+        members,
+        state: 'reserved',
+        expiresAt: this.clock() + RESERVE_MS,
+      }
+      writes[`activation:${id}`] = ticket
+      await txn.put(writes)
+      return ticket
+    })
+  }
+
+  async commitActivation(id: string): Promise<ActivationV1 | null> {
+    const ticket = await this.ctx.storage.get<ActivationV1>(`activation:${id}`)
+    if (!ticket) return null
+    return this.forUsers(
+      ticket.members.map((m) => m.userId),
+      async () => {
+        const current = await this.ctx.storage.get<ActivationV1>(
+          `activation:${id}`,
+        )
+        if (!current || current.state === 'cancelled') return current ?? null
+        if (current.state === 'committed') return current
+        if (
+          !(await tableStub(this.env, current.tableId).preparedActivation(id))
+        )
+          return null
+        if (current.expiresAt <= this.clock()) {
+          current.state = 'cancelled'
+          await this.ctx.storage.put(`activation:${id}`, current)
+          await this.releaseClaims(current)
+          return current
+        }
+        for (const member of current.members) {
+          const claim = await this.ctx.storage.get<
+            MembershipRef & { activationId: string }
+          >(`membership:${member.userId}`)
+          if (
+            claim?.generation !== member.generation ||
+            claim.activationId !== id
+          )
+            return null
+        }
+        current.state = 'committed'
+        await this.ctx.storage.put(`activation:${id}`, current)
+        return current
+      },
+    )
+  }
+
+  async activationStatus(id: string): Promise<ActivationV1 | null> {
+    return (
+      (await this.ctx.storage.get<ActivationV1>(`activation:${id}`)) ?? null
+    )
+  }
+
+  /** The table must persist a local fence BEFORE requesting release. TTL never releases committed authority. */
+  async releaseMembership(refs: (MembershipRef & { activationId: string })[]) {
+    return this.forUsers(
+      refs.map((r) => r.userId),
+      async () => {
+        for (const ref of refs) {
+          await this.compareRelease(ref)
+        }
+      },
+    )
+  }
+
+  private async compareRelease(ref: MembershipRef & { activationId: string }) {
+    await this.ctx.storage.transaction(async (txn) => {
+      const key = `membership:${ref.userId}`
+      const claim = await txn.get<MembershipRef & { activationId: string }>(key)
+      if (
+        claim?.tableId !== ref.tableId ||
+        claim.generation !== ref.generation ||
+        claim.activationId !== ref.activationId
+      )
+        return
+      await txn.delete(key)
+      if ((await txn.get(`active:${ref.userId}`)) === ref.tableId)
+        await txn.delete(`active:${ref.userId}`)
+    })
+  }
+
+  private async releaseClaims(ticket: ActivationV1) {
+    for (const ref of ticket.members)
+      await this.compareRelease({ ...ref, activationId: ticket.id })
+  }
 
   /**
    * Records that `userId` is at `matchId`, unless they are playing at
@@ -644,7 +805,6 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
         return { retryAfter: creates.retryAfter }
       const writes: Record<string, unknown> = {
         [creates.key]: creates.made + 1,
-        [`active:${userId}`]: matchId,
       }
       let game: { code: string; gameId: string; listed: boolean } | undefined
       if (opts) {
@@ -755,8 +915,9 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
   /** Called by a table when its match ends. */
   async release(userIds: string[], matchId: string) {
     for (const userId of userIds)
-      if ((await this.ctx.storage.get(`active:${userId}`)) === matchId)
-        await this.ctx.storage.delete(`active:${userId}`)
+      if (!(await this.ctx.storage.get(`membership:${userId}`)))
+        if ((await this.ctx.storage.get(`active:${userId}`)) === matchId)
+          await this.ctx.storage.delete(`active:${userId}`)
   }
 
   /** The table this account should be at, if any. */
@@ -1749,6 +1910,42 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
    * arrived therefore cannot lock an account out.
    */
   private async liveActive(userId: string, unless?: string) {
+    const claim = await this.ctx.storage.get<
+      MembershipRef & { activationId: string }
+    >(`membership:${userId}`)
+    if (claim) {
+      if (claim.tableId === unless) return claim.tableId
+      const ticket = await this.ctx.storage.get<ActivationV1>(
+        `activation:${claim.activationId}`,
+      )
+      if (!ticket) return claim.tableId // unknown ownership fails closed
+      if (ticket.state === 'reserved' && ticket.expiresAt <= this.clock()) {
+        const current = await this.ctx.storage.transaction(async (txn) => {
+          const key = `activation:${ticket.id}`
+          const current = await txn.get<ActivationV1>(key)
+          if (
+            current?.state === 'reserved' &&
+            current.expiresAt <= this.clock()
+          ) {
+            current.state = 'cancelled'
+            await txn.put(key, current)
+          }
+          return current
+        })
+        if (current?.state !== 'cancelled') return claim.tableId
+        await this.releaseClaims(current)
+      } else if (
+        ticket.state === 'cancelled' ||
+        (ticket.state === 'committed' &&
+          !(await tableStub(this.env, claim.tableId).ownsMembership(
+            userId,
+            claim.activationId,
+            claim.generation,
+          )))
+      ) {
+        await this.compareRelease(claim)
+      } else return claim.tableId
+    }
     const matchId = (await this.ctx.storage.get(`active:${userId}`)) as
       | string
       | undefined
@@ -1839,17 +2036,43 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * with none yet, a dev account, or a read that fails: queueing never waits
  * on a lookup that cannot succeed.
  */
-async function currentRating(env: WorkerEnv, userId: string) {
-  if (!UUID.test(userId) || !env.SUPABASE_URL) return UNRATED
+export type RatingLookup =
+  | { status: 'rated'; rating: number; version: number }
+  | { status: 'unrated' }
+  | { status: 'unavailable'; retryAfterMs: number }
+
+export async function currentRating(
+  env: WorkerEnv,
+  userId: string,
+): Promise<RatingLookup> {
+  const unavailable: RatingLookup = {
+    status: 'unavailable',
+    retryAfterMs: 5000,
+  }
+  if (!UUID.test(userId) && env.DEV_AUTH_SECRET) return { status: 'unrated' }
+  if (!UUID.test(userId) || !env.SUPABASE_URL || !env.SUPABASE_SECRET_KEY)
+    return unavailable
   try {
     const response = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/ratings?select=rating&format=eq.hu-duplicate&user_id=eq.${userId}`,
+      `${env.SUPABASE_URL}/rest/v1/ratings?select=rating,version&format=eq.hu-duplicate&user_id=eq.${userId}`,
       { headers: { apikey: env.SUPABASE_SECRET_KEY ?? '' } },
     )
-    if (!response.ok) return UNRATED
-    const rows = (await response.json()) as { rating: number }[]
-    return typeof rows[0]?.rating === 'number' ? rows[0].rating : UNRATED
+    if (!response.ok) return unavailable
+    const rows = (await response.json()) as {
+      rating: number
+      version: number
+    }[]
+    if (!Array.isArray(rows)) return unavailable
+    if (!rows.length) return { status: 'unrated' }
+    const row = rows[0]
+    return rows.length === 1 &&
+      typeof row.rating === 'number' &&
+      Number.isFinite(row.rating) &&
+      Number.isSafeInteger(row.version) &&
+      row.version >= 0
+      ? { status: 'rated', rating: row.rating, version: row.version }
+      : unavailable
   } catch {
-    return UNRATED
+    return unavailable
   }
 }

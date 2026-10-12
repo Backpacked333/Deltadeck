@@ -1,6 +1,11 @@
 import { env, SELF } from 'cloudflare:test'
 import type { HandState, PlayerAction, SeatId } from '../../src/engine/types'
-import type { ClientMsg, LobbyMsg, ServerMsg } from '../../src/shared/protocol'
+import type {
+  ClientMsg,
+  LobbyMsg,
+  ServerMsg,
+  SeatCommandV1,
+} from '../../src/shared/protocol'
 import type { LobbyDO } from '../src/lobby'
 import type { InitBody, TableDO } from '../src/table'
 
@@ -49,11 +54,27 @@ export async function connect(matchId: string, user: string): Promise<Client> {
   if (response.status !== 101)
     throw new Error(`upgrade ${response.status}: ${await response.text()}`)
   const ws = response.webSocket!
+  let commands: Promise<void> = Promise.resolve()
   const client: Client = {
     ws,
     frames: [],
     closed: null,
-    send: (msg) => ws.send(JSON.stringify(msg)),
+    send: (msg) => {
+      // Flow tests use the current client contract. Wire compatibility tests
+      // send raw ws frames explicitly (including deliberately old controls).
+      if (
+        msg.t === 'stand' ||
+        msg.t === 'rebuy' ||
+        msg.t === 'sit_out' ||
+        msg.t === 'sit_in'
+      ) {
+        commands = commands.then(async () => {
+          await sendSeatCommand(client, matchId, msg.t, false)
+        })
+        return
+      }
+      ws.send(JSON.stringify(msg))
+    },
     async next(test, from = 0) {
       for (let i = 0; i < 400; i++) {
         const found = client.frames.slice(from).find(test)
@@ -71,6 +92,44 @@ export async function connect(matchId: string, user: string): Promise<Client> {
   })
   ws.accept()
   return client
+}
+
+/** Authoritative resync first, then a new command (retries reuse the returned envelope). */
+export async function sendSeatCommand(
+  client: Client,
+  tableId: string,
+  kind: SeatCommandV1['kind'],
+  resync = true,
+) {
+  const from = client.frames.length
+  if (resync) client.ws.send(JSON.stringify({ t: 'resync' }))
+  const frame = resync
+    ? await client.next((f) => f.t === 'welcome', from)
+    : [...client.frames]
+        .reverse()
+        .find((f) => f.t === 'state' || f.t === 'welcome')
+  if (!frame || (frame.t !== 'welcome' && frame.t !== 'state'))
+    throw new Error('Expected snapshot')
+  const scope = frame.ownControl?.scope
+  const command: SeatCommandV1 = {
+    t: 'seat_command',
+    v: 1,
+    commandId: crypto.randomUUID(),
+    tableId,
+    kind,
+    membershipGeneration: scope?.membershipGeneration ?? 1,
+    seatGeneration: scope?.seatGeneration ?? 1,
+    expectedStateVersion: frame.seq,
+    hand: frame.view
+      ? { tableId, matchId: frame.matchId, handNo: frame.view.handNo }
+      : null,
+  }
+  client.ws.send(JSON.stringify(command))
+  const outcome = await client.next(
+    (f) => f.t === 'command_outcome' && f.commandId === command.commandId,
+    from,
+  )
+  return { command, outcome }
 }
 
 /** The table's real state, for checking what clients were (not) told. */
@@ -140,6 +199,26 @@ export async function elapse(matchId: string, ms: number) {
     instance.clock = () => base() + ms
   })
   return runDurableObjectAlarm(stub(matchId))
+}
+
+/** Advance to the immutable completion schedule rather than assuming a flat pause. */
+export async function elapseToNextDeal(matchId: string) {
+  const { runInDurableObject } = await import('cloudflare:test')
+  const ms = await runInDurableObject(
+    stub(matchId),
+    async (table: TableDO, state) => {
+      const completion = await state.storage.get<{
+        schedule: { earliestNextDealAt: number }
+      }>('lastCompletion')
+      return Math.max(
+        0,
+        (completion?.schedule.earliestNextDealAt ?? table.clock() + 3000) -
+          table.clock(),
+      )
+    },
+  )
+  await elapse(matchId, ms)
+  return ms
 }
 
 /** Stops the table's clock, so only `elapse` moves it. */

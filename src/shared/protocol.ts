@@ -19,6 +19,178 @@ import {
 } from './gameCode'
 
 export const PROTOCOL = 'qp.v1'
+/** Additive v1 readers remain usable; unscoped seat mutations require this capability. */
+export const CONTROL_VERSION = 1
+
+export type HandKey = { tableId: string; matchId: string; handNo: number }
+export type MembershipRef = {
+  userId: string
+  tableId: string
+  generation: number
+}
+export type ActivationV1 = {
+  v: 1
+  id: string
+  tableId: string
+  members: MembershipRef[]
+  state: 'reserved' | 'committed' | 'cancelled'
+  expiresAt: number
+}
+export type SeatScope = {
+  tableId: string
+  activationId: string
+  membershipGeneration: number
+  seat: number
+  seatGeneration: number
+}
+export type SeatCommandV1 = {
+  t: 'seat_command'
+  v: 1
+  commandId: string
+  tableId: string
+  kind: 'stand' | 'sit_out' | 'sit_in' | 'rebuy'
+  membershipGeneration: number
+  seatGeneration: number
+  expectedStateVersion: number
+  hand: HandKey | null
+}
+export type CommandOutcomeV1 = {
+  t: 'command_outcome'
+  v: 1
+  commandId: string
+  disposition: 'accepted' | 'rejected' | 'stale' | 'unknown'
+  effect: 'pending' | 'completed' | 'none'
+  stateVersion: number
+  reason:
+    | 'ok'
+    | 'wrong_membership'
+    | 'wrong_seat'
+    | 'wrong_hand'
+    | 'state_changed'
+    | 'illegal_now'
+    | 'id_reused'
+    | 'retry_expired'
+    | 'upgrade_required'
+    | 'not_found'
+  scope: SeatScope | null
+}
+export type OwnControlV1 = {
+  scope: SeatScope | null
+  stateVersion: number
+  pendingIntent: {
+    commandId: string
+    kind: SeatCommandV1['kind']
+    acceptedAtVersion: number
+    appliesAfter: HandKey | null
+  } | null
+  standing: boolean
+  commandOutcomes: CommandOutcomeV1[]
+}
+export type CancelStartV1 = {
+  t: 'cancel_start'
+  v: 1
+  commandId: string
+  tableId: string
+  activationId: string
+  membershipGeneration: number
+}
+export type PublicCompletedHandV1 = {
+  hand: HandKey
+  board: number[]
+  shown: { seat: number; cards: [number, number] }[]
+  participants: { seat: number; seatGeneration: number; username: string }[]
+  stacksBySeat: Record<number, number>
+  pots: { amount: number; eligible: number[] }[]
+  awards: { seat: number; amount: number }[]
+  netBySeat: Record<number, number>
+  showdown: boolean
+}
+export type HandCompletionV1 = {
+  v: 1
+  hand: HandKey
+  terminalStateVersion: number
+  completedAt: number
+  resultAvailable: true
+  final: PublicCompletedHandV1
+  schedule: {
+    version: 'completion.v1'
+    shape: 'fold' | 'river' | 'all_in_preflop' | 'all_in_flop' | 'all_in_turn'
+    beats: { offsetMs: number; boardCount: 0 | 3 | 4 | 5 }[]
+    resultHoldMs: number
+    earliestNextDealAt: number
+  }
+}
+export type PresentationStateV1 = {
+  completion: HandCompletionV1 | null
+  currentDecision: {
+    decision: HandKey & { actionIndex: number; seat: number }
+    stateVersion: number
+    startedAt: number
+    deadlineAt: number
+  } | null
+  serverNow: number
+}
+/** Service-only evidence. Never include these fields in a player frame. */
+export type AbsenceV1 = {
+  userId: string
+  seat: number
+  seatGeneration: number
+  observedAt: number
+  deadlineAt: number
+  source: 'socket_close' | 'recovery'
+}
+export type DeadlineEvidenceV1 = {
+  id: string
+  decision: HandKey & { actionIndex: number; seat: number }
+  deadlineAt: number
+  processedAt: number
+  action: 'check' | 'fold'
+  consecutiveTimeouts: number
+}
+export type HandManifestEntryV1 = {
+  id: string
+  handNo: number
+  terminalStateVersion: number
+  completedAt: number
+  recordDigest: string
+  archiveDigest: string
+  requiredVerifier: 'hand.v2'
+}
+export type TerminalProofV1 = {
+  v: 1
+  id: string
+  matchId: string
+  tableId: string
+  activationId: string
+  policyVersion: 'terminal.v1'
+  rulesVersion: 'hu-rated.v1' | 'hu-casual.v1'
+  configDigest: string
+  participants: (MembershipRef & { seat: number; seatGeneration: number })[]
+  reason: MatchEndReason
+  cause:
+    | 'hand_limit'
+    | 'timeout_streak'
+    | 'start_deadline'
+    | 'mutual_absence'
+    | 'engine_fault'
+    | 'cancelled_before_deal'
+  terminalStateVersion: number
+  finishedAt: number
+  startedAt: number | null
+  startDeadlineAt: number | null
+  firstPresenceAt: Record<string, number>
+  absences: AbsenceV1[]
+  timeoutEvidence: DeadlineEvidenceV1[]
+  voluntaryCommandId: string | null
+  forfeitingSeat: number | null
+  completedHands: HandManifestEntryV1[]
+  interruptedHand: {
+    hand: HandKey
+    actionIndex: number
+    disposition: 'excluded_incomplete'
+    archiveDigest: string
+  } | null
+}
 /** Largest client frame the server will parse. */
 export const MAX_FRAME = 4096
 
@@ -84,6 +256,9 @@ export type MatchConfig = {
 export type Outcome = 'win' | 'draw' | 'loss'
 
 export type ClientMsg =
+  | SeatCommandV1
+  | CancelStartV1
+  | { t: 'command_status'; commandId: string }
   | {
       t: 'act'
       reqId: string
@@ -163,6 +338,8 @@ export type ClientMsg =
 export type SeatStatus = 'playing' | 'sitting_out'
 
 export type ErrorCode =
+  | 'upgrade_required'
+  | 'rating_unavailable'
   | 'not_your_turn'
   | 'illegal'
   | 'stale'
@@ -364,6 +541,13 @@ export type MatchEndReason =
   | 'abandoned'
 
 export type ServerMsg = { seq: number; matchId: string } & (
+  | CommandOutcomeV1
+  | {
+      t: 'cancel_start_result'
+      commandId: string
+      status: 'cancelled' | 'game_started' | 'stale'
+      stateVersion: number
+    }
   | {
       t: 'welcome'
       /** null: this account has no seat at the (six) table. */
@@ -372,8 +556,29 @@ export type ServerMsg = { seq: number; matchId: string } & (
       /** null until the first hand is dealt. */
       view: SeatView | null
       serverNow: number
+      ownControl?: OwnControlV1
+      completion?: HandCompletionV1
+      presentation?: PresentationStateV1
+      start?: {
+        activationId: string
+        deadlineAt: number
+        waitingForHost: boolean
+      }
     }
-  | { t: 'state'; table: MatchInfo; view: SeatView | null; serverNow: number }
+  | {
+      t: 'state'
+      table: MatchInfo
+      view: SeatView | null
+      serverNow: number
+      ownControl?: OwnControlV1
+      completion?: HandCompletionV1
+      presentation?: PresentationStateV1
+      start?: {
+        activationId: string
+        deadlineAt: number
+        waitingForHost: boolean
+      }
+    }
   | {
       t: 'hand_start'
       handNo: number
@@ -389,7 +594,12 @@ export type ServerMsg = { seq: number; matchId: string } & (
       sb?: SeatId | null
       bb?: SeatId
     }
-  | { t: 'hand_end'; handNo: number; record: HandRecordV1 }
+  | {
+      t: 'hand_end'
+      handNo: number
+      record: HandRecordV1
+      completion?: HandCompletionV1
+    }
   | ({ t: 'reveal' } & Reveal)
   | {
       t: 'match_end'
@@ -549,6 +759,68 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
   }
   if (!isObject(v)) return null
   switch (v.t) {
+    case 'command_status':
+      return onlyKeys(v, ['t', 'commandId']) &&
+        typeof v.commandId === 'string' &&
+        REQ_ID.test(v.commandId)
+        ? { t: 'command_status', commandId: v.commandId }
+        : null
+    case 'cancel_start':
+      return onlyKeys(v, [
+        't',
+        'v',
+        'commandId',
+        'tableId',
+        'activationId',
+        'membershipGeneration',
+      ]) &&
+        v.v === 1 &&
+        typeof v.commandId === 'string' &&
+        REQ_ID.test(v.commandId) &&
+        typeof v.tableId === 'string' &&
+        TABLE_ID.test(v.tableId) &&
+        typeof v.activationId === 'string' &&
+        REQ_ID.test(v.activationId) &&
+        isCount(v.membershipGeneration, 1)
+        ? (v as CancelStartV1)
+        : null
+    case 'seat_command': {
+      if (
+        !onlyKeys(v, [
+          't',
+          'v',
+          'commandId',
+          'tableId',
+          'kind',
+          'membershipGeneration',
+          'seatGeneration',
+          'expectedStateVersion',
+          'hand',
+        ]) ||
+        v.v !== 1 ||
+        typeof v.commandId !== 'string' ||
+        !REQ_ID.test(v.commandId) ||
+        typeof v.tableId !== 'string' ||
+        !TABLE_ID.test(v.tableId) ||
+        !['stand', 'sit_out', 'sit_in', 'rebuy'].includes(String(v.kind)) ||
+        !isCount(v.membershipGeneration, 1) ||
+        !isCount(v.seatGeneration, 1) ||
+        !isCount(v.expectedStateVersion)
+      )
+        return null
+      if (
+        v.hand !== null &&
+        (!isObject(v.hand) ||
+          !onlyKeys(v.hand, ['tableId', 'matchId', 'handNo']) ||
+          typeof v.hand.tableId !== 'string' ||
+          !TABLE_ID.test(v.hand.tableId) ||
+          typeof v.hand.matchId !== 'string' ||
+          !TABLE_ID.test(v.hand.matchId) ||
+          !isCount(v.hand.handNo, 1))
+      )
+        return null
+      return v as SeatCommandV1
+    }
     case 'act': {
       if (!onlyKeys(v, ['t', 'reqId', 'handNo', 'actionIndex', 'action']))
         return null

@@ -10,6 +10,7 @@ export type ArchiveCall = {
   rpc:
     | 'record_match'
     | 'record_hand'
+    | 'record_terminal'
     | 'record_incident'
     | 'apply_rating'
     | 'record_challenge_claim'

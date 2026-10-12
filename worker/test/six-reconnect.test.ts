@@ -31,6 +31,7 @@ import {
   connect,
   createTable,
   elapse,
+  elapseToNextDeal,
   freezeClock,
   isState,
   move,
@@ -108,7 +109,7 @@ async function handTwo(prefix: string) {
   clients[4] = await sitDown(matchId, `${prefix}-4`, 4)
   await playOut(matchId, clients, fold)
   await clients[0].next((f) => f.t === 'reveal' && f.handNo === 1)
-  await elapse(matchId, NEXT_HAND_MS)
+  await elapseToNextDeal(matchId)
   await clients[4].next(isState(2))
   const hand = (await peek(matchId)).hand!
   expect(hand.config).toMatchObject({ handNo: 2, button: 0, sb: 2, bb: 4 })
@@ -229,7 +230,7 @@ async function nextHand(
   const handNo = ended.config.handNo
   const first = Object.values(clients)[0]
   await first.next((f) => f.t === 'reveal' && f.handNo === handNo)
-  await elapse(matchId, NEXT_HAND_MS)
+  await elapseToNextDeal(matchId)
   await first.next(isState(handNo + 1))
   return (await peek(matchId)).hand!
 }
@@ -564,7 +565,7 @@ describe('coming back to a six table', () => {
     expect(await storedSeat(matchId, 4)).toMatchObject({ timeouts: 4 })
     // Hand 3 is dealt without it.
     await clients[0].next((f) => f.t === 'reveal' && f.handNo === 2)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await clients[0].next(isState(3))
     expect((await peek(matchId)).hand!.config.seats.map((s) => s.seat)).toEqual(
       [0, 2],
@@ -585,7 +586,7 @@ describe('coming back to a six table', () => {
     await clients[0].next((f) => f.t === 'reveal' && f.handNo === 2)
     const left = await clockOf(matchId)
     await leave(matchId, clients[4], 'rd-4')
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await clients[0].next(isState(3))
     const { match, hand } = await peek(matchId)
     expect(match.status).toBe('playing')
@@ -723,7 +724,7 @@ describe('coming back to a six table', () => {
     expect((await peek(matchId)).hand!.street).toBe('showdown')
     // One player left to deal in: the table pauses instead of ending.
     const from = clients[0].frames.length
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     let { match } = await peek(matchId)
     expect(match).toMatchObject({ status: 'waiting', handNo: 2 })
     await clients[0].next(
@@ -748,7 +749,7 @@ describe('coming back to a six table', () => {
     await playOut(matchId, seats, fold)
     await clients[0].next((f) => f.t === 'reveal' && f.handNo === 3)
     await leave(matchId, two.client, 'rz-2')
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     ;({ match } = await peek(matchId))
     expect(match).toMatchObject({ status: 'waiting', handNo: 3 })
     await elapse(matchId, 10_000)
@@ -881,7 +882,7 @@ describe('a restart while a player is away', () => {
     expect(await graces(matchId)).toEqual([
       { kind: 'grace', at: dueAt, seat: 2, userId: 'ru-2' },
     ])
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).match.status).toBe('waiting')
     expect((await storageOf(matchId)).alarm).toBe(dueAt)
     await at(matchId, dueAt - 1)
@@ -920,7 +921,7 @@ describe('a restart while a player is away', () => {
     // grace's end, and then seat 2 sits out.
     await move(matchId, { 0: zero.client }, fold)
     await zero.client.next((f) => f.t === 'reveal' && f.handNo === 1)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).match.status).toBe('waiting')
     expect((await storageOf(matchId)).alarm).toBe(t0 + REPORT_MS)
     await at(matchId, t0 + REPORT_MS)
@@ -952,9 +953,20 @@ async function holdLobby(matchId: string) {
     const lobbyOf = (id: DurableObjectId) => {
       const lobby = real.get(id, { locationHint: 'enam' })
       return {
-        claim: async (userId: string, table: string) => {
+        reserveActivation: async (
+          table: string,
+          users: string[],
+          id: string,
+        ) => {
           await holds[claims++]
-          return lobby.claim(userId, table)
+          return lobby.reserveActivation(table, users, id)
+        },
+        commitActivation: (id: string) => lobby.commitActivation(id),
+        releaseMembership: async (
+          refs: Parameters<typeof lobby.releaseMembership>[0],
+        ) => {
+          await lobby.releaseMembership(refs)
+          released.push(refs.map((ref) => ref.userId))
         },
         release: (userIds: string[], table: string) => {
           released.push(userIds)
@@ -1197,7 +1209,7 @@ describe('heads-up away rules', () => {
     await move(rated, r, passive) // seat 0 limps; seat 1 to act
     await leave(rated, r[1], 'hr-b')
     expect(await graces(rated)).toEqual([
-      { kind: 'grace', at: t + GRACE_MS, seat: 1 },
+      { kind: 'grace', at: t + GRACE_MS, seat: 1, userId: 'hr-b' },
     ])
     await elapse(rated, GRACE_MS)
     expect((await peek(rated)).hand!.actions).toHaveLength(2)
