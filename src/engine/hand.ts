@@ -23,8 +23,16 @@ const player = (state: HandState, seat: SeatId) => {
   if (!found) throw new EngineError(`No player in seat ${seat}`)
   return found
 }
-const currentBet = (state: HandState) =>
-  Math.max(0, ...state.players.map((p) => p.bet))
+const currentBet = (state: HandState) => {
+  // A short blind changes its contribution, not the multiway bring-in.
+  // With only one player able to bet, match actual chips instead (also HU).
+  const bringIn =
+    state.street === 'preflop' &&
+    state.players.filter((p) => !p.folded && !p.allIn).length > 1
+      ? state.config.blinds.bb
+      : 0
+  return Math.max(bringIn, ...state.players.map((p) => p.bet))
+}
 
 /** Total chips in the middle, current street bets included. */
 export const potTotal = (state: HandState) =>

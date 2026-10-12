@@ -77,6 +77,144 @@ function navigate(hash: string) {
   })
 }
 
+describe('F17 practice keyboard intent', () => {
+  it.each([
+    { repeat: true },
+    { isComposing: true },
+    { keyCode: 229 },
+    { ctrlKey: true },
+    { metaKey: true },
+    { altKey: true },
+  ])('F17_repeat_ime_typing_ignored: %j', (extra) => {
+    render(<App />)
+    const key = new KeyboardEvent('keydown', {
+      key: 'p',
+      bubbles: true,
+      cancelable: true,
+      ...extra,
+    })
+    act(() => {
+      document.body.dispatchEvent(key)
+    })
+    expect(
+      screen.getByRole('button', { name: /Pause table/ }),
+    ).toBeInTheDocument()
+    expect(key.defaultPrevented).toBe(false)
+  })
+
+  it('F17 preserves a child control that already consumed the event', () => {
+    render(<App />)
+    const key = new KeyboardEvent('keydown', {
+      key: 'p',
+      bubbles: true,
+      cancelable: true,
+    })
+    key.preventDefault()
+    act(() => {
+      document.body.dispatchEvent(key)
+    })
+    expect(
+      screen.getByRole('button', { name: /Pause table/ }),
+    ).toBeInTheDocument()
+  })
+
+  it.each([
+    '<input type="text">',
+    '<input type="range">',
+    '<textarea></textarea>',
+    '<select></select>',
+    '<div contenteditable=""><span></span></div>',
+    '<div contenteditable="true"><span></span></div>',
+    '<div contenteditable="plaintext-only"><span></span></div>',
+    '<div role="textbox"><span></span></div>',
+  ])('F17 keeps ordinary keyboard behavior in %s', (html) => {
+    render(<App />)
+    const host = document.createElement('div')
+    host.innerHTML = html
+    document.body.append(host)
+    try {
+      const target = host.querySelector('span') ?? host.firstElementChild!
+      const key = new KeyboardEvent('keydown', {
+        key: 'p',
+        bubbles: true,
+        cancelable: true,
+      })
+      act(() => {
+        target.dispatchEvent(key)
+      })
+      expect(
+        screen.getByRole('button', { name: /Pause table/ }),
+      ).toBeInTheDocument()
+      expect(key.defaultPrevented).toBe(false)
+    } finally {
+      host.remove()
+    }
+  })
+
+  it('F17 accepts one intentional key and does not toggle again on autorepeat', () => {
+    render(<App />)
+    fireEvent.keyDown(document.body, { key: 'p' })
+    expect(
+      screen.getByRole('button', { name: /Resume table/ }),
+    ).toBeInTheDocument()
+    fireEvent.keyDown(document.body, { key: 'p', repeat: true })
+    expect(
+      screen.getByRole('button', { name: /Resume table/ }),
+    ).toBeInTheDocument()
+    fireEvent.keyDown(document.body, { key: 'p' })
+    expect(
+      screen.getByRole('button', { name: /Pause table/ }),
+    ).toBeInTheDocument()
+  })
+
+  it('F17 acts once on an intentional fold and ignores a held Enter across the hand boundary', () => {
+    render(<App />)
+    fireEvent.keyDown(document.body, { key: 'f', repeat: true })
+    fireEvent.keyDown(document.body, { key: 'f', isComposing: true })
+    expect(
+      screen.queryByRole('button', { name: /Deal next hand/ }),
+    ).not.toBeInTheDocument()
+    fireEvent.keyDown(document.body, { key: 'f' })
+    expect(
+      screen.getByRole('button', { name: /Deal next hand/ }),
+    ).toBeInTheDocument()
+    expect(JSON.parse(localStorage.getItem(TABLE_KEY)!).hands).toHaveLength(1)
+    fireEvent.keyDown(document.body, { key: 'Enter', repeat: true })
+    expect(
+      screen.getByRole('button', { name: /Deal next hand/ }),
+    ).toBeInTheDocument()
+    fireEvent.keyDown(document.body, { key: 'Enter' })
+    expect(
+      screen.queryByRole('button', { name: /Deal next hand/ }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('F17 preserves text entry inside an open shadow root', () => {
+    render(<App />)
+    const host = document.createElement('div')
+    const input = document.createElement('input')
+    host.attachShadow({ mode: 'open' }).append(input)
+    document.body.append(host)
+    try {
+      const key = new KeyboardEvent('keydown', {
+        key: 'p',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      })
+      act(() => {
+        input.dispatchEvent(key)
+      })
+      expect(
+        screen.getByRole('button', { name: /Pause table/ }),
+      ).toBeInTheDocument()
+      expect(key.defaultPrevented).toBe(false)
+    } finally {
+      host.remove()
+    }
+  })
+})
+
 describe('table and curriculum integration', () => {
   it('opens a related lesson with only visible cards and returns to the same hand', async () => {
     const user = userEvent.setup()

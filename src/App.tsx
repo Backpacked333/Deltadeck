@@ -269,7 +269,7 @@ function buildRecord(
     expectedNet:
       last >= 0
         ? grades[last].chosen.ev - hand.decisions[last].snapshot.invested[0]
-        : result.net,
+        : undefined,
     decisions,
   }
 }
@@ -696,19 +696,39 @@ export default function App() {
   // ---- Keyboard --------------------------------------------------------------------
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.metaKey || event.ctrlKey || event.altKey || dialog || blocked)
+      if (
+        event.defaultPrevented ||
+        event.repeat ||
+        event.isComposing ||
+        event.keyCode === 229 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey ||
+        dialog ||
+        blocked
+      )
         return
       if (view !== 'play') return
-      const target = event.target as HTMLElement
+      const target = event.target
       if (
-        target.closest(
-          'textarea, select, [contenteditable="true"], input:not([type="range"])',
-        )
+        event
+          .composedPath()
+          .some(
+            (node) =>
+              node instanceof Element &&
+              node.closest(
+                'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="combobox"], [role="slider"], [role="spinbutton"]',
+              ),
+          )
       )
         return
       const key = event.key.toLowerCase()
       if (key === 'enter') {
-        if (target.tagName === 'BUTTON') return
+        if (
+          target instanceof Element &&
+          target.closest('button, a, [role="button"]')
+        )
+          return
         if (game.result) deal()
         else if (guessPending && yourTurn) lockGuess()
         else return
@@ -826,8 +846,8 @@ export default function App() {
     },
     {
       target: 'progress',
-      title: 'Track real improvement',
-      body: 'Decision accuracy and read calibration, with luck separated out. Results are noisy; decisions are what you control.',
+      title: 'Review your practice',
+      body: 'Compare decisions and reads with the practice model. Results and modeled expectations have different coverage; neither proves learning.',
     },
   ]
 
@@ -842,7 +862,7 @@ export default function App() {
   ) : reviewing ? (
     <span className="sheet-summary">
       <Target size={14} /> Hand review
-      {handAccuracy !== null ? ` · accuracy ${handAccuracy}` : ''}
+      {handAccuracy !== null ? ` · modeled accuracy ${handAccuracy}` : ''}
     </span>
   ) : (
     <span className="sheet-summary">

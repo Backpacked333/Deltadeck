@@ -123,13 +123,13 @@ export default function MyProfile({
       <div className="tiles" aria-label="At a glance">
         <div className="tile">
           <Gauge size={18} />
-          <span className="label">Practice accuracy</span>
+          <span className="label">Modeled practice accuracy</span>
           <strong>
             {practice.accuracy === null ? '—' : Math.round(practice.accuracy)}
           </strong>
           <small>
-            {practice.hands.length} hand
-            {practice.hands.length === 1 ? '' : 's'} against Atlas
+            {practice.coverage.eligible} of {practice.hands.length} hands with
+            nonguided grades · {practice.decisions.length} decisions
           </small>
         </div>
         <div className="tile">
@@ -175,7 +175,11 @@ export default function MyProfile({
         <div className="panel-head">
           <div>
             <h2 id="me-practice">Practice</h2>
-            <p>Your hands against Atlas, graded decision by decision.</p>
+            <p>
+              Your hands against Atlas. Guided and pending hands stay in history
+              but not in accuracy; model grades are not proof of unaided
+              learning.
+            </p>
           </div>
           <a className="text-button" href="#progress">
             All practice stats
