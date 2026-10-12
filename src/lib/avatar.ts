@@ -9,7 +9,7 @@ export const AVATAR_BUCKET = 'avatars'
 /** The square the browser uploads, in pixels: twice a large plate's circle. */
 export const AVATAR_SIZE = 256
 /** Larger photos are refused before decoding them. */
-export const MAX_INPUT_BYTES = 5 * 1024 * 1024
+export const MAX_INPUT_BYTES = 100 * 1024 * 1024
 
 /** The object's path for an account and version, as a table frame names it. */
 export const avatarPath = (userId: string, version: number) =>
@@ -40,7 +40,7 @@ export async function resizeToWebp(file: Blob): Promise<Blob> {
   if (!file.type.startsWith('image/'))
     throw new Error('Choose an image file (a JPEG, PNG or WebP).')
   if (file.size > MAX_INPUT_BYTES)
-    throw new Error('That image is over 5 MB. Choose a smaller one.')
+    throw new Error('That image is over 100 MB. Choose a smaller one.')
   let bitmap: ImageBitmap
   try {
     bitmap = await createImageBitmap(file)

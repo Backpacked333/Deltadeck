@@ -207,10 +207,10 @@ describe('Your profile picture', () => {
       'The picture could not be uploaded.',
     )
     expect(calls.some((c) => c[0] === 'rpc')).toBe(false)
-    resized.fail = 'That image is over 5 MB. Choose a smaller one.'
+    resized.fail = 'That image is over 100 MB. Choose a smaller one.'
     await userEvent.upload(input, photo)
     await waitFor(() =>
-      expect(screen.getByRole('alert')).toHaveTextContent('over 5 MB'),
+      expect(screen.getByRole('alert')).toHaveTextContent('over 100 MB'),
     )
   })
 })
