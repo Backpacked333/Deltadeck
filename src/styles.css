@@ -4893,3 +4893,211 @@ html.resizing * {
   flex-wrap: wrap;
   gap: 8px;
 }
+
+/* The player portrait on Your profile (src/profile/portrait/Portrait.tsx). */
+.portrait h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.portrait h2 svg {
+  color: var(--brand-2);
+}
+.portrait h3 {
+  font-size: 15px;
+  margin-bottom: 8px;
+}
+.portrait-confidence {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+.portrait-confidence.solid,
+.portrait-confidence.settling {
+  background: var(--positive-soft);
+  color: var(--positive);
+}
+.portrait-identity {
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) 1fr;
+  gap: 24px;
+  align-items: start;
+}
+.style-map {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.style-map-bg {
+  fill: var(--surface-2);
+  stroke: var(--border);
+}
+.style-map-axis {
+  stroke: var(--border-strong);
+  stroke-dasharray: 4 4;
+}
+.style-map-label {
+  fill: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+}
+.style-map-axis-text {
+  fill: var(--text-3);
+  font-size: 10px;
+}
+.style-map-you {
+  fill: var(--brand-2);
+  stroke: var(--surface);
+  stroke-width: 3;
+}
+.style-map-format {
+  fill: none;
+  stroke-width: 2;
+}
+.style-map-format.practice {
+  stroke: var(--positive);
+}
+.style-map-format.heads-up {
+  stroke: var(--warning);
+}
+.style-map-format.six-max {
+  stroke: var(--negative);
+}
+.portrait-headline {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.portrait-kicker {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--brand-2);
+}
+.portrait-headline > strong {
+  font-family: var(--font-display);
+  font-size: 28px;
+  line-height: 1.1;
+}
+.portrait-headline > p {
+  color: var(--text-2);
+  font-size: 14px;
+  max-width: 620px;
+}
+.portrait-traits {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px 20px;
+  margin-top: 8px;
+}
+.portrait-traits dt {
+  font-size: 13px;
+  font-weight: 600;
+}
+.portrait-traits dd {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 3px 0 0;
+}
+.portrait-traits small {
+  font-size: 12px;
+  color: var(--text-3);
+}
+.portrait-bar {
+  display: block;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.portrait-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--brand-2);
+}
+.portrait-big-picture {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.portrait-big-picture > p {
+  font-size: 14px;
+  line-height: 1.55;
+  max-width: 820px;
+}
+.portrait-lists {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+  margin-top: 8px;
+}
+.portrait-list ul {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+.portrait-list.good h3 {
+  color: var(--positive);
+}
+.portrait-list.bad h3 {
+  color: var(--negative);
+}
+.portrait-numbers summary {
+  cursor: pointer;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.portrait-numbers h3 {
+  margin-top: 14px;
+}
+.portrait-table-wrap {
+  overflow-x: auto;
+}
+.portrait-table {
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  min-width: 100%;
+}
+.portrait-table th,
+.portrait-table td {
+  padding: 6px 10px;
+  text-align: right;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.portrait-table th[scope='row'] {
+  text-align: left;
+  font-weight: 600;
+}
+.portrait-table abbr {
+  text-decoration: none;
+}
+.portrait-table thead th {
+  color: var(--text-3);
+  font-weight: 600;
+}
+@media (max-width: 680px) {
+  .portrait-identity {
+    grid-template-columns: 1fr;
+  }
+  .style-map {
+    max-width: 260px;
+    margin: 0 auto;
+  }
+}

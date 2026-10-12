@@ -32,6 +32,23 @@ vi.mock('./account', () => ({
   },
 }))
 
+// Every hand the portrait reads: this browser's here (load.test.ts reads
+// the account's), and who it was asked for.
+const everyHand = vi.hoisted(() => ({ asked: [] as unknown[][] }))
+vi.mock('./portrait/load', async (original) => {
+  const { fromPractice } = await import('./portrait/hands')
+  return {
+    ...(await original<typeof import('./portrait/load')>()),
+    loadEveryHand: async (...args: unknown[]) => {
+      everyHand.asked.push(args)
+      return {
+        hands: (args[2] as HandRecord[]).map(fromPractice).filter(Boolean),
+        missing: [],
+      }
+    },
+  }
+})
+
 const { default: MyProfile } = await import('./MyProfile')
 
 const hand = (id: string, net: number): HandRecord => ({
@@ -96,6 +113,7 @@ afterEach(() => {
   online.fail = false
   online.client = {}
   resized.fail = null
+  everyHand.asked = []
 })
 
 const USER = '0c0c0c0c-0c0c-4c0c-8c0c-0c0c0c0c0c0c'
@@ -247,6 +265,25 @@ describe('Your profile', () => {
     expect(
       screen.getByRole('link', { name: 'View your public profile' }),
     ).toHaveAttribute('href', '#u/carol')
+  })
+
+  it("draws the portrait from every hand on the player's account", async () => {
+    online.history = history
+    render(
+      <MyProfile
+        progress={{ ...emptyProgress(), hands: [hand('a', 40)] }}
+        username="carol"
+      />,
+    )
+    const portrait = await screen.findByRole('region', {
+      name: 'Your player portrait',
+    })
+    expect(
+      await within(portrait).findByText(/Play 29 more for a first read/),
+    ).toBeVisible()
+    expect(everyHand.asked).toEqual([
+      [online.client, 'u1', [expect.any(Object)]],
+    ])
   })
 
   it('says what to do first when there is no history', async () => {
