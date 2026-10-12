@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useState,
+  useSyncExternalStore,
+} from 'react'
 import type { PlayerAction, SeatId } from '../engine/types'
 import { INITIAL_STATE, TableConnection } from './client'
 import { PING_EVERY_MS } from './heartbeat'
@@ -37,6 +43,22 @@ export function useTable(
     connection?.subscribe ?? noSubscription,
     () => connection?.getState() ?? INITIAL_STATE,
   )
+  useLayoutEffect(
+    () => connection?.markRendered(state.frameTiming),
+    [connection, state.frameTiming],
+  )
+  const retryCommand = useCallback(
+    () => connection?.retryCommand() ?? false,
+    [connection],
+  )
+  const checkCommand = useCallback(
+    () => connection?.checkCommand() ?? false,
+    [connection],
+  )
+  const cancelStart = useCallback(
+    () => connection?.cancelStart() ?? false,
+    [connection],
+  )
   const act = useCallback(
     (action: PlayerAction) => connection?.act(action) ?? false,
     [connection],
@@ -70,6 +92,9 @@ export function useTable(
     sitOut,
     sitIn,
     answer,
+    retryCommand,
+    checkCommand,
+    cancelStart,
     rtt: connection?.rtt ?? null,
   }
 }

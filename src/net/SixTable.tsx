@@ -24,6 +24,8 @@ import { Cards } from './ReviewLive'
 import type { PlateSeat } from './SeatPlate'
 import { SixFlights } from './SixFlights'
 import { SixRing } from './SixRing'
+import { useLiveRunout } from '../state/runout'
+import { CommandStatus, LastHand } from './TrustState'
 
 const SEATS = 6
 /**
@@ -34,22 +36,6 @@ const SEATS = 6
  */
 const TOP_UP = buyIn(SIX_BLINDS.bb)
 const noop = () => {}
-/** Where a tab keeps the hand it stood from (`matchId:handNo:seat`). */
-const STOOD_KEY = 'qp.six.stoodFrom'
-const readStood = (): string | null => {
-  try {
-    return sessionStorage.getItem(STOOD_KEY)
-  } catch {
-    return null
-  }
-}
-const keepStood = (key: string) => {
-  try {
-    sessionStorage.setItem(STOOD_KEY, key)
-  } catch {
-    // Storage refused (a private window): this page still knows.
-  }
-}
 const chips = (n: number) => Math.round(n).toLocaleString('en-US')
 /** "bob", "bob and carol", "bob, carol and dave". */
 const listed = (names: string[]) =>
@@ -77,6 +63,8 @@ export function SixTable({
   stand,
   sitOut,
   sitIn,
+  retryCommand = () => false,
+  checkCommand = () => false,
 }: {
   table: MatchInfo
   state: TableState
@@ -88,24 +76,29 @@ export function SixTable({
   stand: () => boolean
   sitOut: () => boolean
   sitIn: () => boolean
+  retryCommand?: () => boolean
+  checkCommand?: () => boolean
 }) {
   const { view, seat } = state
   const dealt = view && isSeated(view) ? view : null
   const live = view && !view.result ? view : null
-  // Our own seat's controls. The hand we are dealt into while it is being
-  // played, if any: a rebuy waits for it to end, and a stand during it
-  // keeps the seat until then. The wire has no marker of that pending
-  // stand (ADR, clarifications from PR-12), so we remember the hand and
-  // seat we stood from ourselves, in this tab, so a reload still knows.
   const playing = dealt && !dealt.result ? dealt : null
   const handKey = view ? `${view.matchId}:${view.handNo}` : null
-  const standKey = playing ? `${handKey}:${playing.you}` : null
-  const [stoodFrom, setStoodFrom] = useState(readStood)
-  const leaving = standKey !== null && stoodFrom === standKey
-  // The bar only while the move is ours to make: dealt in, our turn by the
-  // server's own legal moves, a socket to send on, no move in flight, and
-  // not after we stood from this hand (the table folds us; it refuses a
-  // move from a player who stood).
+  const leaving = state.ownControl?.standing ?? false
+  const runout = useLiveRunout(
+    view,
+    state.presentation,
+    state.frameTiming?.at,
+    state.presentationEpoch,
+  )
+  const shownView =
+    view && runout.revealing
+      ? {
+          ...view,
+          board: view.board.slice(0, runout.visible),
+          result: undefined,
+        }
+      : view
   const legal =
     dealt &&
     !dealt.result &&
@@ -181,27 +174,22 @@ export function SixTable({
     table.status !== 'finished'
   const mine =
     seat === null ? undefined : table.players.find((p) => p.seat === seat)
-  const controls = state.status === 'open' && table.status !== 'finished'
-  // A Rebuy, a Sit out or Sit in, or a Stand up between hands, sent and
-  // not yet answered. The answer is a welcome (the new stack or status;
-  // no seat) or an error, and the button stays away until then: a double
-  // press would send the frame twice, and the second one's refusal
-  // (not_below, not_seated) would flash just after the first worked.
-  // Keyed by the hand, our stack and our status, which the answer
-  // changes. A dropped socket may have lost the frame, and a new seat has
-  // asked nothing, so either forgets it.
-  const [asked, setAsked] = useState<string | null>(null)
-  const askKey = `${handKey}:${mine?.stack}:${mine?.status}`
-  useEffect(() => setAsked(null), [state.status, seat])
+  const busy =
+    !!state.command &&
+    ['sending', 'unknown', 'accepted-pending-effect'].includes(
+      state.command.phase,
+    )
+  const controls =
+    state.status === 'open' &&
+    !state.resyncing &&
+    !busy &&
+    !!state.ownControl?.scope &&
+    table.status !== 'finished'
   // The roster's stack is what the next hand deals us (after the last
   // hand, or a rebuy); the server decides, this only offers.
   const canRebuy =
-    controls &&
-    !playing &&
-    mine?.stack !== undefined &&
-    mine.stack < TOP_UP &&
-    asked !== `rebuy:${askKey}`
-  const canStand = controls && !!mine && !leaving && asked !== `stand:${askKey}`
+    controls && !playing && mine?.stack !== undefined && mine.stack < TOP_UP
+  const canStand = controls && !!mine && !leaving
   // Seated without chips and out of any hand being played: no hand deals
   // us in until we rebuy (the server deals only funded players).
   const broke = !playing && mine?.stack === 0
@@ -209,30 +197,22 @@ export function SixTable({
   // into the one being played. A player with no chips sits out too, and
   // is offered Rebuy instead of Sit in: a rebuy at 0 deals them in.
   const out = mine?.status === 'sitting_out'
-  const canSitOut =
-    controls && !!mine && !out && !leaving && asked !== `out:${askKey}`
-  const canSitIn =
-    controls &&
-    out &&
-    !leaving &&
-    (mine?.stack ?? 0) > 0 &&
-    asked !== `in:${askKey}`
+  const canSitOut = controls && !!mine && !out && !leaving
+  const canSitIn = controls && out && !leaving && (mine?.stack ?? 0) > 0
   // What the live line under our seat says of our status. Back in after
   // sitting out, it says so until a hand deals us in. Stood up by the
   // table after sitting out (not by our own Stand up), the status below
   // the ring says why the seat is gone.
   const status = mine?.status ?? null
   const lastStatus = useRef<string | null>(null)
-  // A stand of our own is still to free the seat: pressed here, or the
-  // hand this tab remembers standing from (`leaving`), which a reload
-  // keeps where a press alone would be forgotten. A hand that deals us
-  // in otherwise means none is: a stand that never reached the table
-  // (the socket dropped) must not hide a later removal.
-  const stoodUp = useRef(false)
+  const stoodUp =
+    state.command?.envelope.kind === 'stand' &&
+    ['completed', 'accepted-pending-effect'].includes(state.command.phase)
+  const acceptedStandId = useRef<string | null>(null)
   useEffect(() => {
-    if (leaving) stoodUp.current = true
-    else if (standKey !== null) stoodUp.current = false
-  }, [leaving, standKey])
+    if (state.ownControl?.pendingIntent?.kind === 'stand')
+      acceptedStandId.current = state.ownControl.pendingIntent.commandId
+  }, [state.ownControl])
   const [backAt, setBackAt] = useState<string | null>(null)
   const [removed, setRemoved] = useState(false)
   useEffect(() => {
@@ -244,29 +224,15 @@ export function SixTable({
       setRemoved(false)
       return
     }
-    if (lastStatus.current === 'sitting_out' && !stoodUp.current)
+    const recoveredStand = state.ownControl?.commandOutcomes.some(
+      (o) =>
+        o.commandId === acceptedStandId.current && o.disposition === 'accepted',
+    )
+    if (lastStatus.current === 'sitting_out' && !stoodUp && !recoveredStand)
       setRemoved(true)
     lastStatus.current = null
-    stoodUp.current = false
-  }, [seat, status, handKey])
+  }, [seat, status, handKey, stoodUp, state.ownControl])
   const back = !out && !playing && backAt === (handKey ?? '')
-  const onRebuy = () => {
-    if (rebuy()) setAsked(`rebuy:${askKey}`)
-  }
-  const onStand = () => {
-    if (!stand()) return
-    stoodUp.current = true
-    if (standKey) {
-      setStoodFrom(standKey)
-      keepStood(standKey)
-    } else setAsked(`stand:${askKey}`)
-  }
-  const onSitOut = () => {
-    if (sitOut()) setAsked(`out:${askKey}`)
-  }
-  const onSitIn = () => {
-    if (sitIn()) setAsked(`in:${askKey}`)
-  }
   // The plates, also for the chip flights: a payout lands only on the
   // plate of the winner it left for.
   const ring = plates(table, view, nameOf, seat !== null)
@@ -293,6 +259,7 @@ export function SixTable({
           </span>
         )}
       </div>
+      <CommandStatus state={state} retry={retryCommand} check={checkCommand} />
       <SixRing
         players={ring}
         you={seat}
@@ -303,9 +270,16 @@ export function SixTable({
         clock={live && live.toAct !== null ? live.clock : null}
         clockOffset={state.clockOffset}
         onSit={canSit ? (s) => void sit(s) : undefined}
-        overlay={<SixFlights view={view} seat={seat} players={ring} />}
+        overlay={
+          <SixFlights
+            key={`${handKey}:${state.ownControl?.scope?.seatGeneration ?? 0}:${state.presentationEpoch}:${table.players.map((p) => `${p.seat}:${p.username}`).join('|')}`}
+            view={shownView}
+            seat={seat}
+            players={ring}
+          />
+        }
       >
-        <Middle view={view} nameOf={nameOf} />
+        <Middle view={shownView} nameOf={nameOf} />
       </SixRing>
       <div
         className="six-dock"
@@ -316,7 +290,17 @@ export function SixTable({
         }
       >
         {dealt && legal ? (
-          <SixActions view={dealt} legal={legal} act={act} onHeight={setDock} />
+          <SixActions
+            view={dealt}
+            legal={legal}
+            act={act}
+            onHeight={setDock}
+            disabled={!!state.pending || state.resyncing}
+          />
+        ) : runout.revealing ? (
+          <p className="six-wait" role="status">
+            All-in reveal — the completed result remains in Last hand.
+          </p>
         ) : (
           <SixStatus
             table={table}
@@ -349,12 +333,13 @@ export function SixTable({
                     ? 'Back in from the next hand.'
                     : ''
           }
-          onRebuy={onRebuy}
-          onSitOut={onSitOut}
-          onSitIn={onSitIn}
-          onStand={onStand}
+          onRebuy={rebuy}
+          onSitOut={sitOut}
+          onSitIn={sitIn}
+          onStand={stand}
         />
       )}
+      <LastHand completion={state.completion} />
       {flash && (
         <p className="live-error" role="alert">
           {flash}
@@ -585,12 +570,14 @@ function SixActions({
   legal,
   act,
   onHeight,
+  disabled,
 }: {
   view: SeatedView
   legal: LegalActions
   act: (action: PlayerAction) => boolean
   /** The bar's own height, whenever it changes. */
   onHeight: (px: number) => void
+  disabled: boolean
 }) {
   const box = useRef<HTMLDivElement>(null)
   useLayoutEffect(() => {
@@ -618,6 +605,7 @@ function SixActions({
   )
   const size = (to: number) => setSizing({ id: decision, to })
   const move = (kind: Move) => {
+    if (disabled) return
     if (kind === 'fold') act({ type: 'fold' })
     else if (kind === 'continue')
       act({ type: legal.canCheck ? 'check' : 'call' })
@@ -629,7 +617,7 @@ function SixActions({
       <ActionBar
         game={{ bets, pot, stacks: view.players.map((p) => p.stack) }}
         legal={legal}
-        yourTurn
+        yourTurn={!disabled}
         heroTurn
         paused={false}
         raiseTo={raiseTo}

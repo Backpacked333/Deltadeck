@@ -16,6 +16,7 @@ import type {
   LobbyMsg,
   MatchInfo,
   ServerMsg,
+  SeatCommandV1,
   TableRow,
 } from '../src/shared/protocol'
 
@@ -257,6 +258,14 @@ export async function fakeSixTable(
   )
   let seq = 0
   let lastReqId: string | null = null
+  let lastCommand: SeatCommandV1 | null = null
+  const scope = {
+    tableId: SIX_TABLE,
+    activationId: 'fixture-activation',
+    membershipGeneration: 1,
+    seat: 0,
+    seatGeneration: 1,
+  }
   const passive = (state: HandState) =>
     act(state, state.toAct!, {
       type: legalActions(state).canCheck ? 'check' : 'call',
@@ -301,7 +310,41 @@ export async function fakeSixTable(
           commitment: null,
         })
       : null
-    const base = { seq: ++seq, matchId: SIX_TABLE, serverNow: Date.now() }
+    const base = {
+      seq: ++seq,
+      matchId: SIX_TABLE,
+      serverNow: Date.now(),
+      ownControl: {
+        scope: seated ? scope : null,
+        stateVersion: seq,
+        standing,
+        pendingIntent:
+          standing && lastCommand
+            ? {
+                commandId: lastCommand.commandId,
+                kind: lastCommand.kind,
+                acceptedAtVersion: seq,
+                appliesAfter: lastCommand.hand,
+              }
+            : null,
+        commandOutcomes: lastCommand
+          ? [
+              {
+                t: 'command_outcome' as const,
+                v: 1 as const,
+                commandId: lastCommand.commandId,
+                disposition: 'accepted' as const,
+                effect: standing
+                  ? ('pending' as const)
+                  : ('completed' as const),
+                stateVersion: seq,
+                reason: 'ok' as const,
+                scope,
+              },
+            ]
+          : [],
+      },
+    }
     return t === 'welcome'
       ? { ...base, t, seat: seated ? 0 : null, table: table(), view }
       : { ...base, t, table: table(), view }
@@ -337,7 +380,9 @@ export async function fakeSixTable(
       if (answerPing(ws, data)) return
       const msg = JSON.parse(String(data)) as ClientMsg
       received.push(msg)
-      if (msg.t === 'rebuy') {
+      if (msg.t === 'seat_command') lastCommand = msg
+      const kind = msg.t === 'seat_command' ? msg.kind : msg.t
+      if (kind === 'rebuy') {
         if (!seated) return error('not_seated', 'You have no seat here')
         if (!isOver(hand))
           return error('in_hand', 'You can rebuy once this hand is over')
@@ -346,14 +391,14 @@ export async function fakeSixTable(
         stacks[0] = 2000
         return send(frame('welcome'))
       }
-      if (msg.t === 'sit_out' || msg.t === 'sit_in') {
+      if (kind === 'sit_out' || kind === 'sit_in') {
         if (!seated) return error('not_seated', 'You have no seat here')
-        if (msg.t === 'sit_in' && status === 'sitting_out' && !stacks[0])
+        if (kind === 'sit_in' && status === 'sitting_out' && !stacks[0])
           return error('no_chips', 'Rebuy to be dealt in')
-        status = msg.t === 'sit_out' ? 'sitting_out' : 'playing'
+        status = kind === 'sit_out' ? 'sitting_out' : 'playing'
         return send(frame('welcome'))
       }
-      if (msg.t === 'stand') {
+      if (kind === 'stand') {
         if (!seated) return error('not_seated', 'You have no seat here')
         if (isOver(hand)) {
           seated = false

@@ -12,7 +12,6 @@ import {
   PROTOCOL,
 } from '../shared/protocol'
 import type {
-  ClientMsg,
   ErrorCode,
   HandRecordV1,
   InviteRequest,
@@ -20,8 +19,33 @@ import type {
   Reveal,
   SeatView,
   ServerMsg,
+  SeatCommandV1,
+  CommandOutcomeV1,
+  OwnControlV1,
+  CancelStartV1,
+  HandCompletionV1,
+  PresentationStateV1,
 } from '../shared/protocol'
 import { Heartbeat, RttStore } from './heartbeat'
+import { LiveTiming, renderIdentity } from './liveTiming'
+import type { TimingSample } from './liveTiming'
+
+export type SeatCommandState = {
+  envelope: SeatCommandV1
+  phase:
+    | 'sending'
+    | 'unknown'
+    | 'accepted-pending-effect'
+    | 'completed'
+    | 'rejected'
+    | 'stale'
+  reason: CommandOutcomeV1['reason'] | null
+  retryable: boolean
+}
+export type StartCancellation = {
+  envelope: CancelStartV1
+  phase: 'sending' | 'unknown' | 'cancelled' | 'game_started' | 'stale'
+}
 
 export type ConnectionStatus =
   | 'connecting'
@@ -81,6 +105,17 @@ export type InviteState = {
 }
 
 export type TableState = {
+  ownControl: OwnControlV1 | null
+  command: SeatCommandState | null
+  cancellation: StartCancellation | null
+  start: Extract<ServerMsg, { t: 'welcome' }>['start'] | null
+  completion: HandCompletionV1 | null
+  presentation: PresentationStateV1 | null
+  frameTiming: TimingSample | null
+  /** A fresh authoritative frame is required before any new command. */
+  resyncing: boolean
+  /** Changes on resync/wake so obsolete decorative work can be cancelled. */
+  presentationEpoch: number
   status: ConnectionStatus
   seat: SeatId | null
   table: MatchInfo | null
@@ -107,6 +142,15 @@ const LIMITED = {
 } as const
 
 export const INITIAL_STATE: TableState = {
+  ownControl: null,
+  command: null,
+  cancellation: null,
+  start: null,
+  completion: null,
+  presentation: null,
+  frameTiming: null,
+  resyncing: true,
+  presentationEpoch: 0,
   status: 'connecting',
   seat: null,
   table: null,
@@ -222,6 +266,12 @@ export class TableConnection {
   /** Bumped by every open() and every drop, so a stale open() gives up. */
   private generation = 0
   private listening = false
+  private controlTimer: ReturnType<typeof setTimeout> | null = null
+  private cancelTimer: ReturnType<typeof setTimeout> | null = null
+  private resyncTimer: ReturnType<typeof setTimeout> | null = null
+  private frameId = 0
+  private renderedFrame = 0
+  readonly timing: LiveTiming
 
   constructor(
     private readonly matchId: string,
@@ -238,6 +288,7 @@ export class TableConnection {
       now: options.now ?? (() => performance.now()),
       random: options.random ?? Math.random,
     }
+    this.timing = new LiveTiming(this.options.now)
     this.heartbeat = new Heartbeat({
       intervalMs: this.options.heartbeatMs,
       now: this.options.now,
@@ -270,6 +321,9 @@ export class TableConnection {
     if (this.timer) clearTimeout(this.timer)
     if (this.watchdog) clearTimeout(this.watchdog)
     if (this.answerTimer) clearTimeout(this.answerTimer)
+    if (this.controlTimer) clearTimeout(this.controlTimer)
+    if (this.cancelTimer) clearTimeout(this.cancelTimer)
+    if (this.resyncTimer) clearTimeout(this.resyncTimer)
     this.timer = this.watchdog = this.answerTimer = null
     this.heartbeat.stop()
     this.socket?.close(1000, 'leaving')
@@ -279,9 +333,17 @@ export class TableConnection {
   /** Sends a move for the current decision. False if it is not ours to make. */
   act(action: PlayerAction): boolean {
     const { view, seat, pending, status } = this.state
-    if (status !== 'open' || !view || pending) return false
+    if (
+      status !== 'open' ||
+      this.state.resyncing ||
+      !view ||
+      pending ||
+      this.state.ownControl?.standing
+    )
+      return false
     if (view.toAct !== seat || view.street === 'showdown') return false
     const reqId = this.options.newRequestId()
+    this.markIntent(reqId)
     this.socket!.send(
       JSON.stringify({
         t: 'act',
@@ -291,6 +353,7 @@ export class TableConnection {
         action,
       }),
     )
+    this.markSent(reqId)
     this.set({ pending: reqId, error: null })
     return true
   }
@@ -342,7 +405,16 @@ export class TableConnection {
   /** Asks the table for a fresh welcome, if this socket is open. */
   resync(): boolean {
     if (this.state.status !== 'open') return false
+    this.set({
+      resyncing: true,
+      presentationEpoch: this.state.presentationEpoch + 1,
+    })
     this.socket!.send(JSON.stringify({ t: 'resync' }))
+    if (this.resyncTimer) clearTimeout(this.resyncTimer)
+    const frameId = this.frameId
+    this.resyncTimer = setTimeout(() => {
+      if (this.state.resyncing && this.frameId === frameId) this.drop()
+    }, RESYNC_WAIT_MS)
     return true
   }
 
@@ -352,39 +424,242 @@ export class TableConnection {
    * the new stack (or an error says why not).
    */
   rebuy(): boolean {
-    return this.sendSeated({ t: 'rebuy' })
+    return this.sendSeated('rebuy')
   }
 
   /**
    * At a six table: leave the seat, at once between hands, or when the
-   * hand this player is dealt into ends (folding when the action reaches
-   * them). The wire has no marker of a pending stand; the caller knows.
+   * hand this player is dealt into ends. Acceptance and effect are separate.
    */
   stand(): boolean {
-    return this.sendSeated({ t: 'stand' })
+    return this.sendSeated('stand')
   }
 
   /**
-   * At a six table: sit out from the next hand, keeping the seat. The
-   * frame is the type alone; the welcome carries the new status.
+   * At a six table: sit out from the next hand, keeping the seat.
    */
   sitOut(): boolean {
-    return this.sendSeated({ t: 'sit_out' })
+    return this.sendSeated('sit_out')
   }
 
   /** At a six table, sitting out: be dealt in again from the next hand. */
   sitIn(): boolean {
-    return this.sendSeated({ t: 'sit_in' })
+    return this.sendSeated('sit_in')
   }
 
-  /** Sends a seat-only frame, if this socket is open and has a seat. */
-  private sendSeated(
-    msg: Extract<ClientMsg, { t: 'rebuy' | 'stand' | 'sit_out' | 'sit_in' }>,
-  ) {
-    const { status, seat } = this.state
-    if (status !== 'open' || seat === null) return false
-    this.socket!.send(JSON.stringify(msg))
+  private sendSeated(kind: SeatCommandV1['kind']) {
+    const { status, seat, ownControl, view, command, resyncing } = this.state
+    const scope = ownControl?.scope
+    if (
+      status !== 'open' ||
+      resyncing ||
+      seat === null ||
+      !scope ||
+      this.state.table?.kind !== 'six-casual'
+    )
+      return false
+    if (
+      command &&
+      ['sending', 'unknown', 'accepted-pending-effect'].includes(command.phase)
+    )
+      return false
+    const envelope: SeatCommandV1 = {
+      t: 'seat_command',
+      v: 1,
+      commandId: this.options.newRequestId(),
+      kind,
+      tableId: scope.tableId,
+      membershipGeneration: scope.membershipGeneration,
+      seatGeneration: scope.seatGeneration,
+      expectedStateVersion: ownControl.stateVersion,
+      hand: view
+        ? { tableId: scope.tableId, matchId: view.matchId, handNo: view.handNo }
+        : null,
+    }
+    this.markIntent(envelope.commandId)
+    this.transmitCommand(envelope)
     return true
+  }
+
+  private transmitCommand(envelope: SeatCommandV1) {
+    this.set({
+      command: { envelope, phase: 'sending', reason: null, retryable: false },
+    })
+    this.socket!.send(JSON.stringify(envelope))
+    this.markSent(envelope.commandId)
+    if (this.controlTimer) clearTimeout(this.controlTimer)
+    this.controlTimer = setTimeout(
+      () => this.queryCommand(),
+      PENDING_WATCHDOG_MS,
+    )
+  }
+
+  private commandApplicable(envelope: SeatCommandV1) {
+    const { ownControl, view } = this.state
+    const scope = ownControl?.scope
+    return (
+      !!scope &&
+      scope.tableId === envelope.tableId &&
+      scope.membershipGeneration === envelope.membershipGeneration &&
+      scope.seatGeneration === envelope.seatGeneration &&
+      ownControl.stateVersion === envelope.expectedStateVersion &&
+      (view
+        ? envelope.hand?.matchId === view.matchId &&
+          envelope.hand.handNo === view.handNo
+        : envelope.hand === null)
+    )
+  }
+
+  /** Never mint a new identity for an unknown effect. Resync/journal first. */
+  retryCommand(): boolean {
+    const command = this.state.command
+    if (
+      this.state.status !== 'open' ||
+      this.state.resyncing ||
+      !command?.retryable ||
+      !this.commandApplicable(command.envelope)
+    )
+      return false
+    this.transmitCommand(command.envelope)
+    return true
+  }
+
+  checkCommand(): boolean {
+    if (this.state.status !== 'open' || !this.state.command) return false
+    this.queryCommand()
+    return true
+  }
+
+  private queryCommand() {
+    const command = this.state.command
+    if (!command || !['sending', 'unknown'].includes(command.phase)) return
+    this.set({ command: { ...command, phase: 'unknown', retryable: false } })
+    if (this.state.status !== 'open') return
+    this.resync()
+    this.socket!.send(
+      JSON.stringify({
+        t: 'command_status',
+        commandId: command.envelope.commandId,
+      }),
+    )
+    const heard = this.heard
+    if (this.controlTimer) clearTimeout(this.controlTimer)
+    this.controlTimer = setTimeout(() => {
+      if (this.heard === heard) this.drop()
+    }, RESYNC_WAIT_MS)
+  }
+
+  private commandOutcome(outcome: CommandOutcomeV1) {
+    const command = this.state.command
+    if (!command || command.envelope.commandId !== outcome.commandId) return
+    if (['completed', 'rejected'].includes(command.phase)) return
+    if (
+      command.phase === 'stale' &&
+      (command.reason !== 'state_changed' || outcome.disposition === 'unknown')
+    )
+      return
+    if (
+      command.phase === 'accepted-pending-effect' &&
+      outcome.disposition === 'unknown'
+    )
+      return
+    if (this.controlTimer) clearTimeout(this.controlTimer)
+    const phase =
+      outcome.disposition === 'accepted'
+        ? outcome.effect === 'pending'
+          ? 'accepted-pending-effect'
+          : 'completed'
+        : outcome.disposition
+    this.set({
+      command: {
+        ...command,
+        phase,
+        reason: outcome.reason,
+        retryable:
+          phase === 'unknown' &&
+          outcome.reason === 'not_found' &&
+          !this.state.resyncing &&
+          this.commandApplicable(command.envelope),
+      },
+    })
+    if (outcome.disposition === 'accepted')
+      this.markAcknowledged(outcome.commandId)
+  }
+
+  cancelStart(): boolean {
+    const { ownControl, start, status, cancellation, resyncing } = this.state
+    const scope = ownControl?.scope
+    if (
+      status !== 'open' ||
+      resyncing ||
+      !scope ||
+      !start ||
+      this.state.view ||
+      cancellation?.phase === 'sending'
+    )
+      return false
+    const envelope: CancelStartV1 =
+      cancellation?.phase === 'unknown'
+        ? cancellation.envelope
+        : {
+            t: 'cancel_start',
+            v: 1,
+            commandId: this.options.newRequestId(),
+            tableId: scope.tableId,
+            activationId: start.activationId,
+            membershipGeneration: scope.membershipGeneration,
+          }
+    if (
+      envelope.activationId !== start.activationId ||
+      envelope.membershipGeneration !== scope.membershipGeneration
+    )
+      return false
+    this.markIntent(envelope.commandId)
+    this.set({ cancellation: { envelope, phase: 'sending' } })
+    this.socket!.send(JSON.stringify(envelope))
+    this.markSent(envelope.commandId)
+    if (this.cancelTimer) clearTimeout(this.cancelTimer)
+    this.cancelTimer = setTimeout(() => {
+      if (this.state.cancellation?.phase !== 'sending') return
+      this.set({ cancellation: { envelope, phase: 'unknown' } })
+      this.resync()
+    }, PENDING_WATCHDOG_MS)
+    return true
+  }
+
+  private timingIdentity() {
+    return renderIdentity(
+      this.matchId,
+      this.state.view?.matchId ?? this.matchId,
+      this.seq,
+      this.state.view,
+    )
+  }
+  private markIntent(requestId: string) {
+    this.timing.mark({
+      phase: 'intent',
+      identity: this.timingIdentity(),
+      requestId,
+    })
+  }
+  private markSent(requestId: string) {
+    this.timing.mark({
+      phase: 'sent',
+      identity: this.timingIdentity(),
+      requestId,
+    })
+  }
+  private markAcknowledged(requestId: string) {
+    this.timing.mark({
+      phase: 'acknowledgement',
+      identity: this.timingIdentity(),
+      requestId,
+    })
+  }
+  markRendered(frame: TimingSample | null) {
+    if (!frame?.frameId || frame.frameId <= this.renderedFrame) return
+    this.renderedFrame = frame.frameId
+    this.timing.mark({ ...frame, phase: 'render' })
   }
 
   private set(patch: Partial<TableState>) {
@@ -433,6 +708,7 @@ export class TableConnection {
   }
 
   private onOffline = () => {
+    this.interrupted()
     if (this.state.status === 'open')
       this.set({ status: 'reconnecting', pending: null })
   }
@@ -448,12 +724,16 @@ export class TableConnection {
   private onVisible = () => {
     if (this.stopped || document.visibilityState !== 'visible') return
     const { status } = this.state
-    if (status === 'open') this.heartbeat.probe()
-    else if (status === 'reconnecting') this.reconnectNow()
+    if (status === 'open') {
+      this.heartbeat.probe()
+      this.resync()
+      this.queryCommand()
+    } else if (status === 'reconnecting') this.reconnectNow()
   }
 
   /** A new socket now, with the patience renewed: the network is back. */
   private reconnectNow() {
+    this.interrupted()
     if (this.timer) clearTimeout(this.timer)
     this.timer = null
     const old = this.socket
@@ -503,6 +783,7 @@ export class TableConnection {
       this.heartbeat.start()
     }
     socket.onmessage = (event) => {
+      if (this.socket !== socket || this.stopped) return
       this.heartbeat.heard()
       // The heartbeat's reply is not JSON: taken before the parse, so it
       // costs nothing and cannot be mistaken for a snapshot.
@@ -511,8 +792,11 @@ export class TableConnection {
         // A pong is proof of life too: an `offline` that no `online` ever
         // followed must not leave a socket that answers stuck disabled.
         // Only this socket's: a replaced one says nothing of the new path.
-        if (this.socket === socket && this.state.status === 'reconnecting')
+        if (this.socket === socket && this.state.status === 'reconnecting') {
           this.set({ status: 'open' })
+          this.resync()
+          this.queryCommand()
+        }
         return
       }
       // Only the table's own frames count for the watchdog: a pong shows
@@ -534,6 +818,7 @@ export class TableConnection {
   /** `socket` closed (or was given up): settle the state and, if due, retry. */
   private closed(socket: WebSocket, code: number, reason: string) {
     if (this.socket !== socket || this.stopped) return
+    this.interrupted()
     this.socket = null
     this.heartbeat.stop()
     this.rtt.reset()
@@ -573,6 +858,18 @@ export class TableConnection {
   }
 
   private receive(msg: ServerMsg) {
+    if (msg.t === 'command_outcome') {
+      this.commandOutcome(msg)
+      return
+    }
+    if (msg.t === 'cancel_start_result') {
+      const cancellation = this.state.cancellation
+      if (cancellation?.envelope.commandId !== msg.commandId) return
+      if (this.cancelTimer) clearTimeout(this.cancelTimer)
+      this.set({ cancellation: { ...cancellation, phase: msg.status } })
+      this.resync()
+      return
+    }
     if (msg.t === 'error') {
       this.set({
         error: { code: msg.code, message: msg.message },
@@ -612,7 +909,10 @@ export class TableConnection {
       return
     }
     if (msg.t === 'match_end') {
-      this.set({ ended: msg.result })
+      this.set({
+        ended: msg.result,
+        presentationEpoch: this.state.presentationEpoch + 1,
+      })
       return
     }
     if (msg.t === 'rating') {
@@ -638,6 +938,7 @@ export class TableConnection {
       return
     }
     if (msg.t === 'hand_end') {
+      if (msg.completion) this.keepCompletion(msg.completion)
       this.seen(msg.matchId, msg.handNo, (h) => ({ ...h, record: msg.record }))
       return
     }
@@ -654,11 +955,33 @@ export class TableConnection {
     // except a welcome, which is always the server's current truth.
     if (msg.t === 'state' && msg.seq < this.seq) return
     this.seq = msg.seq
+    const before = this.state.ownControl?.scope
+    const after = msg.ownControl?.scope
+    const changedSeat =
+      before?.membershipGeneration !== after?.membershipGeneration ||
+      before?.seatGeneration !== after?.seatGeneration
+    const completion = msg.presentation?.completion ?? msg.completion
+    const frameTiming = this.timing.mark({
+      phase: 'frame',
+      frameId: ++this.frameId,
+      identity: renderIdentity(this.matchId, msg.matchId, msg.seq, msg.view),
+      ...(msg.view?.lastReqId ? { requestId: msg.view.lastReqId } : {}),
+    })
+    if (this.state.pending && msg.view?.lastReqId === this.state.pending)
+      this.markAcknowledged(this.state.pending)
     const pending =
       this.state.pending && msg.view?.lastReqId === this.state.pending
         ? null
         : this.state.pending
     this.set({
+      ownControl: msg.ownControl ?? null,
+      start: msg.start ?? null,
+      presentation: msg.presentation ?? null,
+      frameTiming,
+      resyncing: false,
+      ...(changedSeat
+        ? { presentationEpoch: this.state.presentationEpoch + 1 }
+        : {}),
       ...(msg.t === 'welcome'
         ? { seat: msg.seat, pending: null }
         : { pending }),
@@ -667,6 +990,69 @@ export class TableConnection {
       clockOffset: this.offsetOf(msg.serverNow),
       hands: msg.view ? this.withView(msg.matchId, msg.view) : this.state.hands,
     })
+    if (completion) this.keepCompletion(completion)
+    const command = this.state.command
+    if (command) {
+      const outcome = msg.ownControl?.commandOutcomes.find(
+        (o) => o.commandId === command.envelope.commandId,
+      )
+      if (outcome) this.commandOutcome(outcome)
+      else if (['sending', 'unknown'].includes(command.phase)) {
+        // A snapshot cannot invent acceptance. Its scope can rule out replay.
+        const applicable = this.commandApplicable(command.envelope)
+        this.set({
+          command: {
+            ...command,
+            phase: applicable ? command.phase : 'stale',
+            reason: applicable ? command.reason : 'state_changed',
+            retryable: applicable && command.reason === 'not_found',
+          },
+        })
+        if (!applicable || msg.t === 'welcome')
+          this.socket?.send(
+            JSON.stringify({
+              t: 'command_status',
+              commandId: command.envelope.commandId,
+            }),
+          )
+      }
+    }
+    if (
+      msg.view &&
+      this.state.cancellation &&
+      ['sending', 'unknown'].includes(this.state.cancellation.phase)
+    )
+      this.set({
+        cancellation: { ...this.state.cancellation, phase: 'game_started' },
+      })
+  }
+
+  private interrupted() {
+    const { command, cancellation } = this.state
+    this.set({
+      resyncing: true,
+      presentationEpoch: this.state.presentationEpoch + 1,
+      ...(command && ['sending', 'unknown'].includes(command.phase)
+        ? { command: { ...command, phase: 'unknown', retryable: false } }
+        : {}),
+      ...(cancellation?.phase === 'sending'
+        ? { cancellation: { ...cancellation, phase: 'unknown' } }
+        : {}),
+    })
+  }
+
+  private keepCompletion(completion: HandCompletionV1) {
+    if (completion.hand.tableId !== this.matchId) return
+    if (this.state.view && completion.hand.matchId !== this.state.view.matchId)
+      return
+    const old = this.state.completion
+    if (
+      old &&
+      old.hand.matchId === completion.hand.matchId &&
+      old.terminalStateVersion >= completion.terminalStateVersion
+    )
+      return
+    this.set({ completion })
   }
 
   /**
