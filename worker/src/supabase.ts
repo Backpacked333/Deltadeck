@@ -23,6 +23,10 @@ type ServiceFn =
   | ArchiveCall['rpc']
   | 'audit_hand'
   | 'verify_hand'
+  | 'verify_hand_v2'
+  | 'audit_settlement'
+  | 'record_settlement_verdict'
+  | 'settlement_candidates'
   | 'record_grades'
 
 /** A call that must succeed: throws on any failure, returns the JSON result. */

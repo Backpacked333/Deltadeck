@@ -20,6 +20,7 @@ import type { Outcome, RatingChange } from '../../src/shared/protocol'
 import type { WorkerEnv } from './env'
 import type { ArchiveOutcome } from './supabase'
 import { describeError, logEvent } from './log'
+import { classifySettlement } from './settlement'
 
 /** What the table queues when a rated match finishes with a result. */
 export type RateCall = {
@@ -68,8 +69,28 @@ export async function applyRating(
   call: RateCall,
   now: number,
 ): Promise<RateOutcome> {
-  const playedAt = call.finishedAt ?? now
   try {
+    const verdict = await classifySettlement(env, call.matchId, { write: true })
+    if (
+      verdict.state !== 'verified' ||
+      verdict.certificate.disposition !== 'rated'
+    )
+      return { ok: false, code: 'P0002' }
+    const certificate = verdict.certificate
+    const playedAt = certificate.finishedAt
+    if (
+      certificate.finishedAt > now ||
+      call.players.length !== 2 ||
+      !certificate.players.every((p) =>
+        call.players.some(
+          (c) =>
+            c.seat === p.seat &&
+            c.userId === p.userId &&
+            c.outcome === p.outcome,
+        ),
+      )
+    )
+      return { ok: false, code: '23514' }
     for (let tries = 0; tries < STALE_TRIES; tries++) {
       const ids = call.players.map((p) => p.userId)
       const read = await fetch(
@@ -102,6 +123,8 @@ export async function applyRating(
           body: JSON.stringify({
             p: {
               matchId: call.matchId,
+              certificateDigest: certificate.evidenceDigest,
+              sourceToken: certificate.sourceToken,
               format: FORMAT,
               modelVersion: VERSION,
               finishedAt: new Date(playedAt).toISOString(),

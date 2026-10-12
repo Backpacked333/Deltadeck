@@ -1,0 +1,122 @@
+import { describe, expect, it, vi } from 'vitest'
+import { equity } from '../../src/engine/luck'
+import { ids } from '../../src/engine/testing'
+import { inspectSettlement } from '../src/settlement-evidence'
+import { classifySettlement, catchUpSettlements } from '../src/settlement'
+import { problemsWith } from '../src/verify'
+import { handFixture, settlementFixture } from './settlement-fixtures'
+import { env } from 'cloudflare:test'
+
+describe('F07 rated evidence', () => {
+  it('replays exact archived all-in equity; alteration, missing adjustment and non-finite values cannot verify', async () => {
+    const h = await handFixture(undefined, 1, 'flop')
+    expect(await problemsWith(h)).toEqual([])
+    h.record.luck!.adjustedBySeat[0]++
+    expect(await problemsWith(h)).toContain('luck')
+    h.record.luck!.adjustedBySeat[0] = Infinity
+    expect(await problemsWith(h)).toContain('non_finite_record')
+    const missing = await handFixture()
+    delete missing.record.luck
+    expect(await problemsWith(missing)).toContain('luck')
+  })
+  it('rejects noncanonical or duplicate seat domains and a source substitution', async () => {
+    const h = await handFixture()
+    h.holes['00'] = h.holes['0']
+    expect(await problemsWith(h)).toContain('seat_domain')
+    delete h.holes['00']
+    h.archive = { ...h.archive, deck: [1, 2] }
+    expect(await problemsWith(h)).toContain('archive_source')
+  })
+  it('golden turn oracle, symmetry, conservation, and preflop Worker benchmark', async () => {
+    const a = ids('Ah Ad'),
+      b = ids('Ks Kc'),
+      board = ids('Kd 7c 2h 9s')
+    expect(equity(a, b, board)).toBe(2 / 44)
+    expect(equity(a, b, board) + equity(b, a, board)).toBe(1)
+    const hand = await handFixture(undefined, 1, 'preflop')
+    const before = performance.now()
+    expect(await problemsWith(hand)).toEqual([])
+    console.info(
+      `F07 local workerd preflop verifier wall-ms=${performance.now() - before}; not deployed CPU quota evidence`,
+    )
+    expect(hand.record.luck!.equity![0]).toBeGreaterThan(0.81)
+    expect(hand.record.luck!.equity![0]).toBeLessThan(0.83)
+    expect(
+      hand.record.luck!.adjustedBySeat[0] + hand.record.luck!.adjustedBySeat[1],
+    ).toBeCloseTo(0, 9)
+  })
+  it.each(['complete', 'forfeit', 'no_show', 'abandoned'] as const)(
+    'certifies valid %s as the distinct terminal class',
+    async (reason) => {
+      const verdict = await inspectSettlement(
+        await settlementFixture(undefined, reason),
+      )
+      expect(verdict).toMatchObject({
+        state: 'verified',
+        certificate: {
+          reason,
+          disposition: ['complete', 'forfeit'].includes(reason)
+            ? 'rated'
+            : 'void',
+        },
+      })
+    },
+  )
+  it('quarantines zero-hand complete, wrong participant, duplicate/gapped manifest, altered outcome and invalid timeout', async () => {
+    const valid = await settlementFixture()
+    for (const change of [
+      (s: typeof valid) => {
+        s.hands = []
+        s.terminal!.proof.completedHands = []
+      },
+      (s: typeof valid) => {
+        s.players[0].userId = 'foreign'
+      },
+      (s: typeof valid) => {
+        s.terminal!.proof.completedHands[1] =
+          s.terminal!.proof.completedHands[0]
+      },
+      (s: typeof valid) => {
+        s.terminal!.proof.completedHands[0].handNo = 2
+      },
+      (s: typeof valid) => {
+        s.result.outcomeBySeat![0] = 'win'
+      },
+      (s: typeof valid) => {
+        s.terminal!.proof.cause = 'timeout_streak'
+      },
+    ]) {
+      const s = structuredClone(valid)
+      change(s)
+      expect((await inspectSettlement(s)).state).toBe('quarantined')
+    }
+    const invalid = await settlementFixture(undefined, 'forfeit')
+    invalid.terminal!.proof.timeoutEvidence[0].processedAt = 0
+    expect((await inspectSettlement(invalid)).state).toBe('quarantined')
+  })
+  it('missing archives/verifications remain pending and legacy proof absence never certifies', async () => {
+    const s = await settlementFixture()
+    s.hands.pop()
+    expect((await inspectSettlement(s)).state).toBe('waiting-for-evidence')
+    s.terminal = null
+    expect((await inspectSettlement(s)).state).toBe('legacy-insufficient')
+  })
+  it('shadow defaults read-only; bounded catchup uses durable lease scan', async () => {
+    const s = await settlementFixture(undefined, 'no_show')
+    const calls: string[] = []
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      const path = String(input)
+      calls.push(path)
+      return Response.json(path.endsWith('audit_settlement') ? s : [])
+    })
+    try {
+      expect((await classifySettlement(env, s.matchId)).state).toBe('verified')
+      expect(calls).toHaveLength(1)
+      expect(calls[0]).toContain('audit_settlement')
+      await catchUpSettlements(env, 0)
+      expect(calls.at(-1)).toContain('settlement_candidates')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})

@@ -99,10 +99,23 @@ beforeAll(() => {
             deck: p.deck,
             secret: p.secret,
             holes: p.holes,
+            kind: 'hu-rated',
+            archive: structuredClone(p),
+            sourceToken: `source:${p.id}`,
           })
           return new Response(null, { status: 204 })
         case 'audit_hand':
           return Response.json(fake.hands.get(p.id) ?? null)
+        case 'verify_hand_v2':
+          expect(p.sourceToken).toBe(`source:${p.id}`)
+          fake.hands.get(p.id)!.verification = {
+            version: p.version,
+            recordDigest: p.recordDigest,
+            archiveDigest: p.archiveDigest,
+          }
+          fake.verified.push(p.id)
+          fake.hands.get(p.id)!.verified = true
+          return new Response(null, { status: 204 })
         case 'verify_hand':
           fake.verified.push(p.id)
           fake.hands.get(p.id)!.verified = true

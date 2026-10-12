@@ -21,6 +21,10 @@ import type { Rating } from '../../src/rating/glicko2'
 import type { RatingChange, ServerMsg } from '../../src/shared/protocol'
 import { forgetUsernames } from '../src/auth'
 import { RATED_CONFIG } from '../src/rated'
+import { evidenceDigest } from '../src/live-evidence'
+import type { SettlementSource } from '../src/settlement-evidence'
+import { problemsWith } from '../src/verify'
+import type { AuditedHand } from '../src/verify'
 import type { InitBody, TableDO } from '../src/table'
 import { checkFrame, checkFrames, FLOW_TYPES } from './frames'
 import {
@@ -60,6 +64,7 @@ const fake = {
   }[],
   outcomes: new Map<string, Record<string, string>>(),
   down: false,
+  sources: new Map<string, SettlementSource>(),
   /** Before the next apply checks versions, another match rates this player. */
   bumpBeforeNext: null as null | { userId: string; rating: number },
 }
@@ -88,6 +93,25 @@ beforeAll(() => {
       const fn = url.pathname.replace('/rest/v1/rpc/', '')
       const p = JSON.parse(String(init!.body)).p
       if (fn === 'record_match') {
+        const previous = fake.sources.get(p.id)
+        fake.sources.set(p.id, {
+          matchId: p.id,
+          kind: p.kind,
+          status: p.result
+            ? ['no_show', 'abandoned', 'engine_fault'].includes(p.result.reason)
+              ? 'void'
+              : 'finished'
+            : 'playing',
+          config: p.config,
+          result: p.result ?? {},
+          players: p.players.map((a: { seat: number; userId: string }) => ({
+            ...a,
+            outcome: p.result?.outcomeBySeat?.[a.seat] ?? null,
+          })),
+          hands: previous?.hands ?? [],
+          terminal: previous?.terminal ?? null,
+          sourceToken: `source:${p.id}`,
+        })
         if (p.result?.outcomeBySeat)
           fake.outcomes.set(
             p.id,
@@ -100,6 +124,34 @@ beforeAll(() => {
           )
         return new Response(null, { status: 204 })
       }
+      if (fn === 'record_hand') {
+        const h: AuditedHand = {
+          ...p,
+          holesByUser: p.holesByUser.map(
+            (x: { userId: string; cards: number[] }) => ({
+              user_id: x.userId,
+              cards: x.cards,
+            }),
+          ),
+          kind: 'hu-rated',
+          archive: p,
+          sourceToken: `source:${p.id}`,
+          verified: true,
+        }
+        expect(await problemsWith(h)).toEqual([])
+        h.verification = {
+          version: 'hand.v2',
+          recordDigest: await evidenceDigest(p.record),
+          archiveDigest: await evidenceDigest(p),
+        }
+        const s = fake.sources.get(p.matchId)!
+        s.hands = s.hands.filter((x) => x.id !== p.id)
+        s.hands.push(h)
+      }
+      if (fn === 'record_terminal')
+        fake.sources.get(p.proof.matchId)!.terminal = p
+      if (fn === 'audit_settlement')
+        return Response.json(fake.sources.get(p.matchId) ?? null)
       if (fn === 'apply_rating') return applyRating(p)
       return new Response(null, { status: 204 })
     },
@@ -112,6 +164,7 @@ beforeEach(() => {
   fake.applies = []
   fake.outcomes.clear()
   fake.down = false
+  fake.sources.clear()
   fake.bumpBeforeNext = null
   forgetUsernames()
 })
@@ -192,6 +245,18 @@ async function rated(alone = false) {
     creator: { userId: ALICE, username: 'alice' },
     opponent: { userId: BOB, username: 'bob' },
     kind: 'hu-rated',
+    activation: {
+      v: 1,
+      id: `activation:${matchId}`,
+      tableId: matchId,
+      state: 'committed',
+      expiresAt: T0 + 30_000,
+      members: [ALICE, BOB].map((userId) => ({
+        userId,
+        tableId: matchId,
+        generation: 1,
+      })),
+    },
     ...(alone ? { startWithinMs: 30_000 } : {}),
   }
   const made = await stub(matchId).fetch('https://table/init', {
@@ -257,6 +322,26 @@ const ratingOf = (c: Client) =>
   c.frames.find((f) => f.t === 'rating') as RatingFrame | undefined
 
 describe('the rating update', () => {
+  it('F07 binds an interrupted hand with three timeout checks and excludes its chips', async () => {
+    const { matchId, alice, seats } = await rated()
+    await move(matchId, seats, passive)
+    await timeOut(matchId, seats)
+    await timeOut(matchId, seats)
+    await move(matchId, seats, passive)
+    await timeOut(matchId, seats)
+    await alice.next((f) => f.t === 'match_end')
+    await until(() => !!ratingOf(alice))
+    const source = fake.sources.get(matchId)!
+    expect(source.hands).toHaveLength(0)
+    expect(source.terminal!.proof.interruptedHand).toMatchObject({
+      disposition: 'excluded_incomplete',
+      hand: { handNo: 1 },
+    })
+    expect(fake.applies[0].players).toMatchObject([
+      { outcome: 'win' },
+      { outcome: 'loss' },
+    ])
+  }, 60_000)
   it('a completed rated match applies Glicko-2 to both players, and both see before, after and the change', async () => {
     const { matchId, alice, seats } = await rated()
     // Bob folds whenever he is to act: Alice wins the match.
