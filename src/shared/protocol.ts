@@ -372,8 +372,20 @@ export type ServerMsg = { seq: number; matchId: string } & (
       /** null until the first hand is dealt. */
       view: SeatView | null
       serverNow: number
+      /**
+       * Six-casual, to this account only: its stand was accepted and it
+       * leaves its seat when the hand it is dealt into ends (audit F03).
+       */
+      leaving?: true
     }
-  | { t: 'state'; table: MatchInfo; view: SeatView | null; serverNow: number }
+  | {
+      t: 'state'
+      table: MatchInfo
+      view: SeatView | null
+      serverNow: number
+      /** As in welcome. */
+      leaving?: true
+    }
   | {
       t: 'hand_start'
       handNo: number

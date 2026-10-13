@@ -17,6 +17,7 @@ import { seedRandom } from '../lib/random'
 import type { Identity } from './api'
 import { AvatarBase } from './avatarBase'
 import { Lobby } from './Lobby'
+import { PENDING_WATCHDOG_MS } from './client'
 import { LiveTable } from './LiveTable'
 import { FLY_MS, NEXT_POT_MS, PAY_MS } from './SixFlights'
 import {
@@ -859,14 +860,16 @@ describe('LiveTable at a six-casual table', () => {
     standButton()!.focus()
     await userEvent.keyboard('{Enter}')
     expect(socket.sent.map((m) => JSON.parse(m))).toEqual([{ t: 'stand' }])
-    // The wire has no marker of a pending stand: she knows she sent one.
+    // Sent is not accepted (audit F03): she waits for the table's word.
     // The live region was already there, so the change is announced.
-    expect(status).toHaveTextContent('Leaving after this hand')
+    expect(status).toHaveTextContent('Standing up…')
     expect(standButton()).toBeNull()
     expect(seat(2)).toHaveFocus()
 
     // The table answers that she keeps the seat until the hand ends.
-    act(() => socket.emit(sixFrame('welcome', 2, 2, 2, hand)))
+    act(() =>
+      socket.emit(sixFrame('welcome', 2, 2, 2, hand, { leaving: true })),
+    )
     expect(status).toHaveTextContent('Leaving after this hand')
     expect(standButton()).toBeNull()
 
@@ -909,20 +912,68 @@ describe('LiveTable at a six-casual table', () => {
     expect(socket.sent.map((m) => JSON.parse(m))).toEqual([{ t: 'stand' }])
   })
 
+  it('a stand the table never answers brings her moves back (audit F03)', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    let hand = sixHand()
+    hand = engineAct(hand, 5, { type: 'call' })
+    hand = engineAct(hand, 0, { type: 'call' })
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    vi.useFakeTimers()
+    fireEvent.click(standButton()!)
+    expect(moves()).toEqual([])
+    expect(seatStatus()).toHaveTextContent('Standing up…')
+    // No answer: the client asks the table for its truth, and sends no
+    // stand again (it may have landed).
+    await act(async () => vi.advanceTimersByTime(PENDING_WATCHDOG_MS))
+    expect(socket.sent.map((m) => JSON.parse(m))).toEqual([
+      { t: 'stand' },
+      { t: 'resync' },
+    ])
+    // The table never heard it: she is still in the hand, to act.
+    act(() => socket.emit(sixFrame('welcome', 2, 2, 2, hand)))
+    vi.useRealTimers()
+    expect(moves().length).toBeGreaterThan(0)
+    expect(seatStatus()).toHaveTextContent(/^$/)
+    expect(standButton()).toBeInTheDocument()
+  })
+
+  it('a stand lost with the socket mid-hand does not say she is leaving (audit F03)', async () => {
+    render(<LiveTable matchId={MATCH} identity={alice} />)
+    const socket = await opened()
+    const hand = sixHand()
+    act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    fireEvent.click(standButton()!)
+    vi.useFakeTimers()
+    act(() => socket.drop(1006))
+    await act(async () => vi.advanceTimersByTime(10_000))
+    vi.useRealTimers()
+    await act(async () => {})
+    const again = FakeSocket.last()
+    act(() => again.open())
+    // Back in the same hand: the table's welcome has no stand.
+    act(() => again.emit(sixFrame('welcome', 2, 2, 2, hand)))
+    expect(seatStatus()).toHaveTextContent(/^$/)
+    expect(standButton()).toBeInTheDocument()
+  })
+
   it('a reload during the hand she stood from still says Leaving after this hand', async () => {
     const first = render(<LiveTable matchId={MATCH} identity={alice} />)
     const socket = await opened()
     const hand = sixHand()
     act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand)))
     await userEvent.click(standButton()!)
+    act(() =>
+      socket.emit(sixFrame('welcome', 2, 2, 2, hand, { leaving: true })),
+    )
     expect(seatStatus()).toHaveTextContent('Leaving after this hand')
 
-    // The page reloads mid-hand. Nothing on the wire says she stood (ADR,
-    // clarifications from PR-12); this tab remembers.
+    // The page reloads mid-hand. The table's welcome says she stood: only
+    // to her, and only while the seat is still hers (audit F03).
     first.unmount()
     const reloaded = render(<LiveTable matchId={MATCH} identity={alice} />)
     const fresh = await opened()
-    act(() => fresh.emit(sixFrame('welcome', 1, 2, 2, hand)))
+    act(() => fresh.emit(sixFrame('welcome', 2, 2, 2, hand, { leaving: true })))
     expect(seatStatus()).toHaveTextContent('Leaving after this hand')
     expect(standButton()).toBeNull()
 
@@ -1079,6 +1130,9 @@ describe('LiveTable at a six-casual table', () => {
     const socket = await opened()
     act(() => socket.emit(sixFrame('welcome', 1, 2, 2, sixHand())))
     await userEvent.click(standButton()!)
+    act(() =>
+      socket.emit(sixFrame('welcome', 1, 2, 2, sixHand(), { leaving: true })),
+    )
     expect(seatStatus()).toHaveTextContent('Leaving after this hand')
 
     // The hand ends. Its last state comes before the welcome that frees
@@ -1938,13 +1992,22 @@ describe('LiveTable at a six-casual table', () => {
     const out = outIn(sixInfo(), [2])
     act(() => socket.emit(sixFrame('welcome', 1, 2, 2, hand, { table: out })))
     await userEvent.click(standButton()!)
+    act(() =>
+      socket.emit(
+        sixFrame('welcome', 1, 2, 2, hand, { table: out, leaving: true }),
+      ),
+    )
     expect(seatStatus()).toHaveTextContent('Leaving after this hand')
 
-    // She reloads mid-hand: this tab still knows she stood.
+    // She reloads mid-hand: the table still says she stood.
     first.unmount()
     render(<LiveTable matchId={MATCH} identity={alice} />)
     const fresh = await opened()
-    act(() => fresh.emit(sixFrame('welcome', 1, 2, 2, hand, { table: out })))
+    act(() =>
+      fresh.emit(
+        sixFrame('welcome', 1, 2, 2, hand, { table: out, leaving: true }),
+      ),
+    )
     expect(seatStatus()).toHaveTextContent('Leaving after this hand')
 
     // The hand ends and her own stand frees the seat.

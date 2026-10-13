@@ -19,6 +19,8 @@ import {
 } from '../lib/storage'
 import type { HandRecord, Progress, Settings } from '../lib/storage'
 import type { LessonId } from '../lib/storage'
+import { mergeLearningRaw } from '../curriculum/core/merge'
+import { LEARNING_RESET_KEY } from '../curriculum/core/persistence'
 
 /** The curriculum's keys (src/curriculum/core/persistence.ts). */
 export const LEARNING_KEY = 'quantpoker.learning.v2'
@@ -59,6 +61,13 @@ export type AccountState = {
   clearedAt: number | null
   curriculum: string | null
   curriculumAt: number | null
+  /**
+   * The curriculum's revision on the account (audit F09): a write must name
+   * the one it was based on, as this plus one, or it is refused (40001).
+   */
+  curriculumRev: number
+  /** The latest curriculum reset of any device: older work is gone. */
+  curriculumResetAt: number | null
 }
 
 const bytes = (text: string) => new TextEncoder().encode(text).length
@@ -177,23 +186,35 @@ export type LearningChoice =
   | { kind: 'keep' }
   | { kind: 'send' }
   | { kind: 'take'; raw: string | null; backup: string | null }
+  /** Both copies held work the other lacked: both take the merge. */
+  | { kind: 'merge'; raw: string }
 
 /**
- * Which curriculum wins: another account's is replaced by this one's (no
- * backup: it is not this player's); otherwise the newer by its own change
- * time, the other kept as a backup when it is replaced.
+ * What to do with this browser's curriculum and the account's. Another
+ * account's is replaced by this one's (no backup: it is not this player's).
+ * Two copies of this player's merge (audit F09: the last save used to win
+ * and the other's work was lost): whichever already holds everything is
+ * kept, else both take the merge. Only when a copy is not a valid store
+ * (a test, or a document from an older format) does the newer win, the
+ * other kept as a backup.
  */
 export function pickLearning(
   local: string | null,
   account: Pick<AccountState, 'curriculum' | 'curriculumAt'>,
   userId: string,
   owner: string | null,
+  resetAt: number | null = null,
 ): LearningChoice {
   if (owner && owner !== userId)
     return { kind: 'take', raw: account.curriculum, backup: null }
   if (local === account.curriculum) return { kind: 'keep' }
   if (!account.curriculum) return local ? { kind: 'send' } : { kind: 'keep' }
   if (!local) return { kind: 'take', raw: account.curriculum, backup: null }
+  const merged = mergeLearningRaw(local, account.curriculum, resetAt)
+  if (merged?.kind === 'ours') return { kind: 'send' }
+  if (merged?.kind === 'theirs')
+    return { kind: 'take', raw: account.curriculum, backup: null }
+  if (merged?.kind === 'merged') return { kind: 'merge', raw: merged.raw }
   const ours = curriculumTime(local) ?? 0
   return (account.curriculumAt ?? 0) > ours
     ? { kind: 'take', raw: account.curriculum, backup: local }
@@ -212,6 +233,68 @@ const running: { sync: PracticeSync | null } = { sync: null }
 export const activeSync = () => running.sync
 
 /**
+ * What a flush could say of this browser's practice (audit F08, F10):
+ * - saved: the account acknowledged the latest version of everything;
+ * - pending: something is still on its way (offline, or a request failed);
+ * - unverified: the account's copy was never read, so nothing here can be
+ *   known to be on it;
+ * - blocked: something will not go however long we wait (a hand or a
+ *   curriculum over the database's size, the daily hand cap).
+ */
+export type SaveState = 'saved' | 'pending' | 'unverified' | 'blocked'
+
+/**
+ * Whether this browser holds practice worth keeping: hands, or curriculum
+ * work (attempts, receipts, drafts, notes). An empty progress or an empty
+ * store is not work, so signing out of a fresh browser asks nothing.
+ */
+export function hasLocalWork(): boolean {
+  const progress = readJson<{ hands?: unknown }>(STORAGE_KEY)
+  if (Array.isArray(progress?.hands) && progress.hands.length) return true
+  const learning = readJson<Record<string, unknown>>(LEARNING_KEY)
+  if (!learning) return false
+  const listed = (key: string) =>
+    Array.isArray(learning[key]) && (learning[key] as unknown[]).length > 0
+  const noted = (key: string) =>
+    typeof learning[key] === 'object' &&
+    learning[key] !== null &&
+    Object.values(learning[key] as object).some(
+      (v) =>
+        (typeof v === 'string' && v.trim() !== '') || typeof v === 'object',
+    )
+  return (
+    listed('attempts') ||
+    listed('receipts') ||
+    noted('drafts') ||
+    noted('unitNotes')
+  )
+}
+
+/**
+ * This browser's practice as one JSON document, for the player to keep
+ * before a sign-out that would drop what the account does not hold.
+ */
+export function exportLocalPractice(): string {
+  const read = (key: string) => {
+    try {
+      const raw = localStorage.getItem(key)
+      return raw ? (JSON.parse(raw) as unknown) : null
+    } catch {
+      return null
+    }
+  }
+  return JSON.stringify(
+    {
+      exportedAt: new Date().toISOString(),
+      progress: read(STORAGE_KEY),
+      curriculum: read(LEARNING_KEY),
+    },
+    null,
+    2,
+  )
+}
+
+/**
  * One signed-in player's sync, from the first pull until sign-out. The
  * app reports every progress change (`note`); what differs from the
  * account's copy is sent, in batches, retried with a growing wait.
@@ -222,8 +305,13 @@ export class PracticeSync {
   private sentTrainer: string | null = null
   private sentClear = 0
   private queue = new Set<string>()
+  /** Hands too large for the account, by the JSON that was too large. */
+  private blocked = new Map<string, string>()
+  /** The curriculum is over the account's size and cannot be sent. */
+  private learningBlocked = false
   private latest: Progress | null = null
   private ready = false
+  private starting: Promise<void> | null = null
   private stopped = false
   private capped = false
   private timer: ReturnType<typeof setTimeout> | null = null
@@ -231,6 +319,8 @@ export class PracticeSync {
   private sending: Promise<void> | null = null
   private learningTimer: ReturnType<typeof setTimeout> | null = null
   private learningDirty = false
+  /** The account's curriculum revision this browser's copy is based on. */
+  private learningRev = 0
 
   constructor(
     private readonly client: SupabaseClient,
@@ -251,8 +341,16 @@ export class PracticeSync {
     if (running.sync === this) running.sync = null
   }
 
-  /** Reads the account's copy and merges this browser's into it. */
-  async start(): Promise<void> {
+  /** Reads the account's copy and merges this browser's into it, once. */
+  start(): Promise<void> {
+    if (this.ready) return Promise.resolve()
+    this.starting ??= this.startOnce().finally(() => {
+      this.starting = null
+    })
+    return this.starting
+  }
+
+  private async startOnce(): Promise<void> {
     const account = await this.pull()
     if (this.stopped) return
     if (!account) {
@@ -269,7 +367,11 @@ export class PracticeSync {
     )
     this.startLearning(account)
     this.ready = true
-    if (this.latest) this.note(this.latest)
+    // What the app will hold once its merge lands: noted now, so a flush
+    // that had to make this first read itself (a sign-out) sends it
+    // without waiting for the app to report it.
+    if (this.latest)
+      this.note(reconcile(this.latest, account, this.userId, synced))
   }
 
   /** The account's copy, or null when it cannot be read now. */
@@ -291,7 +393,7 @@ export class PracticeSync {
       this.client
         .from('learning_state')
         .select(
-          'trainer, trainer_updated_at, curriculum, curriculum_updated_at, hands_cleared_at',
+          'trainer, trainer_updated_at, curriculum, curriculum_updated_at, curriculum_rev, curriculum_reset_at, hands_cleared_at',
         )
         .maybeSingle(),
     ])
@@ -308,6 +410,8 @@ export class PracticeSync {
       curriculum:
         typeof row?.curriculum === 'string' ? (row.curriculum as string) : null,
       curriculumAt: time(row?.curriculum_updated_at),
+      curriculumRev: Number(row?.curriculum_rev ?? 0) || 0,
+      curriculumResetAt: time(row?.curriculum_reset_at),
     }
   }
 
@@ -316,7 +420,8 @@ export class PracticeSync {
     this.latest = progress
     if (!this.ready || this.stopped || progress.owner !== this.userId) return
     for (const hand of progress.hands) {
-      if (this.sent.get(hand.id) !== JSON.stringify(hand))
+      const json = JSON.stringify(hand)
+      if (this.sent.get(hand.id) !== json && this.blocked.get(hand.id) !== json)
         this.queue.add(hand.id)
     }
     if (this.queue.size || this.trainerChanged() || this.clearChanged())
@@ -334,23 +439,52 @@ export class PracticeSync {
   }
 
   /**
-   * Sends everything now, waiting at most `ms`. True when nothing is left
-   * (the sign-out page asks before it drops what is not).
+   * Sends everything now, waiting at most `ms`, and says what came of it
+   * (SaveState). Only `saved` means the account acknowledged the latest
+   * version of everything here; the sign-out page asks before it drops
+   * anything else. A sync whose first read of the account has not
+   * succeeded tries it first: until it does, nothing is known to be saved.
    */
-  async flush(ms: number): Promise<boolean> {
+  async flush(ms: number): Promise<SaveState> {
     if (this.learningTimer) {
       clearTimeout(this.learningTimer)
       this.learningTimer = null
     }
+    let done = false
     const attempt = async () => {
-      await this.send()
-      if (this.learningDirty) await this.sendLearning()
+      await this.start()
+      // A round can end with a newer version noted meanwhile: go again
+      // until nothing is left, or a request fails (it throws).
+      while (!done && this.saveState() === 'pending') {
+        await this.send()
+        if (this.learningDirty) await this.sendLearning()
+      }
     }
     await Promise.race([
       attempt().catch(() => {}),
       new Promise((resolve) => setTimeout(resolve, ms)),
     ])
-    return !this.pending()
+    done = true
+    return this.saveState()
+  }
+
+  /** What is true of this browser's practice on the account right now. */
+  saveState(): SaveState {
+    if (!this.ready) return 'unverified'
+    if (
+      (this.queue.size > 0 && !this.capped) ||
+      this.trainerChanged() ||
+      this.clearChanged() ||
+      this.learningDirty
+    )
+      return 'pending'
+    if (
+      (this.capped && this.queue.size > 0) ||
+      this.blocked.size > 0 ||
+      this.learningBlocked
+    )
+      return 'blocked'
+    return 'saved'
   }
 
   private trainerChanged() {
@@ -429,13 +563,22 @@ export class PracticeSync {
       const byId = new Map(progress.hands.map((h) => [h.id, h]))
       const ids = [...this.queue].slice(0, BATCH)
       const rows = []
+      const versions = new Map<string, string>()
       for (const id of ids) {
         const hand = byId.get(id)
         const json = hand ? JSON.stringify(hand) : null
-        if (!hand || !json || bytes(json) > RECORD_MAX_BYTES) {
-          this.queue.delete(id) // gone since, or too large to keep
+        if (!hand || !json) {
+          this.queue.delete(id) // gone since
           continue
         }
+        if (bytes(json) > RECORD_MAX_BYTES) {
+          // Never sendable: kept here, and said so (blocked), never
+          // silently counted as saved.
+          this.queue.delete(id)
+          this.blocked.set(id, json)
+          continue
+        }
+        versions.set(id, json)
         rows.push({
           user_id: this.userId,
           id,
@@ -453,8 +596,15 @@ export class PracticeSync {
           else throw error
         } else
           for (const row of rows) {
-            this.sent.set(row.id, JSON.stringify(row.record))
-            this.queue.delete(row.id)
+            // The account has the version this request carried. A newer
+            // one noted while it was on its way (the graded record after a
+            // provisional one) stays queued and goes next (audit F08).
+            const sentJson = versions.get(row.id)!
+            this.sent.set(row.id, sentJson)
+            this.blocked.delete(row.id)
+            const now = this.latest?.hands.find((h) => h.id === row.id)
+            if (!now || JSON.stringify(now) === sentJson)
+              this.queue.delete(row.id)
           }
       }
       if (this.queue.size && !this.capped) return this.sendOnce()
@@ -481,21 +631,66 @@ export class PracticeSync {
 
   // ---- The curriculum --------------------------------------------------------
 
+  /** The latest reset this browser knows of: its own, or the account's. */
+  private resetAt(account?: { curriculumResetAt: number | null }) {
+    const here = time(localStorage.getItem(LEARNING_RESET_KEY))
+    const there = account?.curriculumResetAt ?? null
+    return here === null ? there : there === null ? here : Math.max(here, there)
+  }
+
   private startLearning(account: AccountState) {
     const owner = localStorage.getItem(LEARNING_OWNER_KEY)
     const local = localStorage.getItem(LEARNING_KEY)
-    const choice = pickLearning(local, account, this.userId, owner)
-    if (choice.kind === 'take') {
-      if (choice.backup) write(LEARNING_BACKUP_KEY, choice.backup)
+    this.learningRev = account.curriculumRev
+    const choice = pickLearning(
+      local,
+      account,
+      this.userId,
+      owner,
+      owner && owner !== this.userId
+        ? account.curriculumResetAt
+        : this.resetAt(account),
+    )
+    if (choice.kind === 'take' || choice.kind === 'merge') {
+      if (choice.kind === 'take' && choice.backup)
+        write(LEARNING_BACKUP_KEY, choice.backup)
       write(LEARNING_KEY, choice.raw)
       if (!choice.raw) write(LEARNING_V1_KEY, null)
       this.hooks.reloadLearning()
     }
     write(LEARNING_OWNER_KEY, this.userId)
-    if (choice.kind === 'send') {
+    if (choice.kind === 'send' || choice.kind === 'merge') {
       this.learningDirty = true
       void this.sendLearning().catch(() => this.learningLater())
     }
+  }
+
+  /**
+   * The account's curriculum changed since this browser's copy was based
+   * on it (another device saved): read it and merge it in here. True when
+   * this browser's copy is now the account's own (nothing left to send).
+   */
+  private async rebase(): Promise<boolean> {
+    const { data, error } = await this.client
+      .from('learning_state')
+      .select('curriculum, curriculum_rev, curriculum_reset_at')
+      .maybeSingle()
+    if (error) throw error
+    const row = data as Record<string, unknown> | null
+    this.learningRev = Number(row?.curriculum_rev ?? 0) || 0
+    const remote =
+      typeof row?.curriculum === 'string' ? (row.curriculum as string) : null
+    const local = localStorage.getItem(LEARNING_KEY)
+    if (!remote || !local) return false
+    const merged = mergeLearningRaw(
+      local,
+      remote,
+      this.resetAt({ curriculumResetAt: time(row?.curriculum_reset_at) }),
+    )
+    if (!merged || merged.kind === 'ours') return false
+    write(LEARNING_KEY, merged.kind === 'theirs' ? remote : merged.raw)
+    this.hooks.reloadLearning()
+    return merged.kind === 'theirs'
   }
 
   private learningSaved = () => {
@@ -516,22 +711,44 @@ export class PracticeSync {
     }, delay)
   }
 
-  private async sendLearning() {
+  private async sendLearning(attempt = 0): Promise<void> {
     const raw = localStorage.getItem(LEARNING_KEY)
-    if (!raw || bytes(raw) > CURRICULUM_MAX_BYTES) {
+    if (!raw) {
+      this.learningDirty = false
+      return
+    }
+    // Over the account's size: it cannot go, and that is not "saved".
+    this.learningBlocked = bytes(raw) > CURRICULUM_MAX_BYTES
+    if (this.learningBlocked) {
       this.learningDirty = false
       return
     }
     const at = curriculumTime(raw) ?? Date.now()
+    const resetAt = this.resetAt()
     const { error } = await this.client.from('learning_state').upsert(
       {
         user_id: this.userId,
         curriculum: raw,
         curriculum_updated_at: new Date(at).toISOString(),
+        // Based on the revision this copy came from (audit F09): if another
+        // device saved since, the account refuses this (40001), and the two
+        // are merged here and sent again.
+        curriculum_rev: this.learningRev + 1,
+        ...(resetAt !== null
+          ? { curriculum_reset_at: new Date(resetAt).toISOString() }
+          : {}),
       },
       { onConflict: 'user_id' },
     )
+    if (error?.code === '40001' && attempt < 3) {
+      if (await this.rebase()) {
+        this.learningDirty = false
+        return
+      }
+      return this.sendLearning(attempt + 1)
+    }
     if (error) throw error
+    this.learningRev++
     if (localStorage.getItem(LEARNING_KEY) === raw) this.learningDirty = false
   }
 }
@@ -548,6 +765,7 @@ export function clearLocalPractice() {
     LEARNING_V1_KEY,
     LEARNING_BACKUP_KEY,
     LEARNING_OWNER_KEY,
+    LEARNING_RESET_KEY,
     TRAINER_SYNCED_KEY,
     'qp.pendingClaim',
   ])

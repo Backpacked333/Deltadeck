@@ -20,6 +20,7 @@ import {
   vi,
 } from 'vitest'
 import { legalActions } from '../../src/engine/hand'
+import { luckAdjusted } from '../../src/engine/luck'
 import { forgetUsernames } from '../src/auth'
 import type { TableController } from '../src/controller'
 import { LocalController } from '../src/controller'
@@ -34,6 +35,7 @@ import {
   elapse,
   freezeClock,
   isState,
+  move,
   peek,
   stub,
 } from './helpers'
@@ -335,6 +337,75 @@ describe('the verify consumer', () => {
     const { hand } = await archivedHand()
     tamper(hand)
     expect(await problemsWith(hand)).toContain(problem)
+  })
+
+  describe('the luck a rating settles on (audit F07)', () => {
+    /** A hand all in preflop and called, archived with its luck as rated. */
+    async function allInHand() {
+      const matchId = await createTable(ALICE, 1)
+      await freezeClock(matchId)
+      const seats: Record<number, Client> = {
+        0: await connect(matchId, ALICE),
+        1: await connect(matchId, BOB),
+      }
+      await seats[0].next(isState(1))
+      await move(matchId, seats, (h) => ({
+        type: 'raise',
+        to: legalActions(h).maxRaiseTo,
+      }))
+      await move(matchId, seats, () => ({ type: 'call' }))
+      const { hand: played } = await peek(matchId)
+      await until(() => fake.verified.length === 1)
+      const hand = structuredClone(fake.hands.get(`${matchId}:1`)!)
+      const luck = luckAdjusted(played!)
+      expect(luck.allInAt).toBe(0)
+      hand.record.luck = {
+        allInAt: luck.allInAt,
+        equity: luck.equity,
+        adjustedBySeat: luck.netBySeat,
+      }
+      return hand
+    }
+
+    it('is recomputed, and agrees with what the table recorded', async () => {
+      const hand = await allInHand()
+      expect(await problemsWith(hand, true)).toEqual([])
+      // As Postgres hands it back: jsonb orders an object's keys its own way.
+      const { allInAt, equity, adjustedBySeat } = hand.record.luck!
+      hand.record.luck = { equity, adjustedBySeat, allInAt }
+      expect(await problemsWith(hand, true)).toEqual([])
+    })
+
+    it.each([
+      [
+        'an adjusted net moved by a fraction of a chip',
+        (h: AuditedHand) => {
+          h.record.luck!.adjustedBySeat[0] += 1e-6
+        },
+      ],
+      [
+        'a different equity',
+        (h: AuditedHand) => {
+          h.record.luck!.equity = { 0: 0.5, 1: 0.5 }
+        },
+      ],
+      [
+        'a different all-in point',
+        (h: AuditedHand) => {
+          h.record.luck!.allInAt = 3
+        },
+      ],
+      [
+        'no luck at all on a rated hand',
+        (h: AuditedHand) => {
+          delete h.record.luck
+        },
+      ],
+    ])('catches %s', async (_, tamper) => {
+      const hand = await allInHand()
+      tamper(hand)
+      expect(await problemsWith(hand, true)).toContain('luck')
+    })
   })
 
   it('records one verify_failed incident for a tampered hand, never verifies it, and acks', async () => {

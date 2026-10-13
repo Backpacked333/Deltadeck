@@ -211,6 +211,54 @@ describe('SignOut', () => {
     }
   })
 
+  it('with no running sync, practice in this browser is not called saved (audit F10)', async () => {
+    seedSession()
+    localStorage.setItem(
+      'quantpoker.progress.v2',
+      JSON.stringify({ hands: [unsentHand] }),
+    )
+    const replace = vi.fn()
+    vi.stubGlobal('location', { ...window.location, replace })
+    render(<SignOut online={online()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'could not check what your account holds',
+    )
+    expect(replace).not.toHaveBeenCalled()
+    expect(localStorage.getItem('quantpoker.progress.v2')).not.toBeNull()
+    for (const name of ['Try again', 'Download a copy', 'Discard and sign out'])
+      expect(screen.getByRole('button', { name })).toBeInTheDocument()
+    // Discarding is the player's choice, and then it goes.
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Discard and sign out' }),
+    )
+    await waitFor(() => expect(replace).toHaveBeenCalled())
+    expect(localStorage.getItem('quantpoker.progress.v2')).toBeNull()
+  })
+
+  it('a sync whose first read of the account failed does not approve sign-out (audit F10)', async () => {
+    seedSession()
+    const replace = vi.fn()
+    vi.stubGlobal('location', { ...window.location, replace })
+    const account = fakeAccount()
+    account.state.offline = true
+    const sync = new PracticeSync(account.client, 'u1', {
+      merge: () => {},
+      reloadLearning: () => {},
+    })
+    try {
+      await sync.start()
+      // Nothing queued: the read never succeeded, so nothing could be.
+      sync.note({ ...emptyProgress(), hands: [unsentHand] })
+      render(<SignOut online={online()} />)
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'could not check what your account holds',
+      )
+      expect(replace).not.toHaveBeenCalled()
+    } finally {
+      sync.stop()
+    }
+  })
+
   it('still signs out when the account service cannot be reached', async () => {
     seedSession()
     const replace = vi.fn()

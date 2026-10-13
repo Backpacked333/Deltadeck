@@ -5,7 +5,7 @@ import {
   type ComponentType,
   type LazyExoticComponent,
 } from 'react'
-import { evidenceState } from '../core/assessment'
+import { evidenceState, freshCase } from '../core/assessment'
 import { atlas, registry } from '../core/registry'
 import { routes, type LearningRoute } from '../core/routes'
 import type { LearningSession } from '../core/session'
@@ -189,6 +189,7 @@ function GuidedPrediction({
     />
   )
 }
+const contentVersionOf = (id: string) => registry.cases.get(id)?.contentVersion
 function CaseSelector({
   ids,
   session,
@@ -196,20 +197,7 @@ function CaseSelector({
   ids: readonly string[]
   session: LearningSession
 }) {
-  const fresh = ids.find(
-    (id) =>
-      !session.store.exposedVariants.includes(
-        `${id}@${registry.cases.get(id)!.contentVersion}`,
-      ) &&
-      !session.store.receipts.some((r) => r.caseId === id) &&
-      !session.store.attempts.some(
-        (a) =>
-          a.caseId === id &&
-          (a.submittedAt ||
-            a.assistance.solutionViewed ||
-            a.assistance.hintIds.length),
-      ),
-  )
+  const fresh = freshCase(session.store, ids, contentVersionOf)
   const [selected, setSelected] = useState(fresh ?? ids[0])
   if (!selected)
     return <p>Case bank pending integration; no evidence can be earned here.</p>
@@ -558,24 +546,44 @@ function NextAction({ session }: { session: LearningSession }) {
       u.rubricVersion,
       session.clock,
     )
-  const due = units.find((u) => state(u) === 'review-due')
+  // A review is recommended only while a fresh case is left for it (audit
+  // F15): once the bank is used up, another attempt is practice, not
+  // evidence, and recommending it would send the learner round in circles.
+  const dueUnits = units.filter((u) => state(u) === 'review-due')
+  const hasFresh = (u: FoundationUnit) =>
+    freshCase(session.store, u.reviewCaseIds, contentVersionOf) !== undefined
+  const due = dueUnits.find(hasFresh)
+  const exhausted = dueUnits.filter((u) => !hasFresh(u))
   const next =
-    due ?? units.find((u) => !['demonstrated', 'retained'].includes(state(u)))
+    due ??
+    units.find(
+      (u) => !['demonstrated', 'retained', 'review-due'].includes(state(u)),
+    )
   return (
-    <p>
-      Recommended next action:{' '}
-      {next ? (
-        <a href={routes.unit(next.id, due ? 'review' : 'brief')}>
-          {due ? 'Review' : 'Study'} {next.id.toUpperCase()} {next.title}
-        </a>
-      ) : (
-        <a href={routes.overview('reviews')}>
-          Check retention reminders or freely practice a changed case
-        </a>
+    <>
+      <p>
+        Recommended next action:{' '}
+        {next ? (
+          <a href={routes.unit(next.id, due ? 'review' : 'brief')}>
+            {due ? 'Review' : 'Study'} {next.id.toUpperCase()} {next.title}
+          </a>
+        ) : (
+          <a href={routes.overview('reviews')}>
+            Check retention reminders or freely practice a changed case
+          </a>
+        )}
+        . Recommendations never lock access; realized profit is not learning
+        evidence.
+      </p>
+      {exhausted.length > 0 && (
+        <p>
+          No fresh review case is left for{' '}
+          {exhausted.map((u) => u.id.toUpperCase()).join(', ')}. You can still
+          practise there, but it will not count as a review; new cases will
+          reopen it.
+        </p>
       )}
-      . Recommendations never lock access; realized profit is not learning
-      evidence.
-    </p>
+    </>
   )
 }
 function LabCatalog() {

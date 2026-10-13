@@ -390,6 +390,25 @@ describe('rated pairing by rating', () => {
     await setLobbyClock(null)
   })
 
+  it('a rating that cannot be read refuses the rated search, never pairs it as 1500 (audit F14)', async () => {
+    await runInDurableObject(lobbyStub(env), (l: LobbyDO) => {
+      l.ratingOf = async (userId) => (userId === 'alice' ? null : 1500)
+    })
+    await setLobbyClock(T0)
+    const alice = await lobby('alice')
+    ratedQueue(alice)
+    expect(await alice.next((f) => f.t === 'error')).toMatchObject({
+      code: 'unverified',
+      message: expect.stringMatching(/rating/),
+    })
+    expect(alice.frames.some((f) => f.t === 'queued')).toBe(false)
+    // Casual play never reads a rating.
+    alice.send({ t: 'queue', kind: 'hu-casual' })
+    await alice.next((f) => f.t === 'queued')
+    alice.send({ t: 'dequeue' })
+    alice.ws.close()
+  })
+
   it('players 400 apart pair only after 6 minutes', async () => {
     await ratings({ alice: 1500, bob: 1900 })
     const alice = await waiting('alice', T0)

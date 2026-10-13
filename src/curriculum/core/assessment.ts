@@ -168,10 +168,15 @@ export function recordEvidence(
       passedVariants: [],
       firstDemonstrationAt: attempt.submittedAt,
     }
+  // Only an unaided review is evidence about retention (audit F15). A
+  // variant seen before, a hint or the solution makes it practice: it keeps
+  // its receipt but moves no schedule, so a bank with no fresh variant left
+  // cannot keep sending a learner back to a review that can only "fail".
   if (
     previous &&
     attempt.mode === 'review' &&
-    (delayed || !evaluation.passed || !evaluation.unaided)
+    evaluation.unaided &&
+    (delayed || !evaluation.passed)
   ) {
     const newVariant = !previous.passedVariants.includes(attempt.caseId)
     const passes = delayed && evaluation.eligible && newVariant
@@ -196,6 +201,30 @@ export function recordEvidence(
       ...(schedule ? { [unitId]: schedule } : {}),
     },
   }
+}
+/**
+ * The first case of `ids` this learner has never seen: no exposure, no
+ * receipt, no submitted or assisted attempt. Undefined once the bank is
+ * used up (audit F15): a review then has no fresh evidence to offer, which
+ * is a shortage of content, not a failure of the learner.
+ */
+export function freshCase(
+  store: LearningStoreV2,
+  ids: readonly string[],
+  contentVersionOf: (caseId: string) => number | undefined,
+): string | undefined {
+  return ids.find(
+    (id) =>
+      !store.exposedVariants.includes(`${id}@${contentVersionOf(id)}`) &&
+      !store.receipts.some((r) => r.caseId === id) &&
+      !store.attempts.some(
+        (a) =>
+          a.caseId === id &&
+          (a.submittedAt ||
+            a.assistance.solutionViewed ||
+            a.assistance.hintIds.length),
+      ),
+  )
 }
 export type EvidenceState =
   | 'not-started'

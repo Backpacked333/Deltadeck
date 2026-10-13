@@ -20,7 +20,12 @@ import {
   VERSION,
 } from '../../src/rating/glicko2'
 import type { Rating } from '../../src/rating/glicko2'
-import { migrationFiles, MIGRATIONS_DIR, SUPABASE_STUB } from './harness'
+import {
+  migrationFiles,
+  MIGRATIONS_DIR,
+  seedRatedEvidence,
+  SUPABASE_STUB,
+} from './harness'
 
 const PLAYERS = 200
 const MATCHES = 5000
@@ -177,13 +182,27 @@ describe('a simulated season', () => {
       const other = { win: 'loss', loss: 'win', draw: 'draw' }[outcome]
       const id = crypto.randomUUID()
       const finished = new Date(at).toISOString()
+      // One verified hand whose luck-adjusted net gives the outcome (audit
+      // F07): past the draw band either way, or nothing for a draw.
+      const adjusted = { win: 100, loss: -100, draw: 0 }[outcome]!
       await db.exec(`
-        insert into public.matches (id, kind, status, config, finished_at)
-          values ('${id}', 'hu-rated', 'finished', '{}', '${finished}');
-        insert into public.match_players (match_id, user_id, seat, outcome, finished_at)
-          values ('${id}', '${uid(a)}', 0, '${outcome}', '${finished}'),
-                 ('${id}', '${uid(b)}', 1, '${other}', '${finished}');
+        insert into public.matches (id, kind, status, config, result, finished_at)
+          values ('${id}', 'hu-rated', 'finished',
+                  '{"handsTotal": 1, "blinds": {"sb": 10, "bb": 20}}',
+                  '{"reason": "complete"}', '${finished}');
+        insert into public.match_players (match_id, user_id, seat, outcome, adjusted_chips, finished_at)
+          values ('${id}', '${uid(a)}', 0, '${outcome}', ${adjusted}, '${finished}'),
+                 ('${id}', '${uid(b)}', 1, '${other}', ${-adjusted}, '${finished}');
       `)
+      await seedRatedEvidence(
+        db,
+        id,
+        [
+          { seat: 0, userId: uid(a) },
+          { seat: 1, userId: uid(b) },
+        ],
+        [adjusted],
+      )
       const now = (n: number) =>
         idle(state[n].rating, idlePeriods(state[n].last, at))
       const [na, nb] = rateMatch(

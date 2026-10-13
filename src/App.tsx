@@ -698,6 +698,10 @@ export default function App() {
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey || dialog || blocked)
         return
+      // A held key repeats, and an IME's keys compose text: neither is a
+      // decision (audit F17). A key a control already handled (the guess
+      // slider's Enter) is not handled twice.
+      if (event.repeat || event.isComposing || event.defaultPrevented) return
       if (view !== 'play') return
       const target = event.target as HTMLElement
       if (

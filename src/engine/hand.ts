@@ -26,6 +26,28 @@ const player = (state: HandState, seat: SeatId) => {
 const currentBet = (state: HandState) =>
   Math.max(0, ...state.players.map((p) => p.bet))
 
+/**
+ * The bet `seat` must match. Preflop the big blind is the bring-in even when
+ * the big blind posted short: the next player still calls the full blind and
+ * raises from it (audit F01), and the short big blind only wins what it put
+ * in (the pots are built from contributions). Never more than another live
+ * player can put in: with every opponent capped below the blind, the excess
+ * would come straight back, so heads-up a short big blind is still called
+ * for what it posted.
+ */
+function toMatch(state: HandState, seat: SeatId) {
+  const bet = currentBet(state)
+  const bb = state.config.blinds.bb
+  if (state.street !== 'preflop' || bet >= bb) return bet
+  const reach = Math.max(
+    0,
+    ...state.players
+      .filter((p) => p.seat !== seat && !p.folded)
+      .map((p) => p.bet + p.stack),
+  )
+  return Math.max(bet, Math.min(bb, reach))
+}
+
 /** Total chips in the middle, current street bets included. */
 export const potTotal = (state: HandState) =>
   state.players.reduce((sum, p) => sum + p.invested, 0)
@@ -299,7 +321,7 @@ function settle(state: HandState, showdown: boolean): HandState {
 export function legalActions(state: HandState): LegalActions {
   if (state.toAct === null) throw new EngineError('Nobody is to act')
   const me = player(state, state.toAct)
-  const bet = currentBet(state)
+  const bet = toMatch(state, me.seat)
   const toCall = Math.min(bet - me.bet, me.stack)
   const opponents = state.players.filter((p) => p !== me && !p.folded)
   // No raise above what the deepest opponent can match; heads-up this is
@@ -335,7 +357,7 @@ export function act(
   if (isOver(previous)) throw new EngineError('This hand has ended')
   if (previous.toAct !== seat) throw new EngineError('Not your turn')
   const legal = legalActions(previous)
-  const bet = currentBet(previous)
+  const bet = toMatch(previous, seat)
   if (action.type === 'check' && !legal.canCheck)
     throw new EngineError('Cannot check facing a bet')
   if (action.type === 'call' && legal.canCheck)

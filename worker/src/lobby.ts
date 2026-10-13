@@ -216,8 +216,8 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
   private seq = 0
   /** The lobby's clock; tests move it. */
   clock: () => number = now
-  /** A player's current rating; tests replace it. */
-  ratingOf: (userId: string) => Promise<number> = (userId) =>
+  /** A player's current rating, null when unreadable; tests replace it. */
+  ratingOf: (userId: string) => Promise<number | null> = (userId) =>
     currentRating(this.env, userId)
   /**
    * Every player shares this object: each account gets a frame budget. And
@@ -443,6 +443,12 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
       const rating = kind === 'hu-rated' ? await this.ratingOf(userId) : null
       // Cancelled, gone or superseded while the rating was read.
       if (!current()) return
+      if (kind === 'hu-rated' && rating === null)
+        return this.reject(
+          ws,
+          'unverified',
+          'Could not check your rating just now. Try again in a moment.',
+        )
       await this.ctx.storage.put(key, {
         userId,
         username,
@@ -609,6 +615,31 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
       const active = await this.liveActive(userId, matchId)
       if (active && active !== matchId) return active
       await this.ctx.storage.put(`active:${userId}`, matchId)
+      return null
+    })
+  }
+
+  /**
+   * An invite's guest and its host, together (audit F06): both are recorded
+   * at `matchId`, or neither is. Null when both were free; otherwise the
+   * first account playing at another table, and that table. The host's
+   * open invite holds nobody (liveness 'open'), so without this a host
+   * could start two invites, or one invite while playing elsewhere.
+   */
+  claimBoth(
+    userIds: string[],
+    matchId: string,
+  ): Promise<{ userId: string; matchId: string } | null> {
+    return this.forUsers(userIds, async () => {
+      for (const userId of userIds) {
+        const active = await this.liveActive(userId, matchId)
+        if (active && active !== matchId) return { userId, matchId: active }
+      }
+      await this.ctx.storage.put(
+        Object.fromEntries(
+          userIds.map((userId) => [`active:${userId}`, matchId]),
+        ),
+      )
       return null
     })
   }
@@ -1836,20 +1867,36 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /**
  * A player's heads-up rating (public.ratings), or the default for a player
- * with none yet, a dev account, or a read that fails: queueing never waits
- * on a lookup that cannot succeed.
+ * with none yet or a dev account. Null when the read fails: a rating that
+ * could not be read is unknown, not 1500 (audit F14), so a rated search is
+ * refused for a moment rather than paired as someone it may not be.
  */
-async function currentRating(env: WorkerEnv, userId: string) {
+async function currentRating(
+  env: WorkerEnv,
+  userId: string,
+): Promise<number | null> {
   if (!UUID.test(userId) || !env.SUPABASE_URL) return UNRATED
   try {
     const response = await fetch(
       `${env.SUPABASE_URL}/rest/v1/ratings?select=rating&format=eq.hu-duplicate&user_id=eq.${userId}`,
       { headers: { apikey: env.SUPABASE_SECRET_KEY ?? '' } },
     )
-    if (!response.ok) return UNRATED
+    if (!response.ok) {
+      logEvent('error', {
+        userId,
+        reason: 'rating_read',
+        code: response.status,
+      })
+      return null
+    }
     const rows = (await response.json()) as { rating: number }[]
     return typeof rows[0]?.rating === 'number' ? rows[0].rating : UNRATED
-  } catch {
-    return UNRATED
+  } catch (error) {
+    logEvent('error', {
+      userId,
+      reason: 'rating_read',
+      detail: describeError(error),
+    })
+    return null
   }
 }

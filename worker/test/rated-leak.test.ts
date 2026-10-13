@@ -13,6 +13,7 @@ import type { HandState, PlayerAction, SeatId } from '../../src/engine/types'
 import type { ServerMsg } from '../../src/shared/protocol'
 import { forgetUsernames } from '../src/auth'
 import { GRACE_MS, RATED_CONFIG } from '../src/rated'
+import { runoutMs } from '../../src/shared/pacing'
 import { NEXT_HAND_MS } from '../src/table'
 import type { InitBody } from '../src/table'
 import { analysisKeys, checkFrames, FLOW_TYPES } from './frames'
@@ -105,8 +106,13 @@ beforeAll(async () => {
     await seats[0].next(isState(handNo))
     dealt[handNo] = holesOf((await peek(matchId)).hand!)
   }
+  /** The next deal: after the result's pause, and after the board's
+   * reveal when the last hand was all in before the river (audit F02). */
   const nextHand = async (handNo: number) => {
-    await elapse(matchId, NEXT_HAND_MS)
+    const { hand } = await peek(matchId)
+    const last = hand!.actions.at(-1)
+    const reveal = hand!.result?.showdown ? runoutMs(last?.boardCount ?? 5) : 0
+    await elapse(matchId, NEXT_HAND_MS + reveal)
     await deal(handNo)
   }
   const playOut = async (choose: (hand: HandState) => PlayerAction) => {

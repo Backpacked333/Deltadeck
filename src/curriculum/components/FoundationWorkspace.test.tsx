@@ -10,7 +10,12 @@ import { CasePlayer } from './CasePlayer'
 import { baseCases } from '../content/foundationCases/baseBanks'
 import { LearningSession } from '../core/session'
 import { useExperimentController } from '../core/experiments'
-import { fixedClock, MemoryStorage } from '../core/__fixtures__/testing'
+import {
+  attemptFor,
+  fixedClock,
+  MemoryStorage,
+} from '../core/__fixtures__/testing'
+import { evaluateCase, recordEvidence } from '../core/assessment'
 import {
   referenceCase,
   referenceManifest,
@@ -331,6 +336,56 @@ describe('complete foundation bank interaction and honest availability', () => {
       }),
     ).toBeInTheDocument()
   })
+  it('does not recommend a review whose fresh cases are used up (audit F15)', () => {
+    const at = (day: number) => () =>
+      new Date(fixedClock().getTime() + day * 86_400_000)
+    const submit = (
+      store: LearningSession['store'],
+      c: Parameters<typeof attemptFor>[0],
+      day: number,
+    ) => {
+      const a = attemptFor(c, {
+        createdAt: at(day)().toISOString(),
+        committedAt: at(day)().toISOString(),
+      })
+      a.evaluation = evaluateCase(
+        c,
+        a,
+        store.attempts,
+        store.receipts,
+        store.reviewSchedule[c.unitId],
+        at(day),
+        store.exposedVariants,
+      )
+      a.submittedAt = at(day)().toISOString()
+      a.phase = 'archived'
+      return recordEvidence(store, a, at(day))
+    }
+    // F03 demonstrated, then reviewed on every case its bank has, and due
+    // again: there is nothing fresh left to review it with.
+    const reviews = registry.units
+      .get('f03')!
+      .reviewCaseIds.map((id) => registry.cases.get(id)!)
+    expect(reviews.length).toBeGreaterThan(0)
+    const last = 3 + 40 * reviews.length
+    const ref = { current: new LearningSession(null, at(last + 40)) }
+    let store = submit(
+      ref.current.store,
+      registry.cases.get('f03-transfer-1')!,
+      0,
+    )
+    for (const [i, c] of reviews.entries()) store = submit(store, c, 3 + 40 * i)
+    ref.current.update(() => store)
+    navigate('#learn/path')
+    render(<Curriculum session={ref} />)
+    expect(
+      screen.queryByRole('link', { name: /^Review F03/ }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByText(/No fresh review case is left for F03/),
+    ).toBeInTheDocument()
+  })
+
   it('keeps foundation notes and prediction evidence accessible in the legacy-compatible notebook', () => {
     const ref = { current: new LearningSession(null, fixedClock) }
     navigate('#learn/notebook')

@@ -278,7 +278,8 @@ export function sixFrame(
   {
     table = sixInfo(),
     lastReqId = null,
-  }: { table?: MatchInfo; lastReqId?: string | null } = {},
+    leaving = false,
+  }: { table?: MatchInfo; lastReqId?: string | null; leaving?: boolean } = {},
 ): ServerMsg {
   const view =
     hand && seat !== null
@@ -290,7 +291,14 @@ export function sixFrame(
           commitment: null,
         })
       : null
-  const base = { seq, matchId: MATCH, serverNow: 0, table, view }
+  const base = {
+    seq,
+    matchId: MATCH,
+    serverNow: 0,
+    table,
+    view,
+    ...(leaving ? { leaving: true as const } : {}),
+  }
   return kind === 'welcome'
     ? { ...base, t: 'welcome', seat }
     : { ...base, t: 'state' }

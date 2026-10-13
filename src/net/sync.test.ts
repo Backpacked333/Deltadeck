@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { baseCases } from '../curriculum/content/foundationCases/baseBanks'
+import { attemptFor } from '../curriculum/core/__fixtures__/testing'
 import {
   LEARNING_KEY as CURRICULUM_KEY,
+  LEARNING_RESET_KEY,
   LEARNING_V1_KEY as CURRICULUM_V1_KEY,
+  emptyStore,
 } from '../curriculum/core/persistence'
+import type { LearningStoreV2 } from '../curriculum/core/types'
 import {
   DEFAULT_SETTINGS,
   emptyProgress,
@@ -41,6 +46,8 @@ const account = (over: Partial<AccountState> = {}): AccountState => ({
   clearedAt: null,
   curriculum: null,
   curriculumAt: null,
+  curriculumRev: 0,
+  curriculumResetAt: null,
   ...over,
 })
 const progress = (over: Partial<Progress> = {}): Progress => ({
@@ -219,7 +226,7 @@ describe('PracticeSync', () => {
     const h = harness(progress({ hands: [hand('a', 1), hand('b', 2)] }))
     await h.start()
     expect(h.progress.owner).toBe(ME)
-    expect(await h.sync.flush(1000)).toBe(true)
+    expect(await h.sync.flush(1000)).toBe('saved')
     expect([...h.server.state.hands.keys()].sort()).toEqual(['a', 'b'])
     h.sync.stop()
   })
@@ -239,14 +246,59 @@ describe('PracticeSync', () => {
     await h.start()
     h.server.state.offline = true
     h.change((p) => ({ ...p, hands: [hand('n', 5, { graded: false })] }))
-    expect(await h.sync.flush(200)).toBe(false)
+    expect(await h.sync.flush(200)).toBe('pending')
     expect(h.sync.pending()).toBe(true)
     h.server.state.offline = false
     h.change((p) => ({ ...p, hands: [hand('n', 5, { decisions: [] })] }))
-    expect(await h.sync.flush(1000)).toBe(true)
+    expect(await h.sync.flush(1000)).toBe('saved')
     expect(h.server.state.hands.get('n')?.graded).toBeUndefined()
     // One send for the hand, not one per change.
     expect(h.server.state.calls.filter((c) => c === 'hands:n')).toHaveLength(1)
+    h.sync.stop()
+  })
+
+  it('a graded record noted while its provisional upload is on its way reaches the account, and flush waits for it (audit F08)', async () => {
+    const h = harness(progress())
+    await h.start()
+    let release = () => {}
+    h.server.state.hold = new Promise<void>((done) => (release = done))
+    h.change((p) => ({ ...p, hands: [hand('g', 5, { graded: false })] }))
+    // The provisional record is on its way...
+    await vi.waitFor(() => expect(h.server.state.calls).toContain('hands:g'))
+    // ...when grading finishes and the graded record replaces it here.
+    h.change((p) => ({ ...p, hands: [hand('g', 5, { decisions: [] })] }))
+    const flushed = h.sync.flush(2000)
+    h.server.state.hold = null
+    release()
+    // Nothing else changes: the flush alone must carry the graded record,
+    // and may not call it saved before the account has it.
+    expect(await flushed).toBe('saved')
+    expect(h.server.state.hands.get('g')?.graded).toBeUndefined()
+    expect(h.server.state.calls.filter((c) => c === 'hands:g')).toHaveLength(2)
+    h.sync.stop()
+  })
+
+  it('a first read of the account that failed is unverified, never saved (audit F10)', async () => {
+    const server = fakeAccount()
+    server.state.offline = true
+    const h = harness(progress({ hands: [hand('a', 1)] }), server)
+    await h.start()
+    expect(await h.sync.flush(200)).toBe('unverified')
+    // The read succeeds on the next try, and then the hand goes.
+    server.state.offline = false
+    expect(await h.sync.flush(1000)).toBe('saved')
+    expect([...server.state.hands.keys()]).toEqual(['a'])
+    h.sync.stop()
+  })
+
+  it('a hand too large for the account is blocked, never dropped as saved', async () => {
+    const h = harness(progress())
+    await h.start()
+    const big = { ...hand('big', 3), note: 'x'.repeat(9000) } as HandRecord
+    h.change((p) => ({ ...p, hands: [big] }))
+    expect(await h.sync.flush(1000)).toBe('blocked')
+    expect(h.server.state.hands.has('big')).toBe(false)
+    expect(h.progress.hands.map((x) => x.id)).toEqual(['big'])
     h.sync.stop()
   })
 
@@ -255,7 +307,7 @@ describe('PracticeSync', () => {
     const h = harness(progress(), server)
     await h.start()
     h.change((p) => ({ ...p, hands: [], historyClearedAt: 10 }))
-    expect(await h.sync.flush(1000)).toBe(true)
+    expect(await h.sync.flush(1000)).toBe('saved')
     expect(server.state.hands.size).toBe(0)
     expect(server.state.learning?.hands_cleared_at).toBe(
       new Date(10).toISOString(),
@@ -268,7 +320,7 @@ describe('PracticeSync', () => {
     await h.start()
     await h.sync.flush(1000)
     h.change((p) => ({ ...p, lessons: ['pot-odds'] }))
-    expect(await h.sync.flush(1000)).toBe(true)
+    expect(await h.sync.flush(1000)).toBe('saved')
     expect(h.server.state.learning?.trainer).toMatchObject({
       lessons: ['pot-odds'],
     })
@@ -319,6 +371,104 @@ describe('PracticeSync', () => {
     server.state.offline = false
     await vi.advanceTimersByTimeAsync(6000)
     expect(h.progress.hands.map((x) => x.id)).toEqual(['x'])
+    h.sync.stop()
+  })
+})
+
+describe('two devices, one curriculum (audit F09)', () => {
+  const day = (n: number) => new Date(Date.UTC(2026, 9, n, 12)).toISOString()
+  /** A store holding one submitted attempt at `caseId`, saved on day `n`. */
+  function store(caseId: string, n: number, base?: LearningStoreV2) {
+    const c = baseCases.find((x) => x.id === caseId)!
+    const s = base ?? emptyStore(() => new Date(day(n)))
+    const attempt = {
+      ...attemptFor(c, { createdAt: day(n), committedAt: day(n) }),
+      submittedAt: day(n),
+      phase: 'archived' as const,
+    }
+    return {
+      ...s,
+      updatedAt: day(n),
+      attempts: [...s.attempts, attempt],
+    } satisfies LearningStoreV2
+  }
+  const caseIds = (raw: string | null | undefined) =>
+    (JSON.parse(raw!) as LearningStoreV2).attempts.map((a) => a.caseId).sort()
+  const transfers = baseCases
+    .filter((c) => c.mode === 'transfer')
+    .map((c) => c.id)
+    .slice(0, 2)
+
+  it('a save based on a revision another device moved past is merged, not lost', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const server = fakeAccount()
+    const h = harness(progress(), server)
+    await h.start()
+    // Another device saves first: the account is at revision 1.
+    server.state.learning = {
+      curriculum: JSON.stringify(store(transfers[0], 2)),
+      curriculum_updated_at: day(2),
+      curriculum_rev: 1,
+    }
+    // This device, still based on revision 0, saves its own work.
+    localStorage.setItem(LEARNING_KEY, JSON.stringify(store(transfers[1], 3)))
+    window.dispatchEvent(new Event(LEARNING_SAVED_EVENT))
+    await vi.advanceTimersByTimeAsync(2500)
+    await vi.waitFor(() =>
+      expect(server.state.learning?.curriculum_rev).toBe(2),
+    )
+    // Both devices' attempts, here and on the account.
+    expect(caseIds(server.state.learning?.curriculum)).toEqual(
+      [...transfers].sort(),
+    )
+    expect(caseIds(localStorage.getItem(LEARNING_KEY))).toEqual(
+      [...transfers].sort(),
+    )
+    expect(h.reloadLearning).toHaveBeenCalled()
+    expect(h.sync.saveState()).toBe('saved')
+    h.sync.stop()
+  })
+
+  it('the other arrival order: work here meets the account’s at sign-in, and both are kept', async () => {
+    const server = fakeAccount({
+      learning: {
+        curriculum: JSON.stringify(store(transfers[0], 2)),
+        curriculum_updated_at: day(2),
+        curriculum_rev: 4,
+      },
+    })
+    localStorage.setItem('qp.learningOwner', ME)
+    localStorage.setItem(LEARNING_KEY, JSON.stringify(store(transfers[1], 5)))
+    const h = harness(progress({ owner: ME }), server)
+    await h.start()
+    expect(await h.sync.flush(1000)).toBe('saved')
+    expect(caseIds(server.state.learning?.curriculum)).toEqual(
+      [...transfers].sort(),
+    )
+    expect(server.state.learning?.curriculum_rev).toBe(5)
+    h.sync.stop()
+  })
+
+  it('a reset here is not undone by the account’s older copy, and goes to it', async () => {
+    const server = fakeAccount({
+      learning: {
+        curriculum: JSON.stringify(store(transfers[0], 2)),
+        curriculum_updated_at: day(2),
+        curriculum_rev: 1,
+      },
+    })
+    localStorage.setItem('qp.learningOwner', ME)
+    localStorage.setItem(LEARNING_RESET_KEY, day(3))
+    localStorage.setItem(
+      LEARNING_KEY,
+      JSON.stringify(emptyStore(() => new Date(day(3)))),
+    )
+    const h = harness(progress({ owner: ME }), server)
+    await h.start()
+    expect(await h.sync.flush(1000)).toBe('saved')
+    expect(caseIds(server.state.learning?.curriculum)).toEqual([])
+    expect(caseIds(localStorage.getItem(LEARNING_KEY))).toEqual([])
+    expect(server.state.learning?.curriculum_reset_at).toBe(day(3))
     h.sync.stop()
   })
 })

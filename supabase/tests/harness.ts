@@ -48,3 +48,47 @@ export const SUPABASE_STUB = `
   alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
   alter default privileges in schema public grant all on functions to anon, authenticated, service_role;
 `
+
+/** What a rated match's config gives the evidence checks (worker/src/rated.ts). */
+export const RATED_TEST_CONFIG = { handsTotal: 40, blinds: { sb: 10, bb: 20 } }
+
+/** `total` over `n` hands in equal shares: each hand's net for seat 0. */
+export const shares = (total: number, n = RATED_TEST_CONFIG.handsTotal) =>
+  Array.from({ length: n }, () => total / n)
+
+type Querier = {
+  query: (sql: string, params?: unknown[]) => Promise<unknown>
+}
+
+/**
+ * What a rated result rests on since audit F07: the match's hands 1..n,
+ * archived and verified, each naming its two players in their seats and
+ * carrying its luck-adjusted net (`seat0[i]` for seat 0, the opposite for
+ * seat 1). Inserted directly, as record_hand and verify_hand leave them;
+ * apply_rating checks them.
+ */
+export async function seedRatedEvidence(
+  db: Querier,
+  matchId: string,
+  players: { seat: number; userId: string }[],
+  seat0: number[],
+  verified = true,
+) {
+  for (const [i, net] of seat0.entries())
+    await db.query(
+      `insert into public.hands (id, match_id, hand_no, button, commitment, leaves, reveal, record, verified)
+       values ($1, $2, $3, 0, repeat('a', 64), decode(repeat('00', 1664), 'hex'), '[]', $4::jsonb, $5)
+       on conflict (id) do nothing`,
+      [
+        `${matchId}:${i + 1}`,
+        matchId,
+        i + 1,
+        JSON.stringify({
+          seats: players.map((p) => ({ ...p, username: `p${p.seat}` })),
+          netBySeat: { 0: net, 1: -net },
+          luck: { adjustedBySeat: { 0: net, 1: -net } },
+        }),
+        verified,
+      ],
+    )
+}

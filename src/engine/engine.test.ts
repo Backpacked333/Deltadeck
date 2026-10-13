@@ -870,3 +870,114 @@ describe('crafted cases', () => {
     assertInvariants(state, 8048)
   })
 })
+
+describe('a short big blind is still the bring-in (audit F01)', () => {
+  /** Chips on the table: stacks, plus what is in the middle until it is won. */
+  const total = (state: HandState) =>
+    state.players.reduce(
+      (sum, p) => sum + p.stack + (isOver(state) ? 0 : p.invested),
+      0,
+    )
+
+  it('the next player calls the full big blind and raises from it', () => {
+    // 10/20; button and small blind deep, the big blind posts 15 all in.
+    const cfg = config([1000, 1000, 15], 0)
+    let state = startHand(cfg, deckWith(cfg, {}, ''))
+    expect(state.players.map((p) => p.bet)).toEqual([0, 10, 15])
+    expect(state.toAct).toBe(0)
+    expect(legalActions(state)).toMatchObject({
+      toCall: 20,
+      canRaise: true,
+      minRaiseTo: 40,
+      maxRaiseTo: 1000,
+    })
+    expect(() => act(state, 0, { type: 'raise', to: 35 })).toThrow(EngineError)
+    state = act(state, 0, { type: 'call' })
+    expect(legalActions(state)).toMatchObject({ toCall: 10, minRaiseTo: 40 })
+    state = act(state, 1, { type: 'call' })
+    // The round closed: the short blind's 15 is matched three ways, the
+    // rest is a side pot it cannot win. No chip appears from nowhere.
+    expect(state.street).toBe('flop')
+    expect(state.players.map((p) => p.invested)).toEqual([20, 20, 15])
+    expect(state.pots).toEqual([
+      { amount: 45, eligible: [0, 1, 2] },
+      { amount: 10, eligible: [0, 1] },
+    ])
+    expect(total(state)).toBe(2015)
+  })
+
+  it('with only the short big blind left to face, it is called for what it posted', () => {
+    const cfg = config([1000, 1000, 15], 0)
+    let state = startHand(cfg, deckWith(cfg, {}, ''))
+    state = act(state, 0, { type: 'fold' })
+    expect(legalActions(state)).toMatchObject({ toCall: 5, canRaise: false })
+    state = act(state, 1, { type: 'call' })
+    expect(isOver(state)).toBe(true)
+    expect(state.players.map((p) => p.invested)).toEqual([0, 15, 15])
+  })
+
+  it('an uncalled excess over the short big blind comes back', () => {
+    const cfg = config([1000, 1000, 15], 0)
+    let state = startHand(cfg, deckWith(cfg, {}, ''))
+    state = act(state, 0, { type: 'call' })
+    state = act(state, 1, { type: 'fold' })
+    expect(isOver(state)).toBe(true)
+    // The button's 20 against the blind's 15: 5 come back.
+    expect(state.players.map((p) => p.invested)).toEqual([15, 10, 15])
+    expect(total(state)).toBe(2015)
+  })
+
+  it('a big blind shorter than the small blind still brings it in at 20', () => {
+    const cfg = config([1000, 1000, 8], 0)
+    let state = startHand(cfg, deckWith(cfg, {}, ''))
+    expect(state.players.map((p) => p.bet)).toEqual([0, 10, 8])
+    expect(legalActions(state)).toMatchObject({ toCall: 20, minRaiseTo: 40 })
+    state = act(state, 0, { type: 'call' })
+    expect(legalActions(state)).toMatchObject({ toCall: 10 })
+  })
+
+  it('a short all-in above the short blind is not a full raise', () => {
+    // Button 0, blinds 1 and 2 (the big blind 15 all in), then 3 and 4.
+    const cfg = config([1000, 1000, 15, 1000, 35], 0)
+    let state = startHand(cfg, deckWith(cfg, {}, ''))
+    expect(state.toAct).toBe(3)
+    state = act(state, 3, { type: 'call' })
+    expect(state.players[3].invested).toBe(20)
+    // All in to 35 is 15 more than the 20 bring-in: short of a full raise.
+    expect(legalActions(state)).toMatchObject({
+      minRaiseTo: 35,
+      maxRaiseTo: 35,
+    })
+    state = act(state, 4, { type: 'raise', to: 35 })
+    state = act(state, 0, { type: 'call' })
+    state = act(state, 1, { type: 'call' })
+    // The limper may call the 15 more but not raise: nothing reopened.
+    expect(state.toAct).toBe(3)
+    expect(legalActions(state)).toMatchObject({ toCall: 15, canRaise: false })
+    expect(total(state)).toBe(3050)
+  })
+
+  it('heads-up keeps calling a short big blind for what it posted', () => {
+    const cfg = config([2000, 15], 0)
+    const state = startHand(cfg, deckWith(cfg, {}, ''))
+    expect(legalActions(state)).toMatchObject({ toCall: 5, canRaise: false })
+  })
+
+  it('every random hand with short stacks keeps its chips', () => {
+    const random = lcg(SEED + 17)
+    for (let n = 0; n < 2000; n++) {
+      const seats = 3 + Math.floor(random() * 4)
+      const stacks = Array.from({ length: seats }, () =>
+        random() < 0.4 ? 1 + Math.floor(random() * 40) : 1000,
+      )
+      const cfg = config(stacks, Math.floor(random() * seats))
+      const chips = stacks.reduce((a, b) => a + b, 0)
+      let state = startHand(cfg, deckWith(cfg, {}, ''))
+      assertInvariants(state, chips)
+      while (!isOver(state)) {
+        state = act(state, state.toAct!, randomAction(state, random))
+        assertInvariants(state, chips)
+      }
+    }
+  })
+})

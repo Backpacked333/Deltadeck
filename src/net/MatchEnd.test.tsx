@@ -128,7 +128,9 @@ describe('the rating change at the end', () => {
       onRematch: vi.fn(),
     }
     const { rerender } = render(<MatchEnd {...props} />)
-    expect(screen.getByText('Updating your rating…')).toBeInTheDocument()
+    expect(
+      screen.getByText('Updating your rating once every hand is verified…'),
+    ).toBeInTheDocument()
     rerender(
       <MatchEnd
         {...props}
@@ -151,7 +153,7 @@ describe('the rating change at the end', () => {
         'Rating 1520 → 1534 (+14): beat a 1610 ± 80 player. Now 1534 ± 92.',
       ),
     ).toBeInTheDocument()
-    expect(screen.queryByText('Updating your rating…')).toBeNull()
+    expect(screen.queryByText(/Updating your rating/)).toBeNull()
   })
 
   it('shows no rating line for a void or casual result', () => {

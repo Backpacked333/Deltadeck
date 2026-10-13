@@ -493,3 +493,22 @@ describe('the account gate', () => {
     expect(window.location.hash).toBe('#table')
   })
 })
+
+describe('keyboard shortcuts (audit F17)', () => {
+  it('a held key or a key that composes text is not a decision', async () => {
+    render(<App />)
+    await screen.findByRole('button', { name: 'Reveal without guessing' })
+    // Auto-repeat from a key held down, and keys an input method is
+    // composing into text, lock nothing and make no move.
+    for (const init of [{ repeat: true }, { isComposing: true }])
+      for (const key of ['Enter', 'c', 'f', 'r', '1'])
+        fireEvent.keyDown(document.body, { key, ...init })
+    expect(
+      screen.getByRole('button', { name: 'Reveal without guessing' }),
+    ).toBeInTheDocument()
+    fireEvent.keyDown(document.body, { key: 'Enter' })
+    expect(
+      screen.queryByRole('button', { name: 'Reveal without guessing' }),
+    ).not.toBeInTheDocument()
+  })
+})

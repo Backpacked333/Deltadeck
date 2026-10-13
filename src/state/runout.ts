@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useReducedMotionConfig } from 'motion/react'
 import type { Game } from '../lib/poker'
+import { RIVER_BEAT_MS, RUNOUT_STEP_MS as STEP_MS } from '../shared/pacing'
 
 export type Runout = {
   /** Board cards currently shown (the engine has already dealt all five). */
@@ -8,9 +9,6 @@ export type Runout = {
   /** True while an all-in runout is still being revealed. */
   revealing: boolean
 }
-
-const STEP_MS = 900
-const RIVER_BEAT_MS = 500
 
 /**
  * When a hand ends in an all-in, the engine deals the rest of the board at

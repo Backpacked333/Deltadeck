@@ -147,7 +147,10 @@ function GuessBar({ guess }: { guess: GuessProps }) {
           aria-label="Your equity estimate in percent"
           onChange={(e) => guess.onChange(Number(e.target.value) / 100)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') guess.onLock()
+            if (e.key !== 'Enter' || e.repeat) return
+            // Handled here: the table's own Enter shortcut leaves it alone.
+            e.preventDefault()
+            guess.onLock()
           }}
         />
         <output className="guess-value">{pct(guess.value)}</output>

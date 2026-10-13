@@ -296,8 +296,8 @@ test('a stand mid-hand at a six-seat table keeps the seat until the hand ends', 
   expect(await serious()).toEqual([])
   await page.getByRole('button', { name: 'Stand up' }).focus()
   await page.keyboard.press('Enter')
-  // On their turn the stand folds them; the seat stays theirs, and only
-  // their own page knows they are leaving.
+  // On their turn the stand folds them; the seat stays theirs, and the
+  // table tells only them that they are leaving.
   const seatControls = page.getByRole('group', { name: 'Your seat' })
   await expect(seatControls.getByRole('status')).toHaveText(
     'Leaving after this hand',

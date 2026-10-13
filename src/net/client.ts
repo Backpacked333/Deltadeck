@@ -87,6 +87,17 @@ export type TableState = {
   view: SeatView | null
   /** The move sent and not yet acknowledged. */
   pending: string | null
+  /**
+   * A seat request (rebuy, stand, sit out, sit in) sent and not yet
+   * answered. Sent is not accepted (audit F03): the table answers with a
+   * welcome or an error, and one that never comes is asked about.
+   */
+  asking: SeatAsk | null
+  /**
+   * The table accepted our stand: we leave the seat when the hand we are
+   * dealt into ends. The table's word, from each snapshot (six-casual).
+   */
+  leaving: boolean
   error: { code: ErrorCode; message: string } | null
   ended: Extract<ServerMsg, { t: 'match_end' }>['result'] | null
   rematch: RematchView | null
@@ -101,6 +112,12 @@ export type TableState = {
   invite: InviteState | null
 }
 
+/** A seat request in flight, numbered so the watchdog knows which. */
+export type SeatAsk = {
+  kind: 'rebuy' | 'stand' | 'sit_out' | 'sit_in'
+  id: number
+}
+
 const LIMITED = {
   code: 'rate_limited',
   message: 'Too many messages, reconnecting…',
@@ -112,6 +129,8 @@ export const INITIAL_STATE: TableState = {
   table: null,
   view: null,
   pending: null,
+  asking: null,
+  leaving: false,
   error: null,
   ended: null,
   rematch: null,
@@ -215,8 +234,9 @@ export class TableConnection {
   readonly rtt = new RttStore()
   /** Table frames received: what the watchdog checks for silence. */
   private heard = 0
-  /** The move the watchdog is timing, and its timers. */
+  /** The move or seat request the watchdog is timing, and its timers. */
   private watching: string | null = null
+  private asks = 0
   private watchdog: ReturnType<typeof setTimeout> | null = null
   private answerTimer: ReturnType<typeof setTimeout> | null = null
   /** Bumped by every open() and every drop, so a stale open() gives up. */
@@ -358,7 +378,7 @@ export class TableConnection {
   /**
    * At a six table: leave the seat, at once between hands, or when the
    * hand this player is dealt into ends (folding when the action reaches
-   * them). The wire has no marker of a pending stand; the caller knows.
+   * them). The table's welcome says which: no seat, or `leaving`.
    */
   stand(): boolean {
     return this.sendSeated({ t: 'stand' })
@@ -377,43 +397,54 @@ export class TableConnection {
     return this.sendSeated({ t: 'sit_in' })
   }
 
-  /** Sends a seat-only frame, if this socket is open and has a seat. */
+  /**
+   * Sends a seat-only frame, if this socket is open and has a seat, and
+   * waits for its answer (`asking`): sending is not the table accepting.
+   */
   private sendSeated(
     msg: Extract<ClientMsg, { t: 'rebuy' | 'stand' | 'sit_out' | 'sit_in' }>,
   ) {
     const { status, seat } = this.state
     if (status !== 'open' || seat === null) return false
     this.socket!.send(JSON.stringify(msg))
+    this.set({ asking: { kind: msg.t, id: ++this.asks } })
     return true
   }
 
   private set(patch: Partial<TableState>) {
     this.state = { ...this.state, ...patch }
-    if (this.state.pending !== this.watching) this.watch()
+    if (this.awaited() !== this.watching) this.watch()
     for (const listener of this.listeners) listener()
   }
 
+  /** What the watchdog times: the move in flight, else the seat request. */
+  private awaited() {
+    const { pending, asking } = this.state
+    return pending ?? (asking ? `ask:${asking.id}` : null)
+  }
+
   /**
-   * Times the move in flight (PENDING_WATCHDOG_MS). A move whose answer
-   * never comes leaves every button disabled, so at the deadline the client
-   * asks for the server's truth, and if the socket then says nothing at all
-   * it is closed and reconnected (the welcome after it clears the move).
-   * Whatever happens, the move is not sent again.
+   * Times the move or seat request in flight (PENDING_WATCHDOG_MS). One
+   * whose answer never comes leaves its buttons away (a stand: the whole
+   * bar), so at the deadline the client asks for the server's truth, and if
+   * the socket then says nothing at all it is closed and reconnected (the
+   * welcome after it settles the request either way). Whatever happens,
+   * nothing is sent again: it may have landed.
    */
   private watch() {
     if (this.watchdog) clearTimeout(this.watchdog)
     this.watchdog = null
-    const { pending } = this.state
-    this.watching = pending
-    if (!pending) return
+    const awaited = this.awaited()
+    this.watching = awaited
+    if (!awaited) return
     this.watchdog = setTimeout(() => {
       this.watchdog = null
-      if (this.state.pending !== pending) return
+      if (this.awaited() !== awaited) return
       this.resync()
       const heard = this.heard
       this.watchdog = setTimeout(() => {
         this.watchdog = null
-        if (this.state.pending === pending && this.heard === heard) this.drop()
+        if (this.awaited() === awaited && this.heard === heard) this.drop()
       }, RESYNC_WAIT_MS)
     }, PENDING_WATCHDOG_MS)
   }
@@ -434,7 +465,7 @@ export class TableConnection {
 
   private onOffline = () => {
     if (this.state.status === 'open')
-      this.set({ status: 'reconnecting', pending: null })
+      this.set({ status: 'reconnecting', pending: null, asking: null })
   }
 
   private onOnline = () => {
@@ -464,7 +495,7 @@ export class TableConnection {
     this.rtt.reset()
     old?.close(1000, 'reconnecting')
     this.attempts = 0
-    this.set({ status: 'reconnecting', pending: null })
+    this.set({ status: 'reconnecting', pending: null, asking: null })
     void this.open()
   }
 
@@ -566,6 +597,7 @@ export class TableConnection {
     this.set({
       status: 'reconnecting',
       pending: null,
+      asking: null,
       ...gone,
       ...(limited ? { error: LIMITED } : {}),
     })
@@ -580,6 +612,9 @@ export class TableConnection {
           msg.reqId && msg.reqId === this.state.pending
             ? null
             : this.state.pending,
+        // A seat request is answered by a welcome or, refused, an error
+        // without a reqId (a move's refusal names its reqId).
+        asking: msg.reqId ? this.state.asking : null,
       })
       return
     }
@@ -612,7 +647,8 @@ export class TableConnection {
       return
     }
     if (msg.t === 'match_end') {
-      this.set({ ended: msg.result })
+      // A guest's cancel is answered by the table closing.
+      this.set({ ended: msg.result, asking: null })
       return
     }
     if (msg.t === 'rating') {
@@ -660,8 +696,9 @@ export class TableConnection {
         : this.state.pending
     this.set({
       ...(msg.t === 'welcome'
-        ? { seat: msg.seat, pending: null }
+        ? { seat: msg.seat, pending: null, asking: null }
         : { pending }),
+      leaving: msg.leaving === true,
       table: msg.table,
       view: msg.view,
       clockOffset: this.offsetOf(msg.serverNow),

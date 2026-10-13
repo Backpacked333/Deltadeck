@@ -21,6 +21,12 @@ import {
 import { deviceClock } from './assessment'
 
 export const LEARNING_KEY = 'quantpoker.learning.v2'
+/**
+ * When this browser last reset its curriculum (ISO). The account keeps the
+ * latest reset of any device, and a merge drops work from before it, so a
+ * device that missed the reset cannot bring the old work back (audit F09).
+ */
+export const LEARNING_RESET_KEY = 'quantpoker.learning.v2.resetAt'
 export const LEARNING_V1_KEY = LEGACY_KEY
 export const LIMITS = {
   note: 10000,
