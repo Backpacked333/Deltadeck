@@ -1371,16 +1371,20 @@
    oval, the viewer's plate at the bottom left and their cards held up in
    the middle, and the action dock lying on the felt at the bottom right.
    Phones keep the grid above. */
+.six-felt {
+  display: contents;
+}
 @media (min-width: 900px) {
   .live-page-table:has(.six-table) {
     max-width: 1480px;
   }
-  .six-table {
+  .six-felt {
+    display: block;
     position: relative;
   }
   .six-ring {
     display: block;
-    height: clamp(660px, 80vh, 840px);
+    height: clamp(520px, calc(100dvh - 220px), 840px);
     padding: 0;
     border-radius: 32px;
   }

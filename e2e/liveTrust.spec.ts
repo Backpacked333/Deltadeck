@@ -102,6 +102,13 @@ test('stand unknown preserves actions, keyboard focus and identical retry at lap
   })
   const retry = page.getByRole('button', { name: 'Retry same request' })
   await expect(retry).toBeEnabled()
+  const waitingBounds = await call.boundingBox()
+  expect(waitingBounds!.y + waitingBounds!.height).toBeLessThanOrEqual(768)
+  const feltBounds = await page.locator('.six-ring').boundingBox()
+  const dockBounds = await page.locator('.six-dock').boundingBox()
+  expect(dockBounds!.y + dockBounds!.height).toBeLessThan(
+    feltBounds!.y + feltBounds!.height,
+  )
   await retry.click()
   const commands = table.received.filter((m) => m.t === 'seat_command')
   expect(commands).toHaveLength(2)

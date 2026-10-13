@@ -260,59 +260,61 @@ export function SixTable({
         )}
       </div>
       <CommandStatus state={state} retry={retryCommand} check={checkCommand} />
-      <SixRing
-        players={ring}
-        you={seat}
-        button={view?.button ?? null}
-        sb={view?.sb ?? null}
-        bb={view?.bb ?? null}
-        toAct={live?.toAct ?? null}
-        clock={live && live.toAct !== null ? live.clock : null}
-        clockOffset={state.clockOffset}
-        onSit={canSit ? (s) => void sit(s) : undefined}
-        overlay={
-          <SixFlights
-            key={`${handKey}:${state.ownControl?.scope?.seatGeneration ?? 0}:${state.presentationEpoch}:${table.players.map((p) => `${p.seat}:${p.username}`).join('|')}`}
-            view={shownView}
-            seat={seat}
-            players={ring}
-          />
-        }
-      >
-        <Middle view={shownView} nameOf={nameOf} />
-      </SixRing>
-      <div
-        className="six-dock"
-        style={
-          seat !== null && dock
-            ? ({ '--dock': `${dock}px` } as CSSProperties)
-            : undefined
-        }
-      >
-        {dealt && legal ? (
-          <SixActions
-            view={dealt}
-            legal={legal}
-            act={act}
-            onHeight={setDock}
-            disabled={!!state.pending || state.resyncing}
-          />
-        ) : runout.revealing ? (
-          <p className="six-wait" role="status">
-            All-in reveal — the completed result remains in Last hand.
-          </p>
-        ) : (
-          <SixStatus
-            table={table}
-            view={view}
-            state={state}
-            taking={taking}
-            nameOf={nameOf}
-            broke={broke}
-            out={out}
-            removed={removed}
-          />
-        )}
+      <div className="six-felt">
+        <SixRing
+          players={ring}
+          you={seat}
+          button={view?.button ?? null}
+          sb={view?.sb ?? null}
+          bb={view?.bb ?? null}
+          toAct={live?.toAct ?? null}
+          clock={live && live.toAct !== null ? live.clock : null}
+          clockOffset={state.clockOffset}
+          onSit={canSit ? (s) => void sit(s) : undefined}
+          overlay={
+            <SixFlights
+              key={`${handKey}:${state.ownControl?.scope?.seatGeneration ?? 0}:${state.presentationEpoch}:${table.players.map((p) => `${p.seat}:${p.username}`).join('|')}`}
+              view={shownView}
+              seat={seat}
+              players={ring}
+            />
+          }
+        >
+          <Middle view={shownView} nameOf={nameOf} />
+        </SixRing>
+        <div
+          className="six-dock"
+          style={
+            seat !== null && dock
+              ? ({ '--dock': `${dock}px` } as CSSProperties)
+              : undefined
+          }
+        >
+          {dealt && legal ? (
+            <SixActions
+              view={dealt}
+              legal={legal}
+              act={act}
+              onHeight={setDock}
+              disabled={!!state.pending || state.resyncing}
+            />
+          ) : runout.revealing ? (
+            <p className="six-wait" role="status">
+              All-in reveal — the completed result remains in Last hand.
+            </p>
+          ) : (
+            <SixStatus
+              table={table}
+              view={view}
+              state={state}
+              taking={taking}
+              nameOf={nameOf}
+              broke={broke}
+              out={out}
+              removed={removed}
+            />
+          )}
+        </div>
       </div>
       {seat !== null && (
         <SeatControls
