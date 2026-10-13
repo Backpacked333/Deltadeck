@@ -28,7 +28,6 @@ import type { FinishedChallenge } from './ChallengeHand'
 import { tilt, untilt, useReveal } from './motion'
 import { ScoreCard } from './ScoreCard'
 import type { Stage } from './stage/stage'
-import { SchoolBanners } from './SchoolBanners'
 import { StageCanvas } from './stage/StageCanvas'
 import { want3d } from './stage/support'
 import { GRADE_BANDS } from './why'
@@ -237,7 +236,6 @@ export default function Landing({ signedIn = false }: { signedIn?: boolean }) {
         )}
       </section>
 
-      <SchoolBanners signedIn={signedIn} onJoin={createAccount} />
       <HowItWorks onPlay={toPlay} />
       <YourAccount onPlay={toPlay} signedIn={signedIn} />
 
