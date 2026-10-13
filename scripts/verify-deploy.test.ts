@@ -1,7 +1,9 @@
 // @vitest-environment node
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { PROTOCOL } from '../src/shared/protocol.ts'
 import { deployProblems } from './verify-deploy.ts'
@@ -43,6 +45,24 @@ function site(changes: Record<string, string | null | object> = {}) {
 }
 
 describe('verify-deploy', () => {
+  // CI runs `node scripts/verify-deploy.ts` with Node's own TypeScript loader,
+  // which, unlike Vite and Vitest, resolves no extensionless import. A value
+  // import in src/shared without ".ts" passes every other test and breaks the
+  // deploy check on main.
+  it('loads under plain node, the way CI runs it', () => {
+    expect(() =>
+      execFileSync(
+        process.execPath,
+        [
+          '--input-type=module',
+          '-e',
+          "await import('./scripts/verify-deploy.ts')",
+        ],
+        { cwd: fileURLToPath(new URL('..', import.meta.url)), stdio: 'pipe' },
+      ),
+    ).not.toThrow()
+  })
+
   it('passes when production serves exactly this build', async () => {
     expect(await deployProblems(BASE, dist, site())).toEqual([])
   })
