@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from 'react'
 import { useHash } from '../lib/navigation'
 import { LiveHandBridge, type LiveHand } from './components/LiveHandBridge'
-import './palette.css'
 import './styles.css'
 import {
   ArrowDown,
@@ -69,16 +68,8 @@ function HeroArt() {
       <svg className="art-line" viewBox="0 0 400 220">
         <defs>
           <linearGradient id="lineFill" x1="0" y1="0" x2="0" y2="1">
-            <stop
-              offset="0%"
-              style={{ stopColor: 'var(--brand)' }}
-              stopOpacity="0.4"
-            />
-            <stop
-              offset="100%"
-              style={{ stopColor: 'var(--brand)' }}
-              stopOpacity="0"
-            />
+            <stop offset="0%" stopColor="#a4cbb5" stopOpacity="0.4" />
+            <stop offset="100%" stopColor="#a4cbb5" stopOpacity="0" />
           </linearGradient>
         </defs>
         <path
@@ -88,10 +79,10 @@ function HeroArt() {
         <path
           d="M20 190 L65 163 L97 177 L135 124 L170 142 L201 100 L232 118 L276 64 L315 74 L365 20"
           fill="none"
-          style={{ stroke: 'var(--brand)' }}
+          stroke="#80b69d"
           strokeWidth="2"
         />
-        <circle cx="365" cy="20" r="5" style={{ fill: 'var(--accent)' }} />
+        <circle cx="365" cy="20" r="5" fill="#d5e8b8" />
       </svg>
       <div className="art-card card-back">
         <span>
@@ -928,7 +919,7 @@ export default function Curriculum({
               <Spade size={21} fill="currentColor" />
             </span>
             <span>
-              delta<span>deck</span>
+              Quant<span>Poker</span>
               <small>THE MATHEMATICS OF AN EDGE</small>
             </span>
           </a>

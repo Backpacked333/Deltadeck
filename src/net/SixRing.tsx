@@ -4,10 +4,7 @@
 // the live table feeds it from the server's snapshot. It is a new component
 // in the online chunk, not a generalised Table.tsx, so the entry bundle and
 // the trainer's heads-up table stay as they are (ADR, "Table UI (P2-05)").
-import { useMemo } from 'react'
 import type { ReactNode } from 'react'
-import { railFrom } from '../components/table/rail'
-import { TableScene } from '../components/table/TableScene'
 import type { SeatId } from '../engine/types'
 import { SeatPlate } from './SeatPlate'
 import type { PlateSeat, SeatClock } from './SeatPlate'
@@ -58,18 +55,8 @@ export function SixRing({
   // DOM order is clockwise from the viewer, so reading and tab order go
   // around the table the way the action does.
   const seats = [...SEATS].sort((a, b) => slotOf(a, you) - slotOf(b, you))
-  // The rail light drains from the seat to act, as their clock runs.
-  const rail = useMemo(
-    () => (clock ? { ...clock, offset: clockOffset } : null),
-    [clock, clockOffset],
-  )
   return (
     <section className="six-ring" aria-label="Poker table">
-      <TableScene
-        mode={rail && toAct !== null ? 'clock' : 'off'}
-        from={toAct !== null ? railFrom.slot(slotOf(toAct, you)) : 180}
-        clock={rail}
-      />
       {seats.map((seat) => (
         <SeatPlate
           key={seat}

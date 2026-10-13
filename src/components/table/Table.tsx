@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { History, Pause, Play, Settings2 } from 'lucide-react'
+import { History, Pause, Play, Settings2, Spade } from 'lucide-react'
 import { STYLES } from '../../lib/atlas'
 import type { AtlasStyle } from '../../lib/atlas'
 import { cardKey, evaluate } from '../../lib/poker'
@@ -14,9 +14,6 @@ import { ChipPile } from './ChipPile'
 import { PlayingCard } from '../PlayingCard'
 import type { Bubble } from '../../state/trainer'
 import { AtlasAvatar } from './AtlasAvatar'
-import { railFrom } from './rail'
-import { TableScene } from './TableScene'
-import type { ArcReading, RailClock, RailMode } from './TableScene'
 
 const chips = (n: number) => Math.round(n).toLocaleString('en-US')
 
@@ -66,8 +63,6 @@ export function Table({
   runout,
   versus,
   challenge,
-  arc = null,
-  clock = null,
 }: {
   game: Game
   style: AtlasStyle
@@ -91,13 +86,6 @@ export function Table({
    * practice controls, and titled with the hand.
    */
   challenge?: { title: string }
-  /** The odds arc printed on the felt; lit to the equity once shown. */
-  arc?: ArcReading | null
-  /**
-   * A live table's turn clock, drained by the rail light from the seat
-   * acting. Without one the light only says whose move it is.
-   */
-  clock?: { clock: RailClock; hero: boolean } | null
 }) {
   const opponent = versus?.opponent ?? 'Atlas'
   const [flights, setFlights] = useState<Flight[]>([])
@@ -195,20 +183,6 @@ export function Table({
       : null
   const thinking = game.turn === 1 && !game.result && !paused
   const guided = guidedStep ? guidedIntro[guidedStep] : null
-  const rail: { mode: RailMode; from: number } = result
-    ? { mode: result.winner === 0 ? 'win' : 'off', from: railFrom.hero }
-    : clock
-      ? {
-          mode: 'clock',
-          from: clock.hero ? railFrom.hero : railFrom.opponent,
-        }
-      : paused || runout.revealing
-        ? { mode: 'off', from: railFrom.hero }
-        : thinking
-          ? { mode: 'thinking', from: railFrom.opponent }
-          : yourTurn
-            ? { mode: 'full', from: railFrom.hero }
-            : { mode: 'off', from: railFrom.hero }
 
   return (
     <section className="table" aria-label="Poker table" data-tour="table">
@@ -270,21 +244,20 @@ export function Table({
         </div>
       )}
       <div className={`stage ${result ? 'stage-done' : ''}`}>
-        <TableScene
-          mode={rail.mode}
-          from={rail.from}
-          clock={clock?.clock}
-          arc={arc}
-          motto={versus ? 'ANALYSIS OFF DURING PLAY' : undefined}
-          deck
-        />
-        {result && result.winner !== 'tie' && (
-          <div
-            key={`spot-${game.id}`}
-            className={`spotlight spot-${result.winner === 0 ? 'hero' : 'atlas'}`}
-            aria-hidden
-          />
-        )}
+        <div className="felt" aria-hidden>
+          <div className="felt-ring" />
+          {result && result.winner !== 'tie' && (
+            <div
+              key={`spot-${game.id}`}
+              className={`spotlight spot-${result.winner === 0 ? 'hero' : 'atlas'}`}
+            />
+          )}
+          <span className="felt-mark">
+            <Spade size={12} fill="currentColor" /> DELTADECK
+          </span>
+          <span className="felt-motto">THINK IN PROBABILITIES</span>
+        </div>
+        <div className="deck-stack" aria-hidden />
 
         <div
           className={`seat seat-atlas ${thinking ? 'seat-active' : ''} ${result && result.winner === 1 ? 'seat-won' : ''} ${result?.text.startsWith(`${opponent} fold`) ? 'seat-folded' : ''}`}
@@ -305,15 +278,13 @@ export function Table({
             ))}
           </div>
           <div className="seat-plate">
-            <span className="seat-face">
-              {versus ? (
-                <span className="avatar avatar-player" aria-hidden>
-                  {opponent.slice(0, 1).toUpperCase()}
-                </span>
-              ) : (
-                <AtlasAvatar thinking={thinking} />
-              )}
-            </span>
+            {versus ? (
+              <span className="avatar avatar-player" aria-hidden>
+                {opponent.slice(0, 1).toUpperCase()}
+              </span>
+            ) : (
+              <AtlasAvatar thinking={thinking} />
+            )}
             <span className="seat-text">
               <strong>
                 {opponent}{' '}
@@ -427,9 +398,7 @@ export function Table({
             ))}
           </div>
           <div className="seat-plate">
-            <span className="seat-face">
-              <span className="avatar avatar-hero">You</span>
-            </span>
+            <span className="avatar avatar-hero">You</span>
             <span className="seat-text">
               <strong>
                 You {yourTurn && <em className="seat-badge turn">Your turn</em>}

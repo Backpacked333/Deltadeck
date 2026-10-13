@@ -395,8 +395,6 @@ function plates(
       // Sitting out takes effect from the next hand: a player who sat out
       // during this one still plays it, and shows as playing until it ends.
       status: inHand ? 'playing' : (p.status ?? 'playing'),
-      ...(inHand?.folded ? { folded: true } : {}),
-      ...(inHand && !inHand.folded ? { holding: true } : {}),
       connected: seated ? p.connected : undefined,
     }
   })
@@ -648,9 +646,8 @@ function SixActions({
         onDeal={noop}
         onReview={noop}
         // Shown only while the move is not ours, which never happens here:
-        // this bar is mounted for the viewer's turn alone. Nothing is
-        // analysed at a six table, so no equity ring and no break-even.
-        versus={{ opponent: 'The table', next: '', rated: true }}
+        // this bar is mounted for the viewer's turn alone.
+        versus={{ opponent: 'The table', next: '' }}
       />
     </div>
   )

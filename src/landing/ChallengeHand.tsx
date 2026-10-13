@@ -229,41 +229,9 @@ export function ChallengeHand({
           onSkipGuided={noop}
           runout={runout}
           challenge={{ title: spec.title }}
-          // The price is printed on the arc; the equity is the answer, so
-          // it stays dark until the score card.
-          arc={node && !game.result ? { breakEven: breakEven(node) } : null}
         />
       )}
-      {!stage && node && !game.result && (
-        <div className="challenge-figures" aria-hidden>
-          <span>
-            <small>Price</small>
-            <b>
-              {node.toCall ? `${Math.round(breakEven(node) * 100)}%` : 'Free'}
-            </b>
-          </span>
-          <span>
-            <small>Equity</small>
-            <b>?</b>
-          </span>
-        </div>
-      )}
       <div className="challenge-bar">
-        <p className="challenge-head">
-          <span className="challenge-count">
-            Challenge hand {(index % CHALLENGE_HANDS.length) + 1} of{' '}
-            {CHALLENGE_HANDS.length}
-          </span>
-          <span className="challenge-spot">
-            {game.cards[0].map(cardLabel).join(' ')}
-            {game.board.length
-              ? ` on ${game.board.map(cardLabel).join(' ')}`
-              : ' preflop'}
-            {node?.toCall
-              ? ` · ${node.toCall.toLocaleString('en-US')} to call`
-              : ''}
-          </span>
-        </p>
         <p className="challenge-status" role="status">
           {last ? (
             <>
@@ -414,7 +382,7 @@ function StageLabels({
             ref={(el) => void (refs.current.priceBar = el)}
             aria-hidden
           >
-            <b>{verdict.price ? pct(verdict.price) : 'Free'}</b>
+            <b>{verdict.price ? pct(verdict.price) : 'free'}</b>
             <small>{verdict.price ? 'the price' : 'to check'}</small>
           </div>
         </>

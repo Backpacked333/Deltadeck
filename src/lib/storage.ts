@@ -89,7 +89,7 @@ export type Progress = {
 
 export const DEFAULT_SETTINGS: Settings = {
   mode: 'beginner',
-  theme: 'dark',
+  theme: 'system',
   atlasStyle: 'balanced',
   speed: 'normal',
   guessFirst: true,

@@ -15,7 +15,7 @@
 }
 .curriculum-workspace .qp-calibration-lab fieldset {
   min-width: 0;
-  border: 1px solid var(--cw-2);
+  border: 1px solid #dce2dc;
   border-radius: 8px;
   padding: 1rem;
 }
@@ -25,10 +25,10 @@
   max-width: 700px;
   min-height: 120px;
   padding: 10px;
-  border: 1px solid var(--cw-5);
+  border: 1px solid #82948a;
   border-radius: 6px;
-  background: var(--cw-1);
-  color: var(--cw-6);
+  background: #fff;
+  color: #192c22;
   font: inherit;
 }
 .curriculum-workspace .qp-calibration-actions {

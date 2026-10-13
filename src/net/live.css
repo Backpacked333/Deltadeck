@@ -172,32 +172,13 @@
   max-width: 980px;
   padding-top: 20px;
 }
-/* The match's facts as glass pills over the table. */
 .live-matchbar {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px 18px;
   align-items: center;
   color: var(--text-2);
-  font-size: 13px;
-}
-.live-matchbar > span:not(.sr-only, .live-signal) {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 6px 13px;
-  border-radius: 999px;
-  background: var(--glass);
-  border: 1px solid var(--glass-edge);
-  box-shadow: var(--glass-shine);
-  white-space: nowrap;
-}
-.live-matchbar .live-clock {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
-}
-.live-matchbar .live-warn {
-  color: var(--warning);
+  font-size: 14px;
 }
 .live-matchbar .player-avatar,
 .live-matchbar .school-crest {
@@ -558,22 +539,36 @@
     's1 mid s5'
     '.  s0  .';
   align-items: center;
-  gap: 10px 16px;
-  min-height: 520px;
-  padding: 22px 28px;
+  gap: 6px 16px;
+  padding: 18px 28px;
   border-radius: var(--radius-lg);
   background: var(--table-bg);
-  border: 1px solid rgb(255 255 255 / 0.06);
   color: var(--on-felt);
   box-shadow: var(--shadow-lg);
-  overflow: hidden;
   isolation: isolate;
 }
-/* The same scene as the heads-up table (TableScene), behind the seats. */
-.six-ring > .scene {
-  inset: 58px 70px 64px;
+/* The felt and rail, drawn like the heads-up table's but without noise. */
+.six-ring::before {
+  content: '';
+  position: absolute;
+  inset: 34px 40px;
+  border-radius: 999px;
+  border: 12px solid transparent;
+  background:
+    radial-gradient(
+        ellipse at 50% 40%,
+        var(--felt-1),
+        var(--felt-2) 60%,
+        var(--felt-3)
+      )
+      padding-box,
+    linear-gradient(180deg, var(--rail-1), var(--rail-2) 45%, var(--rail-3))
+      border-box;
+  box-shadow: inset 0 14px 40px rgb(0 0 0 / 0.35);
+  z-index: -1;
 }
 .six-ring :focus-visible {
+  /* The app's focus blue is too dark against the felt. */
   outline-color: var(--accent);
 }
 .six-mid {
@@ -596,9 +591,8 @@
   flex-direction: column;
   gap: 4px;
   justify-self: center;
-  width: min(100%, 210px);
+  width: min(100%, 168px);
   min-width: 0;
-  transition: opacity 0.25s;
 }
 .six-seat[data-slot='0'] {
   grid-area: s0;
@@ -624,57 +618,25 @@
 .six-seat[data-slot='5'] {
   flex-direction: column-reverse;
 }
-/* A glass pill: the face in its ring, then name, school and stack. */
 .six-plate {
   position: relative;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  column-gap: 10px;
-  row-gap: 2px;
   align-content: center;
   min-height: 62px;
   min-width: 0;
-  padding: 5px 14px 5px 5px;
-  border-radius: 999px;
-  background: rgb(17 15 30 / 0.88);
-  border: 1px solid rgb(255 255 255 / 0.09);
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.07),
-    0 14px 34px rgb(0 0 0 / 0.45);
+  padding: 6px 10px;
+  border-radius: 12px;
+  background: rgb(8 24 18 / 0.78);
+  border: 1px solid rgb(255 255 255 / 0.1);
+  box-shadow: 0 8px 18px rgb(0 0 0 / 0.28);
   font-size: 12px;
-  line-height: 1.2;
+  line-height: 1.3;
   transition:
     border-color 0.25s,
     box-shadow 0.25s,
     opacity 0.25s;
 }
-.six-plate > :not(.six-face) {
-  grid-column: 2;
-}
-.six-face {
-  grid-row: 1 / span 4;
-  align-self: center;
-  display: grid;
-  place-items: center;
-  width: 50px;
-  height: 50px;
-  border-radius: 50%;
-  box-shadow: inset 0 0 0 2.5px rgb(255 255 255 / 0.14);
-}
-.six-face .player-avatar,
-.six-initial {
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-}
-.six-initial {
-  display: grid;
-  place-items: center;
-  background: linear-gradient(145deg, #3a3460, #221e38);
-  color: #d6d3ea;
-  font: 700 16px var(--font-display);
-}
-/* The name's line; the name is what shortens. */
+/* The name's line: picture, name and crest; the name is what shortens. */
 .six-who {
   display: flex;
   gap: 4px;
@@ -684,47 +646,14 @@
 .six-name {
   min-width: 0;
   overflow: hidden;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.six-school {
-  display: inline-flex;
-  align-items: center;
-  justify-self: start;
-  gap: 6px;
-  max-width: 100%;
-  padding: 2px 9px 2px 3px;
-  border-radius: 999px;
-  background: rgb(255 255 255 / 0.06);
-  border: 1px solid rgb(255 255 255 / 0.08);
-  color: #d6d3ea;
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-}
 .six-stack {
   color: var(--on-felt-2);
-  font: 500 13px var(--font-display);
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-.six-folded {
-  margin-left: 6px;
-  font:
-    600 11px 'DM Sans',
-    system-ui,
-    sans-serif;
-  font-style: normal;
-  color: #8d89ab;
-}
-.six-seat[data-folded] {
-  opacity: 0.5;
-}
-.six-seat[data-folded] .six-face {
-  filter: grayscale(1);
 }
 .six-line {
   display: flex;
@@ -738,7 +667,7 @@
   font-style: italic;
 }
 .six-seat[data-state='sitting-out'] .six-plate {
-  opacity: 0.55;
+  opacity: 0.7;
 }
 /* A player whose socket closed: words and an icon, not colour alone. */
 .six-away {
@@ -749,24 +678,19 @@
   font-weight: 600;
 }
 .six-seat[data-active] .six-plate {
-  border-color: rgb(255 228 154 / 0.55);
+  border-color: var(--accent);
+  /* Mixed from the token, not a fixed rgb, so the halo follows the theme
+     (the dark accent is #b2e08c, not the light #c4e6a8). */
   box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.1),
-    0 0 0 3px rgb(255 228 154 / 0.12),
-    0 0 26px rgb(255 214 140 / 0.28),
-    0 14px 34px rgb(0 0 0 / 0.45);
-}
-.six-seat[data-active] .six-face {
-  box-shadow:
-    inset 0 0 0 2.5px #ffe49a,
-    0 0 14px rgb(255 228 154 / 0.45);
+    0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent),
+    0 8px 18px rgb(0 0 0 / 0.28);
 }
 /* A slow glow on the seat to act; it stops under reduced motion below. */
 .six-seat[data-active] .six-plate::after {
   content: '';
   position: absolute;
   inset: -5px;
-  border-radius: 999px;
+  border-radius: 16px;
   border: 2px solid var(--accent);
   opacity: 0;
   pointer-events: none;
@@ -778,10 +702,10 @@
   }
 }
 .six-clock {
-  padding: 0 7px;
+  padding: 0 6px;
   border-radius: 999px;
-  background: #ffe49a;
-  color: #17142a;
+  background: var(--accent);
+  color: var(--accent-ink);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
@@ -791,12 +715,9 @@
 }
 .six-sit,
 .six-empty {
-  display: grid;
-  grid-template-columns: 1fr;
   place-items: center;
-  padding: 6px 14px;
-  border: 1px dashed rgb(255 255 255 / 0.2);
-  background: rgb(17 15 30 / 0.5);
+  border: 1px dashed rgb(255 255 255 / 0.28);
+  background: rgb(0 0 0 / 0.18);
   box-shadow: none;
   color: var(--on-felt-2);
   font-size: 13px;
@@ -809,10 +730,6 @@
 .six-sit:hover {
   border-color: var(--accent);
   background: rgb(255 255 255 / 0.06);
-}
-.six-sit > *,
-.six-empty > * {
-  grid-column: 1;
 }
 .six-chips {
   display: flex;
@@ -828,17 +745,16 @@
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: #f6f2e3;
-  color: #1d2a24;
+  background: var(--card-face);
+  color: var(--card-ink);
   font: 800 11px var(--font-display);
   box-shadow: 0 3px 8px rgb(0 0 0 / 0.35);
 }
 .six-blind,
 .six-bet {
-  padding: 2px 9px;
+  padding: 1px 7px;
   border-radius: 999px;
-  background: rgb(17 15 30 / 0.72);
-  border: 1px solid rgb(255 255 255 / 0.08);
+  background: rgb(0 0 0 / 0.32);
   color: var(--on-felt);
   font-size: 11px;
   font-weight: 700;
@@ -858,11 +774,10 @@
     gap: 10px 6px;
     padding: 16px 10px;
   }
-  .six-ring {
-    min-height: 0;
-  }
-  .six-ring > .scene {
-    inset: 40px 0;
+  .six-ring::before {
+    inset: 8px;
+    border-width: 8px;
+    border-radius: 56px;
   }
   .six-seat {
     width: 100%;
@@ -881,34 +796,7 @@
     align-self: end;
   }
   .six-plate {
-    column-gap: 6px;
-    min-height: 52px;
-    padding: 4px 8px 4px 4px;
-  }
-  .six-face {
-    width: 36px;
-    height: 36px;
-  }
-  .six-face .player-avatar,
-  .six-initial {
-    width: 30px;
-    height: 30px;
-    font-size: 13px;
-  }
-  .six-name {
-    font-size: 12px;
-  }
-  /* The crest alone; its name is in its title and accessible name. */
-  .six-school {
-    padding: 0;
-    border: 0;
-    background: none;
-  }
-  .six-school > span {
-    display: none;
-  }
-  .six-stack {
-    font-size: 12px;
+    padding: 6px 8px;
   }
 }
 /* Chip flights (P2-06b): a seat's bet to the pot as a street closes, and
@@ -980,18 +868,12 @@
    cards; .six-mid sizes them to fit its width (P2-05a). */
 .six-pot {
   margin: 0;
-  color: #8d89ab;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.26em;
-  text-transform: uppercase;
+  color: var(--on-felt-2);
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
 .six-pot b {
-  margin-left: 8px;
   color: var(--on-felt);
-  font: 600 24px var(--font-display);
-  letter-spacing: 0;
 }
 /* Side pots (P2-06a): one pill per pot, like the bets on the plates. A
    row of them wraps inside the middle rather than widen it on a phone;
@@ -1007,10 +889,9 @@
   list-style: none;
 }
 .six-pots li {
-  padding: 2px 10px;
+  padding: 1px 8px;
   border-radius: 999px;
-  background: rgb(17 15 30 / 0.72);
-  border: 1px solid rgb(255 255 255 / 0.08);
+  background: rgb(0 0 0 / 0.32);
   color: var(--on-felt-2);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -1041,13 +922,11 @@
 .six-wait {
   display: grid;
   gap: 8px;
-  padding: 16px 18px;
+  padding: 14px 16px;
   border-radius: var(--radius-lg);
-  background: linear-gradient(180deg, #110f1d, #0a0912);
-  border: 1px solid rgb(255 255 255 / 0.08);
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.06),
-    var(--shadow);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
 }
 .six-wait .action-caption {
   margin: 0;
@@ -1273,206 +1152,4 @@
 }
 .live-signal-poor {
   background: var(--negative);
-}
-
-/* ---- Six seats: card backs on the plate of each seat still in the hand */
-.six-plate {
-  overflow: visible;
-}
-.six-backs {
-  position: absolute;
-  right: -10px;
-  top: -16px;
-  display: flex;
-  pointer-events: none;
-}
-.six-backs i {
-  display: block;
-  width: 26px;
-  height: 36px;
-  overflow: hidden;
-  border-radius: 3px;
-  box-shadow: 0 6px 12px rgb(0 0 0 / 0.35);
-}
-.six-backs i:first-child {
-  transform: rotate(-8deg);
-}
-.six-backs i:last-child {
-  transform: rotate(10deg) translateX(-12px);
-}
-
-/* ---- The six table full bleed (wide screens): the seats round a large
-   oval, the viewer's plate at the bottom left and their cards held up in
-   the middle, and the action dock lying on the felt at the bottom right.
-   Phones keep the grid above. */
-@media (min-width: 900px) {
-  .live-page-table:has(.six-table) {
-    max-width: 1480px;
-  }
-  .six-table {
-    position: relative;
-  }
-  .six-ring {
-    display: block;
-    height: clamp(660px, 80vh, 840px);
-    padding: 0;
-    border-radius: 32px;
-  }
-  .six-ring > .scene {
-    inset: 110px 13% 170px;
-  }
-  .six-seat {
-    position: absolute;
-    width: 270px;
-    transform: translate(-50%, -50%);
-    z-index: 2;
-  }
-  .six-seat[data-slot='3'] {
-    left: 50%;
-    top: 12%;
-  }
-  .six-seat[data-slot='2'] {
-    left: 21%;
-    top: 26%;
-  }
-  .six-seat[data-slot='4'] {
-    left: 79%;
-    top: 26%;
-  }
-  .six-seat[data-slot='1'] {
-    left: 14%;
-    top: 61%;
-  }
-  .six-seat[data-slot='5'] {
-    left: 86%;
-    top: 61%;
-  }
-  .six-seat[data-slot='0'] {
-    left: 17%;
-    top: 89%;
-    width: 330px;
-  }
-  .six-plate {
-    min-height: 70px;
-  }
-  .six-face {
-    width: 58px;
-    height: 58px;
-  }
-  .six-face .player-avatar,
-  .six-initial {
-    width: 48px;
-    height: 48px;
-  }
-  /* The middle covers the ring; its parts sit where the felt has room. */
-  .six-mid {
-    position: absolute;
-    inset: 0;
-    display: block;
-    pointer-events: none;
-    --card-sm-w: 64px;
-    --card-md-w: 92px;
-    --card-lg-w: 150px;
-  }
-  .six-mid > * {
-    pointer-events: auto;
-  }
-  .six-pot {
-    position: absolute;
-    left: 50%;
-    top: 29%;
-    transform: translateX(-50%);
-  }
-  .six-pots {
-    position: absolute;
-    left: 50%;
-    top: 35%;
-    width: 60%;
-    transform: translateX(-50%);
-  }
-  .six-board {
-    position: absolute;
-    left: 50%;
-    top: 46%;
-    gap: 12px;
-    transform: translate(-50%, -50%);
-  }
-  .six-hole {
-    position: absolute;
-    left: 47%;
-    bottom: 22px;
-    gap: 0;
-    transform: translateX(-50%);
-    filter: drop-shadow(0 30px 40px rgb(0 0 0 / 0.6));
-    --card-md-w: 150px;
-  }
-  .six-hole .pcard:first-child {
-    transform: rotate(-7deg) translateY(6px);
-  }
-  .six-hole .pcard:last-child {
-    transform: rotate(6deg) translateX(-30px);
-  }
-  /* The dock lies on the felt, without a card of its own. */
-  .six-dock {
-    position: absolute;
-    right: 28px;
-    bottom: 26px;
-    z-index: 4;
-    width: min(500px, 35%);
-  }
-  .six-dock .action-bar,
-  .six-dock .six-wait {
-    padding: 0;
-    background: none;
-    border: 0;
-    box-shadow: none;
-  }
-}
-
-/* ---- The heads-up live table full bleed (wide screens), as the six table:
-   a tall stage, your cards held up, the dock on the felt. */
-@media (min-width: 900px) {
-  .live-page-table:has(.live-felt) {
-    max-width: 1480px;
-  }
-  .live-felt {
-    position: relative;
-  }
-  .live-felt .stage {
-    --card-sm-w: 54px;
-    --card-md-w: 88px;
-    --card-lg-w: 148px;
-    height: clamp(620px, 76vh, 800px);
-  }
-  .live-felt .scene {
-    inset: 70px 12% 150px;
-  }
-  .live-felt .pot {
-    top: 30%;
-  }
-  .live-felt .board {
-    top: 39%;
-  }
-  .live-felt .seat-hero {
-    left: 45%;
-  }
-  .live-felt .seat-hero .seat-plate {
-    right: calc(100% + 12vw);
-  }
-  .live-felt .seat-hero .seat-hand {
-    left: auto;
-    right: calc(100% + 12vw);
-    bottom: 86px;
-  }
-  .live-felt > .action-bar {
-    position: absolute;
-    right: 28px;
-    bottom: 26px;
-    z-index: 5;
-    width: min(500px, 35%);
-    padding: 0;
-    background: none;
-    border: 0;
-    box-shadow: none;
-  }
 }

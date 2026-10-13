@@ -96,13 +96,7 @@ export function SeriesChart({
                 <path
                   d={path}
                   fill="none"
-                  style={{
-                    stroke: [
-                      'var(--positive)',
-                      'var(--warning)',
-                      'var(--negative)',
-                    ][i % 3],
-                  }}
+                  stroke={['#176842', '#694c15', '#774083'][i % 3]}
                   strokeWidth={3}
                   strokeDasharray={linePatterns[i]}
                 >

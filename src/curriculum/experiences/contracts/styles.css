@@ -1,6 +1,6 @@
 .curriculum-workspace .qp-contracts-lab {
-  background: var(--surface, var(--cw-1));
-  border: 1px solid var(--line, var(--cw-13));
+  background: var(--surface, #fff);
+  border: 1px solid var(--line, #e3e7df);
   border-radius: 16px;
   padding: clamp(14px, 3vw, 28px);
   min-width: 0;
@@ -10,11 +10,11 @@
   margin-block: 0.8rem;
 }
 .curriculum-workspace .qp-contracts-lab button {
-  border: 1px solid var(--green, var(--cw-10));
+  border: 1px solid var(--green, #23624f);
   border-radius: 8px;
   padding: 0.5rem 0.8rem;
   min-height: 44px;
-  background: var(--cw-309);
+  background: #f1f6eb;
 }
 .curriculum-workspace .qp-contracts-lab > label,
 .curriculum-workspace .qp-contracts-lab section > label {
@@ -24,10 +24,10 @@
 }
 .curriculum-workspace .qp-contracts-lab select,
 .curriculum-workspace .qp-contracts-lab textarea {
-  border: 1px solid var(--cw-5);
+  border: 1px solid #82948a;
   border-radius: 6px;
-  background: var(--cw-1);
-  color: var(--ink, var(--cw-11));
+  background: #fff;
+  color: var(--ink, #203930);
   padding: 0.6rem;
   min-height: 44px;
   max-width: 100%;
@@ -39,7 +39,7 @@
   margin-block: 0.75rem;
 }
 .curriculum-workspace .qp-contracts-lab fieldset {
-  border: 1px solid var(--line, var(--cw-13));
+  border: 1px solid var(--line, #e3e7df);
   border-radius: 8px;
   padding: 1rem;
   min-width: 0;
