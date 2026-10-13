@@ -340,16 +340,23 @@ test.describe('six tables through the real lobby', () => {
   test.afterEach(async () => {
     const players = opened.map((o) => o.p)
     opened = []
-    for (const p of players) {
-      const stand = p.page.getByRole('button', { name: 'Stand up' })
-      if (await stand.isVisible().catch(() => false))
-        await stand.click().catch(() => {})
+    try {
+      await expect(async () => {
+        for (const p of players) {
+          const stand = p.page.getByRole('button', { name: 'Stand up' })
+          // Another player's stand can stale this command. A fresh snapshot
+          // re-enables the control for a new request, not an unsafe replay.
+          if (await stand.isVisible()) {
+            if (await stand.isEnabled()) await stand.click({ timeout: 2000 })
+          }
+        }
+        for (const p of players)
+          await expect(p.page.getByRole('group', { name: /\(you\)$/ }))
+            .toHaveCount(0, { timeout: 1000 })
+      }).toPass({ timeout: 60_000, intervals: [100, 250, 500] })
+    } finally {
+      await Promise.all(players.map((p) => p.close()))
     }
-    for (const p of players)
-      await expect(p.page.getByRole('group', { name: /\(you\)$/ }))
-        .toHaveCount(0, { timeout: 60_000 })
-        .catch(() => {})
-    for (const p of players) await p.close()
   })
 
   test('Quick sit seats a player at a six-seat table from the keyboard, and the lobby lists it', async ({
