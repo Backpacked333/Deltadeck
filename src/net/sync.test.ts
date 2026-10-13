@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { baseCases } from '../curriculum/content/foundationCases/baseBanks'
+import { attemptFor } from '../curriculum/core/__fixtures__/testing'
 import {
   LEARNING_KEY as CURRICULUM_KEY,
+  LEARNING_RESET_KEY,
   LEARNING_V1_KEY as CURRICULUM_V1_KEY,
+  emptyStore,
 } from '../curriculum/core/persistence'
+import type { LearningStoreV2 } from '../curriculum/core/types'
 import {
   DEFAULT_SETTINGS,
   emptyProgress,
@@ -41,6 +46,8 @@ const account = (over: Partial<AccountState> = {}): AccountState => ({
   clearedAt: null,
   curriculum: null,
   curriculumAt: null,
+  curriculumRev: 0,
+  curriculumResetAt: null,
   ...over,
 })
 const progress = (over: Partial<Progress> = {}): Progress => ({
@@ -364,6 +371,104 @@ describe('PracticeSync', () => {
     server.state.offline = false
     await vi.advanceTimersByTimeAsync(6000)
     expect(h.progress.hands.map((x) => x.id)).toEqual(['x'])
+    h.sync.stop()
+  })
+})
+
+describe('two devices, one curriculum (audit F09)', () => {
+  const day = (n: number) => new Date(Date.UTC(2026, 9, n, 12)).toISOString()
+  /** A store holding one submitted attempt at `caseId`, saved on day `n`. */
+  function store(caseId: string, n: number, base?: LearningStoreV2) {
+    const c = baseCases.find((x) => x.id === caseId)!
+    const s = base ?? emptyStore(() => new Date(day(n)))
+    const attempt = {
+      ...attemptFor(c, { createdAt: day(n), committedAt: day(n) }),
+      submittedAt: day(n),
+      phase: 'archived' as const,
+    }
+    return {
+      ...s,
+      updatedAt: day(n),
+      attempts: [...s.attempts, attempt],
+    } satisfies LearningStoreV2
+  }
+  const caseIds = (raw: string | null | undefined) =>
+    (JSON.parse(raw!) as LearningStoreV2).attempts.map((a) => a.caseId).sort()
+  const transfers = baseCases
+    .filter((c) => c.mode === 'transfer')
+    .map((c) => c.id)
+    .slice(0, 2)
+
+  it('a save based on a revision another device moved past is merged, not lost', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const server = fakeAccount()
+    const h = harness(progress(), server)
+    await h.start()
+    // Another device saves first: the account is at revision 1.
+    server.state.learning = {
+      curriculum: JSON.stringify(store(transfers[0], 2)),
+      curriculum_updated_at: day(2),
+      curriculum_rev: 1,
+    }
+    // This device, still based on revision 0, saves its own work.
+    localStorage.setItem(LEARNING_KEY, JSON.stringify(store(transfers[1], 3)))
+    window.dispatchEvent(new Event(LEARNING_SAVED_EVENT))
+    await vi.advanceTimersByTimeAsync(2500)
+    await vi.waitFor(() =>
+      expect(server.state.learning?.curriculum_rev).toBe(2),
+    )
+    // Both devices' attempts, here and on the account.
+    expect(caseIds(server.state.learning?.curriculum)).toEqual(
+      [...transfers].sort(),
+    )
+    expect(caseIds(localStorage.getItem(LEARNING_KEY))).toEqual(
+      [...transfers].sort(),
+    )
+    expect(h.reloadLearning).toHaveBeenCalled()
+    expect(h.sync.saveState()).toBe('saved')
+    h.sync.stop()
+  })
+
+  it('the other arrival order: work here meets the account’s at sign-in, and both are kept', async () => {
+    const server = fakeAccount({
+      learning: {
+        curriculum: JSON.stringify(store(transfers[0], 2)),
+        curriculum_updated_at: day(2),
+        curriculum_rev: 4,
+      },
+    })
+    localStorage.setItem('qp.learningOwner', ME)
+    localStorage.setItem(LEARNING_KEY, JSON.stringify(store(transfers[1], 5)))
+    const h = harness(progress({ owner: ME }), server)
+    await h.start()
+    expect(await h.sync.flush(1000)).toBe('saved')
+    expect(caseIds(server.state.learning?.curriculum)).toEqual(
+      [...transfers].sort(),
+    )
+    expect(server.state.learning?.curriculum_rev).toBe(5)
+    h.sync.stop()
+  })
+
+  it('a reset here is not undone by the account’s older copy, and goes to it', async () => {
+    const server = fakeAccount({
+      learning: {
+        curriculum: JSON.stringify(store(transfers[0], 2)),
+        curriculum_updated_at: day(2),
+        curriculum_rev: 1,
+      },
+    })
+    localStorage.setItem('qp.learningOwner', ME)
+    localStorage.setItem(LEARNING_RESET_KEY, day(3))
+    localStorage.setItem(
+      LEARNING_KEY,
+      JSON.stringify(emptyStore(() => new Date(day(3)))),
+    )
+    const h = harness(progress({ owner: ME }), server)
+    await h.start()
+    expect(await h.sync.flush(1000)).toBe('saved')
+    expect(caseIds(server.state.learning?.curriculum)).toEqual([])
+    expect(caseIds(localStorage.getItem(LEARNING_KEY))).toEqual([])
+    expect(server.state.learning?.curriculum_reset_at).toBe(day(3))
     h.sync.stop()
   })
 })

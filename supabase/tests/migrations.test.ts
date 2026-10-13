@@ -111,6 +111,7 @@ describe('migrations', () => {
       '20261013090000_hands_played_at.sql',
       '20261013091000_rating_trend.sql',
       '20261013092000_rating_evidence.sql',
+      '20261013093000_learning_rev.sql',
     ])
   })
 })

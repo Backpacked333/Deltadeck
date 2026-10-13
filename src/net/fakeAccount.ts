@@ -1,7 +1,8 @@
 // Test-only: the account's practice tables in memory (practice_hands,
 // learning_state), with the database's own rules: a graded hand is never
-// replaced by its provisional copy, each learning document keeps the newer
-// write, the clear time only moves forward. `offline` makes every call
+// replaced by its provisional copy, the trainer document keeps the newer
+// write, the curriculum is compare-and-set on its revision, the clear time
+// only moves forward. `offline` makes every call
 // fail, as a dropped connection does; `calls` records each write.
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { HandRecord } from '../lib/storage'
@@ -11,6 +12,9 @@ type Learning = {
   trainer_updated_at?: string
   curriculum?: string
   curriculum_updated_at?: string
+  /** As the database's trigger: a changed curriculum names old + 1. */
+  curriculum_rev?: number
+  curriculum_reset_at?: string
   hands_cleared_at?: string
 }
 
@@ -96,13 +100,26 @@ export function fakeAccount({
           next.trainer = row.trainer
           next.trainer_updated_at = row.trainer_updated_at
         }
-        if (
-          'curriculum' in row &&
-          later(row.curriculum_updated_at, next.curriculum_updated_at)
-        ) {
+        if ('curriculum' in row && row.curriculum !== next.curriculum) {
+          // Compare-and-set on the revision (audit F09): a write based on an
+          // older revision, or one that names none (an old client), is
+          // refused, as the database does.
+          const rev = next.curriculum_rev ?? 0
+          if (state.learning && row.curriculum_rev !== rev + 1)
+            return {
+              error: { message: 'curriculum changed', code: '40001' },
+            }
           next.curriculum = row.curriculum
           next.curriculum_updated_at = row.curriculum_updated_at
+          next.curriculum_rev = state.learning
+            ? rev + 1
+            : (row.curriculum_rev ?? 0)
         }
+        if (
+          row.curriculum_reset_at &&
+          later(row.curriculum_reset_at, next.curriculum_reset_at)
+        )
+          next.curriculum_reset_at = row.curriculum_reset_at
         if (
           row.hands_cleared_at &&
           later(row.hands_cleared_at, next.hands_cleared_at)

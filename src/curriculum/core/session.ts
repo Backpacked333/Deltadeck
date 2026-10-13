@@ -7,6 +7,7 @@ import {
   emptyStore,
   exportLearning,
   LEARNING_KEY,
+  LEARNING_RESET_KEY,
   LEARNING_V1_KEY,
   LIMITS,
   loadLearning,
@@ -222,6 +223,9 @@ export class LearningSession implements EvidenceCallbacks {
     try {
       if (this.storage) {
         const raw = JSON.stringify(next)
+        // Before the document: a sync that sends the reset store sends the
+        // reset with it, so the account drops older work everywhere.
+        this.storage.setItem(LEARNING_RESET_KEY, next.updatedAt)
         this.storage.setItem(LEARNING_KEY, raw)
         this.savedRaw = raw
         durable = true

@@ -19,6 +19,8 @@ import {
 } from '../lib/storage'
 import type { HandRecord, Progress, Settings } from '../lib/storage'
 import type { LessonId } from '../lib/storage'
+import { mergeLearningRaw } from '../curriculum/core/merge'
+import { LEARNING_RESET_KEY } from '../curriculum/core/persistence'
 
 /** The curriculum's keys (src/curriculum/core/persistence.ts). */
 export const LEARNING_KEY = 'quantpoker.learning.v2'
@@ -59,6 +61,13 @@ export type AccountState = {
   clearedAt: number | null
   curriculum: string | null
   curriculumAt: number | null
+  /**
+   * The curriculum's revision on the account (audit F09): a write must name
+   * the one it was based on, as this plus one, or it is refused (40001).
+   */
+  curriculumRev: number
+  /** The latest curriculum reset of any device: older work is gone. */
+  curriculumResetAt: number | null
 }
 
 const bytes = (text: string) => new TextEncoder().encode(text).length
@@ -177,23 +186,35 @@ export type LearningChoice =
   | { kind: 'keep' }
   | { kind: 'send' }
   | { kind: 'take'; raw: string | null; backup: string | null }
+  /** Both copies held work the other lacked: both take the merge. */
+  | { kind: 'merge'; raw: string }
 
 /**
- * Which curriculum wins: another account's is replaced by this one's (no
- * backup: it is not this player's); otherwise the newer by its own change
- * time, the other kept as a backup when it is replaced.
+ * What to do with this browser's curriculum and the account's. Another
+ * account's is replaced by this one's (no backup: it is not this player's).
+ * Two copies of this player's merge (audit F09: the last save used to win
+ * and the other's work was lost): whichever already holds everything is
+ * kept, else both take the merge. Only when a copy is not a valid store
+ * (a test, or a document from an older format) does the newer win, the
+ * other kept as a backup.
  */
 export function pickLearning(
   local: string | null,
   account: Pick<AccountState, 'curriculum' | 'curriculumAt'>,
   userId: string,
   owner: string | null,
+  resetAt: number | null = null,
 ): LearningChoice {
   if (owner && owner !== userId)
     return { kind: 'take', raw: account.curriculum, backup: null }
   if (local === account.curriculum) return { kind: 'keep' }
   if (!account.curriculum) return local ? { kind: 'send' } : { kind: 'keep' }
   if (!local) return { kind: 'take', raw: account.curriculum, backup: null }
+  const merged = mergeLearningRaw(local, account.curriculum, resetAt)
+  if (merged?.kind === 'ours') return { kind: 'send' }
+  if (merged?.kind === 'theirs')
+    return { kind: 'take', raw: account.curriculum, backup: null }
+  if (merged?.kind === 'merged') return { kind: 'merge', raw: merged.raw }
   const ours = curriculumTime(local) ?? 0
   return (account.curriculumAt ?? 0) > ours
     ? { kind: 'take', raw: account.curriculum, backup: local }
@@ -298,6 +319,8 @@ export class PracticeSync {
   private sending: Promise<void> | null = null
   private learningTimer: ReturnType<typeof setTimeout> | null = null
   private learningDirty = false
+  /** The account's curriculum revision this browser's copy is based on. */
+  private learningRev = 0
 
   constructor(
     private readonly client: SupabaseClient,
@@ -370,7 +393,7 @@ export class PracticeSync {
       this.client
         .from('learning_state')
         .select(
-          'trainer, trainer_updated_at, curriculum, curriculum_updated_at, hands_cleared_at',
+          'trainer, trainer_updated_at, curriculum, curriculum_updated_at, curriculum_rev, curriculum_reset_at, hands_cleared_at',
         )
         .maybeSingle(),
     ])
@@ -387,6 +410,8 @@ export class PracticeSync {
       curriculum:
         typeof row?.curriculum === 'string' ? (row.curriculum as string) : null,
       curriculumAt: time(row?.curriculum_updated_at),
+      curriculumRev: Number(row?.curriculum_rev ?? 0) || 0,
+      curriculumResetAt: time(row?.curriculum_reset_at),
     }
   }
 
@@ -606,21 +631,66 @@ export class PracticeSync {
 
   // ---- The curriculum --------------------------------------------------------
 
+  /** The latest reset this browser knows of: its own, or the account's. */
+  private resetAt(account?: { curriculumResetAt: number | null }) {
+    const here = time(localStorage.getItem(LEARNING_RESET_KEY))
+    const there = account?.curriculumResetAt ?? null
+    return here === null ? there : there === null ? here : Math.max(here, there)
+  }
+
   private startLearning(account: AccountState) {
     const owner = localStorage.getItem(LEARNING_OWNER_KEY)
     const local = localStorage.getItem(LEARNING_KEY)
-    const choice = pickLearning(local, account, this.userId, owner)
-    if (choice.kind === 'take') {
-      if (choice.backup) write(LEARNING_BACKUP_KEY, choice.backup)
+    this.learningRev = account.curriculumRev
+    const choice = pickLearning(
+      local,
+      account,
+      this.userId,
+      owner,
+      owner && owner !== this.userId
+        ? account.curriculumResetAt
+        : this.resetAt(account),
+    )
+    if (choice.kind === 'take' || choice.kind === 'merge') {
+      if (choice.kind === 'take' && choice.backup)
+        write(LEARNING_BACKUP_KEY, choice.backup)
       write(LEARNING_KEY, choice.raw)
       if (!choice.raw) write(LEARNING_V1_KEY, null)
       this.hooks.reloadLearning()
     }
     write(LEARNING_OWNER_KEY, this.userId)
-    if (choice.kind === 'send') {
+    if (choice.kind === 'send' || choice.kind === 'merge') {
       this.learningDirty = true
       void this.sendLearning().catch(() => this.learningLater())
     }
+  }
+
+  /**
+   * The account's curriculum changed since this browser's copy was based
+   * on it (another device saved): read it and merge it in here. True when
+   * this browser's copy is now the account's own (nothing left to send).
+   */
+  private async rebase(): Promise<boolean> {
+    const { data, error } = await this.client
+      .from('learning_state')
+      .select('curriculum, curriculum_rev, curriculum_reset_at')
+      .maybeSingle()
+    if (error) throw error
+    const row = data as Record<string, unknown> | null
+    this.learningRev = Number(row?.curriculum_rev ?? 0) || 0
+    const remote =
+      typeof row?.curriculum === 'string' ? (row.curriculum as string) : null
+    const local = localStorage.getItem(LEARNING_KEY)
+    if (!remote || !local) return false
+    const merged = mergeLearningRaw(
+      local,
+      remote,
+      this.resetAt({ curriculumResetAt: time(row?.curriculum_reset_at) }),
+    )
+    if (!merged || merged.kind === 'ours') return false
+    write(LEARNING_KEY, merged.kind === 'theirs' ? remote : merged.raw)
+    this.hooks.reloadLearning()
+    return merged.kind === 'theirs'
   }
 
   private learningSaved = () => {
@@ -641,7 +711,7 @@ export class PracticeSync {
     }, delay)
   }
 
-  private async sendLearning() {
+  private async sendLearning(attempt = 0): Promise<void> {
     const raw = localStorage.getItem(LEARNING_KEY)
     if (!raw) {
       this.learningDirty = false
@@ -654,15 +724,31 @@ export class PracticeSync {
       return
     }
     const at = curriculumTime(raw) ?? Date.now()
+    const resetAt = this.resetAt()
     const { error } = await this.client.from('learning_state').upsert(
       {
         user_id: this.userId,
         curriculum: raw,
         curriculum_updated_at: new Date(at).toISOString(),
+        // Based on the revision this copy came from (audit F09): if another
+        // device saved since, the account refuses this (40001), and the two
+        // are merged here and sent again.
+        curriculum_rev: this.learningRev + 1,
+        ...(resetAt !== null
+          ? { curriculum_reset_at: new Date(resetAt).toISOString() }
+          : {}),
       },
       { onConflict: 'user_id' },
     )
+    if (error?.code === '40001' && attempt < 3) {
+      if (await this.rebase()) {
+        this.learningDirty = false
+        return
+      }
+      return this.sendLearning(attempt + 1)
+    }
     if (error) throw error
+    this.learningRev++
     if (localStorage.getItem(LEARNING_KEY) === raw) this.learningDirty = false
   }
 }
@@ -679,6 +765,7 @@ export function clearLocalPractice() {
     LEARNING_V1_KEY,
     LEARNING_BACKUP_KEY,
     LEARNING_OWNER_KEY,
+    LEARNING_RESET_KEY,
     TRAINER_SYNCED_KEY,
     'qp.pendingClaim',
   ])

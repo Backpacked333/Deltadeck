@@ -181,26 +181,70 @@ describe('learning state', () => {
       )
     ).rows[0]
 
-  it('an older device never overwrites newer trainer or curriculum state', async () => {
+  it('an older device never overwrites newer trainer state', async () => {
     const alice = await player()
     await as(alice, async () => {
       await save(alice, {
         trainer: '{"lessons": ["equity", "variance"]}',
         trainer_updated_at: '2026-10-11T12:00:00Z',
-        curriculum: '{"v":2,"b":1}',
-        curriculum_updated_at: '2026-10-11T12:00:00Z',
       })
       await save(alice, {
         trainer: '{"lessons": []}',
         trainer_updated_at: '2026-10-11T11:00:00Z',
-        curriculum: '{"v":2,"a":1}',
-        curriculum_updated_at: '2026-10-11T13:00:00Z',
       })
     })
-    const state = await row(alice)
-    expect(state.trainer).toEqual({ lessons: ['equity', 'variance'] })
-    // Stored byte for byte: the newer curriculum, keys in its own order.
-    expect(state.curriculum).toBe('{"v":2,"a":1}')
+    expect((await row(alice)).trainer).toEqual({
+      lessons: ['equity', 'variance'],
+    })
+  })
+
+  it('takes a curriculum only from a write based on its current revision (audit F09)', async () => {
+    const alice = await player()
+    const rev = async () =>
+      (
+        await db.query<{ rev: string; reset: Date | null }>(
+          `select curriculum_rev::text as rev, curriculum_reset_at as reset
+           from public.learning_state where user_id = $1`,
+          [alice],
+        )
+      ).rows[0]
+    await as(alice, () =>
+      save(alice, { curriculum: '{"v":2,"b":1}', curriculum_rev: '1' }),
+    )
+    // Another device, still based on revision 0, and a client from before
+    // revisions: both refused, whatever time they claim.
+    for (const stale of [
+      {
+        curriculum: '{"v":2,"a":1}',
+        curriculum_rev: '1',
+        curriculum_updated_at: '2026-12-31T00:00:00Z',
+      },
+      {
+        curriculum: '{"v":2,"a":1}',
+        curriculum_updated_at: '2026-12-31T00:00:00Z',
+      },
+    ])
+      await expect(as(alice, () => save(alice, stale))).rejects.toMatchObject({
+        code: '40001',
+      })
+    // Based on revision 1: taken, byte for byte, and now revision 2.
+    await as(alice, () =>
+      save(alice, { curriculum: '{"v":2,"a":1}', curriculum_rev: '2' }),
+    )
+    expect((await row(alice)).curriculum).toBe('{"v":2,"a":1}')
+    expect((await rev()).rev).toBe('2')
+    // A write of the trainer, or of the same text, keeps the revision.
+    await as(alice, async () => {
+      await save(alice, { trainer: '{}' })
+      await save(alice, { curriculum: '{"v":2,"a":1}', curriculum_rev: '9' })
+    })
+    expect((await rev()).rev).toBe('2')
+    // The reset time only moves forward.
+    await as(alice, async () => {
+      await save(alice, { curriculum_reset_at: '2026-10-11T12:00:00Z' })
+      await save(alice, { curriculum_reset_at: '2026-10-01T00:00:00Z' })
+    })
+    expect((await rev()).reset?.toISOString()).toBe('2026-10-11T12:00:00.000Z')
   })
 
   it('moves the history clear time only forward', async () => {
