@@ -884,13 +884,12 @@ export default function App() {
     </Suspense>
   )
 
-  // Dark first: dark, then light, then following the system.
   const nextTheme: Settings['theme'] =
-    settings.theme === 'dark'
+    settings.theme === 'system'
       ? 'light'
       : settings.theme === 'light'
-        ? 'system'
-        : 'dark'
+        ? 'dark'
+        : 'system'
 
   return (
     <LazyMotion features={loadMotionFeatures} strict>
@@ -1027,21 +1026,6 @@ export default function App() {
                 onSettings={() => setDialog('settings')}
                 onSkipGuided={skipGuided}
                 runout={runout}
-                arc={
-                  game.result
-                    ? null
-                    : {
-                        equity:
-                          actionMath.revealed && actionMath.ready
-                            ? actionMath.equity
-                            : undefined,
-                        breakEven: actionMath.breakEven,
-                        guess:
-                          typeof guessEntry === 'number'
-                            ? guessEntry
-                            : undefined,
-                      }
-                }
               />
               <ActionBar
                 game={game}

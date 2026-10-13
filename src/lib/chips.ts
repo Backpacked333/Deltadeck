@@ -1,5 +1,5 @@
-// Chip denominations and a greedy amount-to-stack breakdown, used to draw
-// bets and pots as physical stacks.
+// Casino chip denominations and a greedy amount-to-stack breakdown, used to
+// draw bets and pots as physical stacks.
 export type Denomination = {
   value: number
   /** Main colour, edge-stripe colour. */
@@ -7,13 +7,12 @@ export type Denomination = {
   stripe: string
 }
 
-// The ceramic set, in the table's palette.
 export const DENOMINATIONS: Denomination[] = [
-  { value: 500, color: '#5b4bd0', stripe: '#e9e4ff' },
-  { value: 100, color: '#1d1a2a', stripe: '#e9c46a' },
-  { value: 25, color: '#1f9a63', stripe: '#eafff4' },
-  { value: 5, color: '#d23c4b', stripe: '#ffe9ec' },
-  { value: 1, color: '#efedf5', stripe: '#5b4bd0' },
+  { value: 500, color: '#6b3fa0', stripe: '#f2e6ff' },
+  { value: 100, color: '#23272b', stripe: '#f0d27a' },
+  { value: 25, color: '#2f8a5b', stripe: '#f5f1e3' },
+  { value: 5, color: '#c4413a', stripe: '#f5f1e3' },
+  { value: 1, color: '#f1eee4', stripe: '#3a6ea5' },
 ]
 
 export type ChipStack = { denomination: Denomination; count: number }

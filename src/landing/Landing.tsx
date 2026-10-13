@@ -28,7 +28,6 @@ import type { FinishedChallenge } from './ChallengeHand'
 import { tilt, untilt, useReveal } from './motion'
 import { ScoreCard } from './ScoreCard'
 import type { Stage } from './stage/stage'
-import { SchoolBanners } from './SchoolBanners'
 import { StageCanvas } from './stage/StageCanvas'
 import { want3d } from './stage/support'
 import { GRADE_BANDS } from './why'
@@ -181,19 +180,16 @@ export default function Landing({ signedIn = false }: { signedIn?: boolean }) {
             </p>
           )}
           <p className="landing-links-row">
-            <button className="btn btn-accent btn-hero" onClick={toPlay}>
-              Play the challenge hand
-            </button>
             {signedIn ? (
               <>
-                <a href="#table">
+                <a className="btn btn-accent" href="#table">
                   Open your table <ArrowRight size={14} />
                 </a>
                 <a href="#lobby">Play online</a>
               </>
             ) : (
               <>
-                <button className="landing-inline" onClick={createAccount}>
+                <button className="btn btn-accent" onClick={createAccount}>
                   Create free account <ArrowRight size={14} />
                 </button>
                 <a href="#signin">Sign in</a>
@@ -202,10 +198,6 @@ export default function Landing({ signedIn = false }: { signedIn?: boolean }) {
             <a href="#how" onClick={toHow}>
               How it works
             </a>
-          </p>
-          <p className="landing-note">
-            No account needed for the first hand. Sixty seconds, graded on the
-            spot.
           </p>
         </div>
         <div className="landing-play" ref={play}>
@@ -244,7 +236,6 @@ export default function Landing({ signedIn = false }: { signedIn?: boolean }) {
         )}
       </section>
 
-      <SchoolBanners signedIn={signedIn} onJoin={createAccount} />
       <HowItWorks onPlay={toPlay} />
       <YourAccount onPlay={toPlay} signedIn={signedIn} />
 
