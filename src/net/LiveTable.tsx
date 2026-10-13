@@ -189,6 +189,8 @@ export function LiveTable({
           invite={state.invite}
           open={state.status === 'open'}
           answer={answer}
+          cancel={stand}
+          cancelling={state.asking?.kind === 'stand'}
         />
       )}
     </div>
@@ -281,6 +283,8 @@ function WaitingRoom({
   invite,
   open,
   answer,
+  cancel,
+  cancelling,
 }: {
   matchId: string
   table: MatchInfo
@@ -289,6 +293,9 @@ function WaitingRoom({
   invite: TableState['invite']
   open: boolean
   answer: (requestId: string, accept: boolean) => boolean
+  /** Leaves a casual table before its first hand (a `stand`). */
+  cancel: () => boolean
+  cancelling: boolean
 }) {
   const link = inviteLink(matchId)
   const [copied, setCopied] = useState(false)
@@ -301,21 +308,30 @@ function WaitingRoom({
     }
   }
   const opponent = table.players.find((p) => p.seat !== seat)
-  if (ended?.reason === 'no_show')
+  if (ended?.reason === 'no_show') {
+    // The table's own word on who was missing: a host back after their
+    // guest gave up is not told the guest failed to show (audit F05).
+    const missed = ended.noShow?.includes(seat) ?? false
     return (
       <section className="panel live-signin" aria-labelledby="waiting-title">
         <h2 id="waiting-title">
-          {opponent ? `${opponent.username} did not show up` : 'Nobody came'}
+          {missed
+            ? 'The table closed before you arrived'
+            : opponent
+              ? `${opponent.username} did not show up`
+              : 'Nobody came'}
         </h2>
         <p className="live-muted">
-          The table closed after 30 seconds. Nothing was played or recorded
-          against you.
+          {missed
+            ? 'Your opponent could not wait any longer. Nothing was played.'
+            : 'The table closed before the first hand. Nothing was played or recorded against you.'}
         </p>
         <a className="btn btn-primary" href="#lobby/find">
           Find another match
         </a>
       </section>
     )
+  }
   if (table.status === 'finished')
     return (
       <section className="panel live-signin" aria-labelledby="waiting-title">
@@ -334,9 +350,22 @@ function WaitingRoom({
       <section className="panel live-signin" aria-labelledby="waiting-title">
         <h2 id="waiting-title">Waiting for {opponent.username}</h2>
         <p className="live-muted">
-          You were paired. The first hand deals as soon as they open the table;
-          if they do not within 30 seconds, the table closes.
+          The first hand deals as soon as they open the table; if they do not
+          within 30 seconds, the table closes and you are free to play
+          elsewhere.
         </p>
+        {/* Casual only: nothing is played or recorded before the deal, so
+            not waiting is always allowed (audit F05). A rated table keeps
+            its own 30 s rule. */}
+        {table.kind === 'hu-casual' && (
+          <button
+            className="btn btn-outline"
+            disabled={!open || cancelling}
+            onClick={() => void cancel()}
+          >
+            {cancelling ? 'Leaving…' : 'Stop waiting'}
+          </button>
+        )}
       </section>
     )
   return (

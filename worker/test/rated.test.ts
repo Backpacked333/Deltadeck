@@ -2,7 +2,11 @@
 // 40 fresh-deck hands, a 60 s bank for each half, the result from the
 // luck-adjusted total with a draw band, and the forfeit rule. Players are
 // real account ids, so every call reaches the (stubbed) archive.
-import { env, runInDurableObject } from 'cloudflare:test'
+import {
+  abortAllDurableObjects,
+  env,
+  runInDurableObject,
+} from 'cloudflare:test'
 import {
   afterAll,
   beforeAll,
@@ -18,6 +22,7 @@ import type { HandState, PlayerAction, SeatId } from '../../src/engine/types'
 import type { HandRecordV1, ServerMsg } from '../../src/shared/protocol'
 import { forgetUsernames } from '../src/auth'
 import { DRAW_BAND_BB, GRACE_MS, outcomes, RATED_CONFIG } from '../src/rated'
+import { runoutMs } from '../../src/shared/pacing'
 import { NEXT_HAND_MS } from '../src/table'
 import type { InitBody, TableDO } from '../src/table'
 import {
@@ -230,7 +235,9 @@ describe('a rated match', () => {
     // Held until the luck is settled: the match call goes, the hand waits.
     await until(() => calls.some((c) => c.rpc === 'record_match'))
     expect(handCalls()).toEqual([])
-    await nextHand(matchId, alice, 2)
+    // The next deal waits for the flop all-in's turn and river (audit F02).
+    await elapse(matchId, NEXT_HAND_MS + runoutMs(3))
+    await alice.next(isState(2))
     await until(() => handCalls().length === 1)
     expect(handCalls()[0].record.luck).toEqual({
       allInAt: 3,
@@ -398,6 +405,70 @@ describe('a player who leaves a rated match', () => {
       abandoned: [0, 1],
       adjustedBySeat: { 0: 0, 1: 0 },
     })
+  })
+})
+
+describe('a restart while a rated match is played (audit F04)', () => {
+  const gracesOf = (matchId: string) =>
+    runInDurableObject(stub(matchId), (t: TableDO) =>
+      (
+        t as unknown as {
+          deadlines: { kind: string; seat: number; at: number }[]
+        }
+      ).deadlines.filter((d) => d.kind === 'grace'),
+    )
+  /** A deploy: every object dropped, storage kept, every socket closed unseen. */
+  async function restart(matchId: string, at: number) {
+    await abortAllDurableObjects()
+    await freezeClock(matchId, at)
+  }
+  const turnLimit = RATED_CONFIG.decisionMs + RATED_CONFIG.bankMs
+
+  it('with nobody back, both get the grace and the match is void, not a forfeit', async () => {
+    const { matchId, seats } = await rated()
+    await move(matchId, seats, passive) // Bob to act
+    await restart(matchId, T0)
+    // Bob's turn runs out: the alarm finds both seats without a socket and
+    // starts their grace from now, never backdated.
+    await elapse(matchId, turnLimit)
+    expect((await gracesOf(matchId)).map((d) => [d.seat, d.at])).toEqual([
+      [0, T0 + turnLimit + GRACE_MS],
+      [1, T0 + turnLimit + GRACE_MS],
+    ])
+    await elapse(matchId, GRACE_MS)
+    expect((await peek(matchId)).match.status).toBe('finished')
+    await until(() => endCall() !== undefined)
+    expect(endCall()!.result).toMatchObject({
+      reason: 'abandoned',
+      abandoned: [0, 1],
+    })
+  })
+
+  it('a second restart does not renew the grace', async () => {
+    const { matchId, seats } = await rated()
+    await move(matchId, seats, passive)
+    await restart(matchId, T0)
+    await elapse(matchId, turnLimit) // graces from T0 + turnLimit
+    await restart(matchId, T0 + turnLimit + 30_000)
+    await elapse(matchId, 0)
+    expect((await gracesOf(matchId)).map((d) => d.at)).toEqual([
+      T0 + turnLimit + GRACE_MS,
+      T0 + turnLimit + GRACE_MS,
+    ])
+    await elapse(matchId, 30_000)
+    await until(() => endCall() !== undefined)
+    expect(endCall()!.result).toMatchObject({ reason: 'abandoned' })
+  })
+
+  it('the player who comes back starts the grace of the one still away', async () => {
+    const { matchId, seats } = await rated()
+    await move(matchId, seats, passive)
+    await restart(matchId, T0 + 5000)
+    const alice = await connect(matchId, ALICE)
+    await alice.next((f) => f.t === 'welcome')
+    expect((await gracesOf(matchId)).map((d) => [d.seat, d.at])).toEqual([
+      [1, T0 + 5000 + GRACE_MS],
+    ])
   })
 })
 

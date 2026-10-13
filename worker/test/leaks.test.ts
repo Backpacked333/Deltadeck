@@ -11,6 +11,7 @@ import { seededDeck } from '../../src/engine/testing'
 import type { ServerMsg } from '../../src/shared/protocol'
 import type { TableController } from '../src/controller'
 import { RATED_CONFIG } from '../src/rated'
+import { runoutMs } from '../../src/shared/pacing'
 import { NEXT_HAND_MS } from '../src/table'
 import type { InitBody, TableDO } from '../src/table'
 import {
@@ -191,9 +192,10 @@ describe('every frame of a rated match', () => {
     }))
     await move(matchId, clients, passive)
     await alice.next((f) => f.t === 'reveal' && f.handNo === 1)
-    // Hands 2 to 4: Bob times out three times in a row and forfeits.
+    // Hands 2 to 4: Bob times out three times in a row and forfeits. Hand
+    // 2 deals once the flop all-in's board is revealed (audit F02).
     const away = RATED_CONFIG.decisionMs + RATED_CONFIG.bankMs
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapse(matchId, NEXT_HAND_MS + runoutMs(3))
     await alice.next(isState(2))
     await elapse(matchId, away)
     await elapse(matchId, NEXT_HAND_MS)

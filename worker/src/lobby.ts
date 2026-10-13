@@ -620,6 +620,31 @@ export class LobbyDO extends DurableObject<WorkerEnv> {
   }
 
   /**
+   * An invite's guest and its host, together (audit F06): both are recorded
+   * at `matchId`, or neither is. Null when both were free; otherwise the
+   * first account playing at another table, and that table. The host's
+   * open invite holds nobody (liveness 'open'), so without this a host
+   * could start two invites, or one invite while playing elsewhere.
+   */
+  claimBoth(
+    userIds: string[],
+    matchId: string,
+  ): Promise<{ userId: string; matchId: string } | null> {
+    return this.forUsers(userIds, async () => {
+      for (const userId of userIds) {
+        const active = await this.liveActive(userId, matchId)
+        if (active && active !== matchId) return { userId, matchId: active }
+      }
+      await this.ctx.storage.put(
+        Object.fromEntries(
+          userIds.map((userId) => [`active:${userId}`, matchId]),
+        ),
+      )
+      return null
+    })
+  }
+
+  /**
    * For `POST /api/matches`: records that `userId` is at the new invite
    * table `matchId`, unless they are playing elsewhere (that table's id
    * comes back) or have made MATCH_CREATES_PER_DAY tables today (seconds

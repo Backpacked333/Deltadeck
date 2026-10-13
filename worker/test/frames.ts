@@ -114,6 +114,8 @@ export const FRAME_KEYS: Record<ServerMsg['t'], string[]> = {
     'seat',
     'table',
     'view',
+    // Six-casual, own account only: a stand the table accepted (RULES).
+    'leaving?',
   ]),
   state: keysOf<Msg<'state'>>()([
     't',
@@ -122,6 +124,7 @@ export const FRAME_KEYS: Record<ServerMsg['t'], string[]> = {
     'serverNow',
     'table',
     'view',
+    'leaving?',
   ]),
   // Six-casual adds `seats` (each dealt seat's stack, by seat number) and
   // the blind seats: all public at the deal (six-only, RULES).
@@ -321,9 +324,17 @@ const HAND_START_SEAT_KEYS = keysOf<
  * for the other, so heads-up frames keep exactly the keys (and bytes) they
  * had before six tables existed.
  */
-type KindRules = { six?: string[]; headsUp?: string[]; sixOptional?: string[] }
+type KindRules = {
+  six?: string[]
+  headsUp?: string[]
+  sixOptional?: string[]
+  /** Optional at a six table, never heads-up. */
+  sixMay?: string[]
+}
 const RULES = {
   hand_start: { six: ['seats', 'sb', 'bb'] },
+  welcome: { sixMay: ['leaving'] },
+  state: { sixMay: ['leaving'] },
   // Always there heads-up, where every seat was dealt in; at a six table an
   // account that sat down during the hand gets its reveal without `own`.
   reveal: { sixOptional: ['own'] },
@@ -337,6 +348,7 @@ const forKind = (keys: string[], six: boolean, rules: KindRules = {}) =>
     if (rules.six?.includes(name)) return six ? [name] : []
     if (rules.headsUp?.includes(name)) return six ? [] : [name]
     if (rules.sixOptional?.includes(name)) return six ? [`${name}?`] : [k]
+    if (rules.sixMay?.includes(name)) return six ? [`${name}?`] : []
     return [k]
   })
 // The per-hand luck (equities) stays in the archive and never reaches a
@@ -418,7 +430,12 @@ export const analysisKeys = (value: unknown) =>
 export function checkFrame(f: ServerMsg, kind: MatchKind = 'hu-casual') {
   const six = kind === 'six-casual'
   const rules: KindRules | undefined =
-    f.t === 'hand_start' || f.t === 'reveal' ? RULES[f.t] : undefined
+    f.t === 'hand_start' ||
+    f.t === 'reveal' ||
+    f.t === 'welcome' ||
+    f.t === 'state'
+      ? RULES[f.t]
+      : undefined
   expectKeys(f, forKind(FRAME_KEYS[f.t], six, rules), f.t)
   expect(forbiddenKeys(f), `${f.t}: forbidden keys`).toEqual([])
   if (f.t === 'welcome' || f.t === 'state') {

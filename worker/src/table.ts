@@ -20,6 +20,7 @@ import type { RevealedSlot } from '../../src/engine/deck'
 import { EngineError } from '../../src/engine/types'
 import type { HandState, SeatId } from '../../src/engine/types'
 import { GAME_CODE_RE, GAME_ID_RE } from '../../src/shared/gameCode'
+import { runoutMs } from '../../src/shared/pacing'
 import {
   CLOSE_ABUSE,
   CLOSE_ELSEWHERE,
@@ -72,7 +73,7 @@ import {
   RESERVE_MS,
 } from './games'
 import { FrameBudget, ILLEGAL_PER_HAND } from './limits'
-import { lobbyStub } from './lobby'
+import { lobbyStub, START_WITHIN_MS } from './lobby'
 import type { RematchAnswer } from './lobby'
 import { describeError, logEvent } from './log'
 import { GRACE_MS, outcomes, RATED_CONFIG, REMATCH_MS } from './rated'
@@ -106,8 +107,24 @@ export const SIX_CONFIG: MatchConfig = {
   bankMs: 30_000,
   bankRefill: 'orbit',
 }
-/** Pause after a hand so both players see the result. */
+/** Pause after a hand's result shows, so both players see it. */
 export const NEXT_HAND_MS = 3000
+
+/**
+ * When the next hand deals after `hand` ended: the result's pause, after a
+ * heads-up all-in board has been revealed card by card (src/state/runout.ts;
+ * audit F02). `boardBefore` is the board before the hand's last move, as the
+ * client sees it. Six tables show the board at once.
+ */
+export function nextHandDelay(
+  hand: HandState,
+  boardBefore: number,
+  six: boolean,
+) {
+  return (
+    NEXT_HAND_MS + (six || !hand.result?.showdown ? 0 : runoutMs(boardBefore))
+  )
+}
 /**
  * Six-casual: a player who stood may sit at the same table again once this
  * many hands have been dealt there, or SIT_COOLDOWN_MS has passed, whichever
@@ -437,10 +454,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
   /** Illegal frames per account in the current hand. */
   private illegalCount = new Map<string, { handNo: number; n: number }>()
   /**
-   * Six-casual: accounts whose sit waits on the lobby's claim, with how
-   * many sits. The lobby may grant the claim and weigh another table's
-   * claim for the same account before the grant gets back here, so this
-   * table holds them from the moment it asks (liveness).
+   * Accounts whose seat waits on the lobby's claim, with how many claims:
+   * a six-table sit, or an invite's guest and host (join). The lobby may
+   * grant the claim and weigh another table's claim for the same account
+   * before the grant gets back here, so this table holds them from the
+   * moment it asks (liveness).
    */
   private claiming = new Map<string, number>()
   /**
@@ -606,7 +624,23 @@ export class TableDO extends DurableObject<WorkerEnv> {
         ? 'playing'
         : 'open'
     if (match.status === 'playing') return 'playing'
+    if (userId !== undefined && this.claiming.has(userId)) return 'starting'
     return match.players.length === 2 ? 'starting' : 'open'
+  }
+
+  /** Holds `userIds` here while `claim` asks the lobby (liveness). */
+  private async whileClaiming<T>(userIds: string[], claim: () => Promise<T>) {
+    for (const userId of userIds)
+      this.claiming.set(userId, (this.claiming.get(userId) ?? 0) + 1)
+    try {
+      return await claim()
+    } finally {
+      for (const userId of userIds) {
+        const left = this.claiming.get(userId)! - 1
+        if (left) this.claiming.set(userId, left)
+        else this.claiming.delete(userId)
+      }
+    }
   }
 
   private newPlayer(
@@ -650,9 +684,15 @@ export class TableDO extends DurableObject<WorkerEnv> {
       // "Live games"). Checked here and again after the claim: the host's
       // Accept can land while the claim is awaited.
       if (this.heldFor(userId)) return json({ error: 'table full' }, 403)
-      // One table per account: someone playing elsewhere is sent back there.
-      const elsewhere = await lobbyStub(this.env).claim(userId, match.id)
-      if (elsewhere) return this.refuse(4409, elsewhere)
+      // One table per account, for both players (audit F06): a guest
+      // playing elsewhere is sent back there; a host playing elsewhere
+      // cannot start this game too, so it is closed to the guest.
+      const host = match.players[0]
+      const busy = await this.whileClaiming([userId, host.userId], () =>
+        lobbyStub(this.env).claimBoth([userId, host.userId], match.id),
+      )
+      if (busy?.userId === userId) return this.refuse(4409, busy.matchId)
+      if (busy) return this.refuse(CLOSE_GONE, 'closed')
       // The claim awaited, so another join may have run meanwhile. If it
       // seated this same account (a second tab), join as that seat: releasing
       // here would free an account that is now playing at this table.
@@ -675,6 +715,16 @@ export class TableDO extends DurableObject<WorkerEnv> {
         delete match.invite
         await this.ctx.storage.put('match', match)
         if (invite) this.closeInvite(match.id, invite, userId)
+        // A host who has gone (audit F05): the guest waits START_WITHIN_MS
+        // for them, as the waiting room says, then the table closes and
+        // both accounts are free; not the link's 24 hours.
+        if (!this.connected(host.userId)) {
+          this.setGameDeadline({
+            kind: 'start',
+            at: this.clock() + START_WITHIN_MS,
+          })
+          await this.armAlarm()
+        }
       }
     }
     // A seat the lobby or the creator's request made, or an earlier
@@ -700,11 +750,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
       username,
       ...looks,
     } satisfies Attachment)
-    // Six-casual: after a restart the first socket back starts the grace
-    // of every player still away (the restart closed their sockets unseen),
-    // rather than leaving it to the next alarm, which at a waiting table
-    // can be the idle check. Run once this socket counts as connected.
-    if (six && this.graceForAbsent()) await this.armAlarm()
+    // After a restart the first socket back starts the grace of every
+    // player still away (the restart closed their sockets unseen), rather
+    // than leaving it to the next alarm, which at a waiting six table can be
+    // the idle check. Run once this socket counts as connected.
+    if (this.graceForAbsent()) await this.armAlarm()
     this.send(server, this.frame('welcome', userId))
     this.sendEnded(server)
     this.sendMatchEnd(server)
@@ -787,6 +837,14 @@ export class TableDO extends DurableObject<WorkerEnv> {
     if (msg.t === 'sit_out') return this.sitOutMsg(ws)
     if (msg.t === 'sit_in') return this.sitInMsg(ws)
     if (msg.t !== 'act') return this.illegal(ws, userId, 'Not a table message')
+    // The clock decides, not the alarm (audit F11): a move that arrives at
+    // or after its turn's deadline is late, however late the alarm runs.
+    // What is due happens first, as the alarm would have done it, and the
+    // move is then judged against that table.
+    if (this.overdue()) {
+      await this.alarm()
+      if (ws.readyState !== OPEN || !this.match) return
+    }
     // Nobody without a seat acts, and the reply carries no hand.
     if (!this.atTable(userId))
       return this.reject(ws, 'not_your_turn', 'Take a seat to play', msg.reqId)
@@ -966,6 +1024,22 @@ export class TableDO extends DurableObject<WorkerEnv> {
   private async stand(ws: WebSocket) {
     const match = this.match!
     const { userId } = ws.deserializeAttachment() as Attachment
+    // Casual heads-up: the guest who no longer waits for the host cancels
+    // before the deal (audit F05). The table closes as at its start
+    // deadline, without a result, and both accounts are free at once. A
+    // cancel that loses the race to the deal is told so, with the table.
+    // Rated tables are paired by the lobby and keep their own start rule.
+    if (
+      match.config.kind === 'hu-casual' &&
+      match.players.some((p) => p.userId === userId)
+    ) {
+      if (match.status === 'waiting' && match.players.length === 2)
+        return this.noShow()
+      if (match.status === 'playing') {
+        this.reject(ws, 'stale', 'The game has started')
+        return this.send(ws, this.frame('state', userId))
+      }
+    }
     if (!this.seatable())
       return this.illegal(ws, userId, 'There is no seat to leave here')
     const player = match.players.find((p) => p.userId === userId)
@@ -1580,6 +1654,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
    */
   private graceForAbsent(exclude?: WebSocket) {
     const match = this.match
+    if (match?.adjusted) return this.ratedGraceForAbsent()
     if (match?.config.kind !== 'six-casual' || match.status === 'finished')
       return false
     let started = false
@@ -1601,15 +1676,55 @@ export class TableDO extends DurableObject<WorkerEnv> {
     return started
   }
 
+  /** A turn, grace or start deadline is due and its alarm has not run. */
+  private overdue() {
+    const t = this.clock()
+    return this.deadlines.some(
+      (d) =>
+        d.at <= t &&
+        (d.kind === 'turn' || d.kind === 'grace' || d.kind === 'start'),
+    )
+  }
+
+  /**
+   * Rated, as socketGone does for a close the table heard: a seat with no
+   * socket open, not away yet and no grace running gets the 60 s grace from
+   * now (audit F04). A restart drops every socket unseen, so without this a
+   * player gone at a restart never got one: no "away", the both-gone rule
+   * could never void the match, and three timeouts on the normal clock
+   * forfeited them where a closed socket would have been void. The grace
+   * starts when the table first notices (the first join or alarm after the
+   * restart), never backdated; it is stored, so a second restart does not
+   * renew it, and a seat already away stays away.
+   */
+  private ratedGraceForAbsent() {
+    const match = this.match!
+    if (match.status !== 'playing') return false
+    let started = false
+    for (const p of match.players) {
+      if (p.awaySince !== undefined || this.connected(p.userId)) continue
+      if (this.deadlines.some((d) => d.kind === 'grace' && d.seat === p.seat))
+        continue
+      this.deadlines.push({
+        kind: 'grace',
+        at: this.clock() + GRACE_MS,
+        seat: p.seat,
+      })
+      started = true
+    }
+    return started
+  }
+
   /**
    * Runs every deadline that is due. Each one is checked against the table
    * first, so a late or repeated alarm does nothing. Never throws: a throw
-   * would spend the platform's retry budget on a bug.
+   * would spend the platform's retry budget on a bug. Also run before a
+   * move when one is overdue (overdue()).
    */
   async alarm() {
     try {
       const t = this.clock()
-      // Six-casual: players whose sockets a restart closed unseen.
+      // Players whose sockets a restart closed unseen.
       this.graceForAbsent()
       const due = this.deadlines.filter((d) => d.at <= t)
       this.deadlines = this.deadlines.filter((d) => d.at > t)
@@ -1725,6 +1840,7 @@ export class TableDO extends DurableObject<WorkerEnv> {
       source,
     })
     current.turnStartedAt = t
+    const boardBefore = this.hand?.board.length ?? 0
     this.hand = next
     this.seq++
     if (reqId) this.lastAck[player.userId] = { reqId, seq: this.seq }
@@ -1757,7 +1873,11 @@ export class TableDO extends DurableObject<WorkerEnv> {
       this.setGameDeadline(
         forfeit
           ? null
-          : { kind: 'nextHand', at: t + NEXT_HAND_MS, handNo: match.handNo },
+          : {
+              kind: 'nextHand',
+              at: t + nextHandDelay(next, boardBefore, six),
+              handNo: match.handNo,
+            },
       )
     } else this.setGameDeadline(this.turnFor(next, t))
     writes.deadlines = this.deadlines
@@ -3724,7 +3844,8 @@ export class TableDO extends DurableObject<WorkerEnv> {
       })),
     }
     const turn = this.deadlines.find((d) => isCurrentTurn(d, this.hand))
-    const seat = match.players.find((p) => p.userId === userId)?.seat ?? null
+    const me = match.players.find((p) => p.userId === userId)
+    const seat = me?.seat ?? null
     const view =
       this.hand && seat !== null
         ? seatView(this.hand, this.handSeat(userId), {
@@ -3742,6 +3863,10 @@ export class TableDO extends DurableObject<WorkerEnv> {
       seq: this.seq,
       matchId: this.matchId(),
       serverNow: this.clock(),
+      // A stand the table accepted, told only to the account that stood:
+      // its client shows "leaving" from the table's word, not from having
+      // sent the message (audit F03). Nobody else sees a pending stand.
+      ...(six && me?.standing ? { leaving: true as const } : {}),
     }
     return kind === 'welcome'
       ? { ...base, t: 'welcome', seat, table, view }

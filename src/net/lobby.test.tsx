@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CLOSE_GONE, CLOSE_RATE_LIMITED } from '../shared/protocol'
@@ -617,6 +617,43 @@ describe('LiveTable and the lobby', () => {
     act(() => socket.emit(welcome(info)))
     expect(screen.getByText('Waiting for bob')).toBeVisible()
     expect(screen.queryByLabelText('Invite link')).toBeNull()
+  })
+
+  it('lets a casual player stop waiting for an opponent who is away (audit F05)', async () => {
+    const socket = await table()
+    // Bob opened alice's invite; alice, the host, has gone.
+    const info = tableInfo(2, 'waiting')
+    info.players[0].connected = false
+    act(() => socket.emit({ ...welcome(info), seat: 1 }))
+    expect(screen.getByText('Waiting for alice')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Stop waiting' }))
+    expect(JSON.parse(socket.sent.at(-1)!)).toEqual({ t: 'stand' })
+    expect(screen.getByRole('button', { name: 'Leaving…' })).toBeDisabled()
+    act(() =>
+      socket.emit({
+        t: 'match_end',
+        seq: 1,
+        matchId: MATCH,
+        result: { netBySeat: { 0: 0, 1: 0 }, reason: 'no_show', noShow: [0] },
+      }),
+    )
+    expect(screen.getByText('alice did not show up')).toBeVisible()
+  })
+
+  it('tells a player the table closed before they arrived, not that the other did not show', async () => {
+    const socket = await table()
+    act(() => socket.emit(welcome()))
+    act(() =>
+      socket.emit({
+        t: 'match_end',
+        seq: 1,
+        matchId: MATCH,
+        result: { netBySeat: { 0: 0, 1: 0 }, reason: 'no_show', noShow: [0] },
+      }),
+    )
+    expect(
+      screen.getByText('The table closed before you arrived'),
+    ).toBeVisible()
   })
 
   it('explains a no-show and offers another match', async () => {

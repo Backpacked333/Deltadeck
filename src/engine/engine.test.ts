@@ -944,7 +944,10 @@ describe('a short big blind is still the bring-in (audit F01)', () => {
     state = act(state, 3, { type: 'call' })
     expect(state.players[3].invested).toBe(20)
     // All in to 35 is 15 more than the 20 bring-in: short of a full raise.
-    expect(legalActions(state)).toMatchObject({ minRaiseTo: 35, maxRaiseTo: 35 })
+    expect(legalActions(state)).toMatchObject({
+      minRaiseTo: 35,
+      maxRaiseTo: 35,
+    })
     state = act(state, 4, { type: 'raise', to: 35 })
     state = act(state, 0, { type: 'call' })
     state = act(state, 1, { type: 'call' })

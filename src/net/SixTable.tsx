@@ -34,22 +34,6 @@ const SEATS = 6
  */
 const TOP_UP = buyIn(SIX_BLINDS.bb)
 const noop = () => {}
-/** Where a tab keeps the hand it stood from (`matchId:handNo:seat`). */
-const STOOD_KEY = 'qp.six.stoodFrom'
-const readStood = (): string | null => {
-  try {
-    return sessionStorage.getItem(STOOD_KEY)
-  } catch {
-    return null
-  }
-}
-const keepStood = (key: string) => {
-  try {
-    sessionStorage.setItem(STOOD_KEY, key)
-  } catch {
-    // Storage refused (a private window): this page still knows.
-  }
-}
 const chips = (n: number) => Math.round(n).toLocaleString('en-US')
 /** "bob", "bob and carol", "bob, carol and dave". */
 const listed = (names: string[]) =>
@@ -94,25 +78,28 @@ export function SixTable({
   const live = view && !view.result ? view : null
   // Our own seat's controls. The hand we are dealt into while it is being
   // played, if any: a rebuy waits for it to end, and a stand during it
-  // keeps the seat until then. The wire has no marker of that pending
-  // stand (ADR, clarifications from PR-12), so we remember the hand and
-  // seat we stood from ourselves, in this tab, so a reload still knows.
+  // keeps the seat until then. Whether a stand is pending is the table's
+  // word (`leaving`, in every snapshot, a reload's too), never ours for
+  // having sent it: a stand lost on the way must not leave us shown as
+  // leaving, without moves, while the table waits on them (audit F03).
   const playing = dealt && !dealt.result ? dealt : null
   const handKey = view ? `${view.matchId}:${view.handNo}` : null
-  const standKey = playing ? `${handKey}:${playing.you}` : null
-  const [stoodFrom, setStoodFrom] = useState(readStood)
-  const leaving = standKey !== null && stoodFrom === standKey
+  const leaving = state.leaving
+  // A stand sent and not answered yet: a moment, until the table's welcome
+  // (or, if none comes, the watchdog's resync) says how it went.
+  const standing = state.asking?.kind === 'stand'
   // The bar only while the move is ours to make: dealt in, our turn by the
   // server's own legal moves, a socket to send on, no move in flight, and
-  // not after we stood from this hand (the table folds us; it refuses a
-  // move from a player who stood).
+  // not once the table took our stand (it folds us; it refuses a move from
+  // a player who stood) or while it is deciding.
   const legal =
     dealt &&
     !dealt.result &&
     dealt.toAct === dealt.you &&
     state.status === 'open' &&
     !state.pending &&
-    !leaving
+    !leaving &&
+    !standing
       ? dealt.legal
       : null
   // Per-hand names come from the hand's own record once it has one; until
@@ -182,17 +169,14 @@ export function SixTable({
   const mine =
     seat === null ? undefined : table.players.find((p) => p.seat === seat)
   const controls = state.status === 'open' && table.status !== 'finished'
-  // A Rebuy, a Sit out or Sit in, or a Stand up between hands, sent and
-  // not yet answered. The answer is a welcome (the new stack or status;
-  // no seat) or an error, and the button stays away until then: a double
-  // press would send the frame twice, and the second one's refusal
-  // (not_below, not_seated) would flash just after the first worked.
-  // Keyed by the hand, our stack and our status, which the answer
-  // changes. A dropped socket may have lost the frame, and a new seat has
-  // asked nothing, so either forgets it.
-  const [asked, setAsked] = useState<string | null>(null)
-  const askKey = `${handKey}:${mine?.stack}:${mine?.status}`
-  useEffect(() => setAsked(null), [state.status, seat])
+  // A Rebuy, a Sit out or Sit in, or a Stand up, sent and not yet
+  // answered (state.asking). The answer is a welcome (the new stack or
+  // status; no seat; leaving) or an error, and the button stays away until
+  // then: a double press would send the frame twice, and the second one's
+  // refusal (not_below, not_seated) would flash just after the first
+  // worked. A dropped socket, or no answer at all (the watchdog's resync),
+  // brings the buttons back with the table's truth.
+  const asked = state.asking?.kind ?? null
   // The roster's stack is what the next hand deals us (after the last
   // hand, or a rebuy); the server decides, this only offers.
   const canRebuy =
@@ -200,8 +184,8 @@ export function SixTable({
     !playing &&
     mine?.stack !== undefined &&
     mine.stack < TOP_UP &&
-    asked !== `rebuy:${askKey}`
-  const canStand = controls && !!mine && !leaving && asked !== `stand:${askKey}`
+    asked !== 'rebuy'
+  const canStand = controls && !!mine && !leaving && asked !== 'stand'
   // Seated without chips and out of any hand being played: no hand deals
   // us in until we rebuy (the server deals only funded players).
   const broke = !playing && mine?.stack === 0
@@ -210,29 +194,25 @@ export function SixTable({
   // is offered Rebuy instead of Sit in: a rebuy at 0 deals them in.
   const out = mine?.status === 'sitting_out'
   const canSitOut =
-    controls && !!mine && !out && !leaving && asked !== `out:${askKey}`
+    controls && !!mine && !out && !leaving && asked !== 'sit_out'
   const canSitIn =
-    controls &&
-    out &&
-    !leaving &&
-    (mine?.stack ?? 0) > 0 &&
-    asked !== `in:${askKey}`
+    controls && out && !leaving && (mine?.stack ?? 0) > 0 && asked !== 'sit_in'
   // What the live line under our seat says of our status. Back in after
   // sitting out, it says so until a hand deals us in. Stood up by the
   // table after sitting out (not by our own Stand up), the status below
   // the ring says why the seat is gone.
   const status = mine?.status ?? null
   const lastStatus = useRef<string | null>(null)
-  // A stand of our own is still to free the seat: pressed here, or the
-  // hand this tab remembers standing from (`leaving`), which a reload
-  // keeps where a press alone would be forgotten. A hand that deals us
-  // in otherwise means none is: a stand that never reached the table
-  // (the socket dropped) must not hide a later removal.
+  // A stand of our own is still to free the seat: pressed here, or one
+  // the table says it holds (`leaving`), which a reload keeps where a
+  // press alone would be forgotten. A hand that deals us in otherwise
+  // means none is: a stand that never reached the table (the socket
+  // dropped) must not hide a later removal.
   const stoodUp = useRef(false)
   useEffect(() => {
     if (leaving) stoodUp.current = true
-    else if (standKey !== null) stoodUp.current = false
-  }, [leaving, standKey])
+    else if (playing && !standing) stoodUp.current = false
+  }, [leaving, playing, standing])
   const [backAt, setBackAt] = useState<string | null>(null)
   const [removed, setRemoved] = useState(false)
   useEffect(() => {
@@ -250,23 +230,12 @@ export function SixTable({
     stoodUp.current = false
   }, [seat, status, handKey])
   const back = !out && !playing && backAt === (handKey ?? '')
-  const onRebuy = () => {
-    if (rebuy()) setAsked(`rebuy:${askKey}`)
-  }
+  const onRebuy = () => void rebuy()
   const onStand = () => {
-    if (!stand()) return
-    stoodUp.current = true
-    if (standKey) {
-      setStoodFrom(standKey)
-      keepStood(standKey)
-    } else setAsked(`stand:${askKey}`)
+    if (stand()) stoodUp.current = true
   }
-  const onSitOut = () => {
-    if (sitOut()) setAsked(`out:${askKey}`)
-  }
-  const onSitIn = () => {
-    if (sitIn()) setAsked(`in:${askKey}`)
-  }
+  const onSitOut = () => void sitOut()
+  const onSitIn = () => void sitIn()
   // The plates, also for the chip flights: a payout lands only on the
   // plate of the winner it left for.
   const ring = plates(table, view, nameOf, seat !== null)
@@ -339,15 +308,17 @@ export function SixTable({
           line={
             leaving
               ? 'Leaving after this hand'
-              : broke
-                ? 'No chips left: rebuy to be dealt in.'
-                : out
-                  ? playing
-                    ? 'Sitting out from the next hand.'
-                    : 'Sitting out: sit in to be dealt in.'
-                  : back
-                    ? 'Back in from the next hand.'
-                    : ''
+              : standing
+                ? 'Standing up…'
+                : broke
+                  ? 'No chips left: rebuy to be dealt in.'
+                  : out
+                    ? playing
+                      ? 'Sitting out from the next hand.'
+                      : 'Sitting out: sit in to be dealt in.'
+                    : back
+                      ? 'Back in from the next hand.'
+                      : ''
           }
           onRebuy={onRebuy}
           onSitOut={onSitOut}

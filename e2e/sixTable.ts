@@ -301,7 +301,15 @@ export async function fakeSixTable(
           commitment: null,
         })
       : null
-    const base = { seq: ++seq, matchId: SIX_TABLE, serverNow: Date.now() }
+    const base = {
+      seq: ++seq,
+      matchId: SIX_TABLE,
+      serverNow: Date.now(),
+      // A stand the table accepted, to the player who stood (audit F03).
+      ...(seated && standing && !isOver(hand)
+        ? { leaving: true as const }
+        : {}),
+    }
     return t === 'welcome'
       ? { ...base, t, seat: seated ? 0 : null, table: table(), view }
       : { ...base, t, table: table(), view }
