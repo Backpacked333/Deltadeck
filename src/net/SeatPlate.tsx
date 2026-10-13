@@ -2,11 +2,14 @@
 // dealer button and blinds, the shot clock while they are to act, and
 // whether they sit out or have dropped. An empty seat offers "Sit here".
 // It takes no cards, so a plate can never show a hole card the viewer may
-// not see; cards stay with the live table.
+// not see; cards stay with the live table. A seat still in the hand shows
+// two card backs, drawn here, which say only that it holds cards.
 // Generic on purpose: Atlas's avatar is for Atlas only (P2-05). A player's
 // own picture and school crest show beside their name when they have them.
 import { WifiOff } from 'lucide-react'
+import { CardBack } from '../components/cards/CardArt'
 import type { SeatId } from '../engine/types'
+import { crestFor } from '../lib/crests'
 import type { SeatView } from '../shared/protocol'
 import { PlayerAvatar, SchoolCrest } from './Avatar'
 import { clockParts } from './clockParts'
@@ -33,6 +36,10 @@ export type PlateSeat = {
   connected?: boolean
   /** Stood up during the hand whose result is showing (SixTable). */
   left?: boolean
+  /** Folded in the hand being played. */
+  folded?: boolean
+  /** Dealt into the hand being played and still in it: two backs show. */
+  holding?: boolean
   /** Their picture's bucket path, and their verified school's domain. */
   avatar?: string
   school?: string
@@ -91,28 +98,48 @@ export function SeatPlate({
       data-state={state}
       data-active={active && player ? '' : undefined}
       data-away={away ? '' : undefined}
+      data-folded={player?.folded ? '' : undefined}
       // The viewer's own seat takes focus when the live table moves it off
       // a control that went away (Sit here, the action bar).
       tabIndex={you ? -1 : undefined}
     >
       {player ? (
         <div className="six-plate">
-          <span className="six-who">
-            {player.avatar && (
+          {/* The face in a ring that turns gold for the seat to act. */}
+          <span className="six-face">
+            {player.avatar ? (
               <PlayerAvatar
                 username={player.username}
                 avatar={player.avatar}
-                size={20}
+                size={40}
               />
+            ) : (
+              <span className="six-initial" aria-hidden="true">
+                {player.username.charAt(0).toUpperCase()}
+              </span>
             )}
+          </span>
+          <span className="six-who">
             <span className="six-name" title={player.username}>
               {player.username}
             </span>
-            <SchoolCrest school={player.school} />
           </span>
+          <School school={player.school} />
+          {player.holding && !you && (
+            // Two backs, never a face: the plate never carries cards.
+            <span className="six-backs" aria-hidden="true">
+              <i>
+                <CardBack />
+              </i>
+              <i>
+                <CardBack />
+              </i>
+            </span>
+          )}
           <span className="six-stack">
             {chips(player.stack)}
             <span className="sr-only"> chips</span>
+            {player.folded && <em className="six-folded">Folded</em>}
           </span>
           {(state === 'sitting-out' || away || (active && clock)) && (
             <span className="six-line">
@@ -156,6 +183,18 @@ export function SeatPlate({
         )}
       </div>
     </div>
+  )
+}
+
+/** The school's crest in a pill with its name, when we have its crest. */
+function School({ school }: { school?: string }) {
+  const crest = crestFor(school)
+  if (!crest) return null
+  return (
+    <span className="six-school">
+      <SchoolCrest school={school} size={18} />
+      <span aria-hidden="true">{crest.name}</span>
+    </span>
   )
 }
 

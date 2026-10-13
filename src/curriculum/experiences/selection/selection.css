@@ -14,7 +14,7 @@
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   gap: 16px;
   min-width: 0;
-  border: 1px solid var(--line, #dce2dc);
+  border: 1px solid var(--line, var(--cw-2));
   border-radius: 8px;
   padding: 16px;
 }
@@ -53,7 +53,7 @@
 }
 .curriculum-workspace .qp-selection-lab :focus-visible,
 .curriculum-workspace .qp-selection-transfer :focus-visible {
-  outline: 3px solid var(--green, #176842);
+  outline: 3px solid var(--green, var(--cw-7));
   outline-offset: 3px;
 }
 @media (prefers-reduced-motion: reduce) {

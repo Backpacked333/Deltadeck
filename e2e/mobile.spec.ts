@@ -316,8 +316,10 @@ test('the header is solid over a six-seat table on a phone, and keeps its blur o
       .locator('.header')
       .evaluate((el) => getComputedStyle(el).backdropFilter)
   // The six table scrolls under the header on a phone, where a blur would
-  // be redrawn on every frame the chips fly beneath it (P2-06b).
-  await page.goto(`/#play/${SIX_TABLE}`)
+  // be redrawn on every frame the chips fly beneath it (P2-06b). The full
+  // tier: a software renderer (this browser) draws the lite table, whose
+  // header never blurs (src/env.ts renderTier).
+  await page.goto(`/?render=full#play/${SIX_TABLE}`)
   await expect(page.getByText('6-max · Hand 1')).toBeVisible()
   await expect.poll(blur).toBe('none')
   // Back to the trainer in the app, with no reload: the six table's
@@ -340,7 +342,7 @@ test('the header is solid over a six-seat table on a phone, and keeps its blur o
   await expect.poll(blur).toBe('blur(14px)')
   // One pixel wider than the phone rule's 680 px, the six table keeps the
   // blur like every other page.
-  await page.goto(`/#play/${SIX_TABLE}`)
+  await page.goto(`/?render=full#play/${SIX_TABLE}`)
   await expect(page.getByText('6-max · Hand 1')).toBeVisible()
   await expect.poll(blur).toBe('none')
   await page.setViewportSize({ width: 681, height: 800 })

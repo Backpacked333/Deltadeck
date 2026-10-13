@@ -1,13 +1,15 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { MotionConfig } from 'motion/react'
-import { motionOff } from './env'
+import { motionOff, renderTier } from './env'
 import { restoreAuthReturn } from './lib/authReturn'
 import { profilePathToHash } from './lib/profilePath'
 import App from './App'
 import './styles.css'
+import './table-light.css'
 
 if (motionOff) document.documentElement.classList.add('no-motion')
+document.documentElement.dataset.render = renderTier
 restoreAuthReturn()
 profilePathToHash()
 
