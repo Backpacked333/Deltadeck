@@ -446,6 +446,8 @@ function ChallengeKeys({
     if (!enabled) return
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return
+      // A held or composing key picks nothing (audit F17).
+      if (event.repeat || event.isComposing) return
       const target = event.target as HTMLElement | null
       if (target?.closest('input, textarea, select, [contenteditable]')) return
       const n = Number(event.key)

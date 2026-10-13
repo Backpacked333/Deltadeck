@@ -26,4 +26,23 @@ describe('practiceStats', () => {
     expect(practiceStats([hand('a', 0)]).accuracy).toBeNull()
     expect(handAccuracy(hand('a', 0))).toBeNull()
   })
+
+  it('compares result and expectation over the modeled hands only (audit F16)', () => {
+    const hands = [
+      { ...hand('a', 100), expectedNet: 40, graded: true },
+      // Still being graded: its result is not its expectation.
+      { ...hand('b', -300), graded: false },
+      // Recorded before expectations were kept.
+      hand('c', 50),
+      { ...hand('d', -20), expectedNet: 10 },
+    ]
+    const stats = practiceStats(hands)
+    expect(stats.net).toBe(-170)
+    expect(stats.netLine).toEqual([0, 100, -200, -150, -170])
+    expect(stats.coverage).toEqual({ modeled: 2, total: 4 })
+    expect(stats.modeledNet).toBe(80)
+    expect(stats.expected).toBe(50)
+    expect(stats.modeledNetLine).toEqual([0, 100, 80])
+    expect(stats.expectedLine).toEqual([0, 40, 50])
+  })
 })

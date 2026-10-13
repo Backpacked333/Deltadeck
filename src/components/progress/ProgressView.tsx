@@ -36,6 +36,8 @@ export function ProgressView({
     () => practiceStats(progress.hands, sessionId),
     [progress.hands, sessionId],
   )
+  const { modeled, total } = stats.coverage
+  const allModeled = modeled === total
 
   if (!stats.hands.length)
     return (
@@ -107,13 +109,25 @@ export function ProgressView({
           <strong className={stats.net >= 0 ? 'positive' : 'negative'}>
             {signed(stats.net)}
           </strong>
-          <small>model expected {signed(stats.expected)}</small>
+          <small>
+            {!modeled
+              ? 'No hand modeled yet'
+              : allModeled
+                ? `model expected ${signed(stats.expected)}`
+                : `${signed(stats.modeledNet)} on the ${modeled} modeled hands; model expected ${signed(stats.expected)}`}
+          </small>
         </div>
         <div className="tile">
           <Waves size={18} />
           <span className="label">Variance so far</span>
-          <strong>{signed(stats.net - stats.expected)}</strong>
-          <small>result minus expectation: luck, not skill</small>
+          <strong>
+            {modeled ? signed(stats.modeledNet - stats.expected) : '–'}
+          </strong>
+          <small>
+            {allModeled
+              ? 'result minus expectation: luck, not skill'
+              : `result minus expectation over the ${modeled} of ${total} hands the model priced`}
+          </small>
         </div>
       </div>
 
@@ -125,6 +139,8 @@ export function ProgressView({
               Your real chip result against what the model expected from your
               decisions. The gap between the lines is variance; it shrinks
               relative to the total as you play more hands.
+              {!allModeled &&
+                ` Modeled for ${modeled} of ${total} hands: both lines count only those.`}
             </p>
           </div>
           <div className="legend">
@@ -146,7 +162,11 @@ export function ProgressView({
               className: 'expected',
               values: stats.expectedLine,
             },
-            { label: 'Result', className: 'actual', values: stats.netLine },
+            {
+              label: 'Result',
+              className: 'actual',
+              values: stats.modeledNetLine,
+            },
           ]}
         />
       </section>
