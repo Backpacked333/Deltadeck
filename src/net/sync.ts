@@ -212,6 +212,68 @@ const running: { sync: PracticeSync | null } = { sync: null }
 export const activeSync = () => running.sync
 
 /**
+ * What a flush could say of this browser's practice (audit F08, F10):
+ * - saved: the account acknowledged the latest version of everything;
+ * - pending: something is still on its way (offline, or a request failed);
+ * - unverified: the account's copy was never read, so nothing here can be
+ *   known to be on it;
+ * - blocked: something will not go however long we wait (a hand or a
+ *   curriculum over the database's size, the daily hand cap).
+ */
+export type SaveState = 'saved' | 'pending' | 'unverified' | 'blocked'
+
+/**
+ * Whether this browser holds practice worth keeping: hands, or curriculum
+ * work (attempts, receipts, drafts, notes). An empty progress or an empty
+ * store is not work, so signing out of a fresh browser asks nothing.
+ */
+export function hasLocalWork(): boolean {
+  const progress = readJson<{ hands?: unknown }>(STORAGE_KEY)
+  if (Array.isArray(progress?.hands) && progress.hands.length) return true
+  const learning = readJson<Record<string, unknown>>(LEARNING_KEY)
+  if (!learning) return false
+  const listed = (key: string) =>
+    Array.isArray(learning[key]) && (learning[key] as unknown[]).length > 0
+  const noted = (key: string) =>
+    typeof learning[key] === 'object' &&
+    learning[key] !== null &&
+    Object.values(learning[key] as object).some(
+      (v) =>
+        (typeof v === 'string' && v.trim() !== '') || typeof v === 'object',
+    )
+  return (
+    listed('attempts') ||
+    listed('receipts') ||
+    noted('drafts') ||
+    noted('unitNotes')
+  )
+}
+
+/**
+ * This browser's practice as one JSON document, for the player to keep
+ * before a sign-out that would drop what the account does not hold.
+ */
+export function exportLocalPractice(): string {
+  const read = (key: string) => {
+    try {
+      const raw = localStorage.getItem(key)
+      return raw ? (JSON.parse(raw) as unknown) : null
+    } catch {
+      return null
+    }
+  }
+  return JSON.stringify(
+    {
+      exportedAt: new Date().toISOString(),
+      progress: read(STORAGE_KEY),
+      curriculum: read(LEARNING_KEY),
+    },
+    null,
+    2,
+  )
+}
+
+/**
  * One signed-in player's sync, from the first pull until sign-out. The
  * app reports every progress change (`note`); what differs from the
  * account's copy is sent, in batches, retried with a growing wait.
@@ -222,8 +284,13 @@ export class PracticeSync {
   private sentTrainer: string | null = null
   private sentClear = 0
   private queue = new Set<string>()
+  /** Hands too large for the account, by the JSON that was too large. */
+  private blocked = new Map<string, string>()
+  /** The curriculum is over the account's size and cannot be sent. */
+  private learningBlocked = false
   private latest: Progress | null = null
   private ready = false
+  private starting: Promise<void> | null = null
   private stopped = false
   private capped = false
   private timer: ReturnType<typeof setTimeout> | null = null
@@ -251,8 +318,16 @@ export class PracticeSync {
     if (running.sync === this) running.sync = null
   }
 
-  /** Reads the account's copy and merges this browser's into it. */
-  async start(): Promise<void> {
+  /** Reads the account's copy and merges this browser's into it, once. */
+  start(): Promise<void> {
+    if (this.ready) return Promise.resolve()
+    this.starting ??= this.startOnce().finally(() => {
+      this.starting = null
+    })
+    return this.starting
+  }
+
+  private async startOnce(): Promise<void> {
     const account = await this.pull()
     if (this.stopped) return
     if (!account) {
@@ -269,7 +344,11 @@ export class PracticeSync {
     )
     this.startLearning(account)
     this.ready = true
-    if (this.latest) this.note(this.latest)
+    // What the app will hold once its merge lands: noted now, so a flush
+    // that had to make this first read itself (a sign-out) sends it
+    // without waiting for the app to report it.
+    if (this.latest)
+      this.note(reconcile(this.latest, account, this.userId, synced))
   }
 
   /** The account's copy, or null when it cannot be read now. */
@@ -316,7 +395,8 @@ export class PracticeSync {
     this.latest = progress
     if (!this.ready || this.stopped || progress.owner !== this.userId) return
     for (const hand of progress.hands) {
-      if (this.sent.get(hand.id) !== JSON.stringify(hand))
+      const json = JSON.stringify(hand)
+      if (this.sent.get(hand.id) !== json && this.blocked.get(hand.id) !== json)
         this.queue.add(hand.id)
     }
     if (this.queue.size || this.trainerChanged() || this.clearChanged())
@@ -334,23 +414,52 @@ export class PracticeSync {
   }
 
   /**
-   * Sends everything now, waiting at most `ms`. True when nothing is left
-   * (the sign-out page asks before it drops what is not).
+   * Sends everything now, waiting at most `ms`, and says what came of it
+   * (SaveState). Only `saved` means the account acknowledged the latest
+   * version of everything here; the sign-out page asks before it drops
+   * anything else. A sync whose first read of the account has not
+   * succeeded tries it first: until it does, nothing is known to be saved.
    */
-  async flush(ms: number): Promise<boolean> {
+  async flush(ms: number): Promise<SaveState> {
     if (this.learningTimer) {
       clearTimeout(this.learningTimer)
       this.learningTimer = null
     }
+    let done = false
     const attempt = async () => {
-      await this.send()
-      if (this.learningDirty) await this.sendLearning()
+      await this.start()
+      // A round can end with a newer version noted meanwhile: go again
+      // until nothing is left, or a request fails (it throws).
+      while (!done && this.saveState() === 'pending') {
+        await this.send()
+        if (this.learningDirty) await this.sendLearning()
+      }
     }
     await Promise.race([
       attempt().catch(() => {}),
       new Promise((resolve) => setTimeout(resolve, ms)),
     ])
-    return !this.pending()
+    done = true
+    return this.saveState()
+  }
+
+  /** What is true of this browser's practice on the account right now. */
+  saveState(): SaveState {
+    if (!this.ready) return 'unverified'
+    if (
+      (this.queue.size > 0 && !this.capped) ||
+      this.trainerChanged() ||
+      this.clearChanged() ||
+      this.learningDirty
+    )
+      return 'pending'
+    if (
+      (this.capped && this.queue.size > 0) ||
+      this.blocked.size > 0 ||
+      this.learningBlocked
+    )
+      return 'blocked'
+    return 'saved'
   }
 
   private trainerChanged() {
@@ -429,13 +538,22 @@ export class PracticeSync {
       const byId = new Map(progress.hands.map((h) => [h.id, h]))
       const ids = [...this.queue].slice(0, BATCH)
       const rows = []
+      const versions = new Map<string, string>()
       for (const id of ids) {
         const hand = byId.get(id)
         const json = hand ? JSON.stringify(hand) : null
-        if (!hand || !json || bytes(json) > RECORD_MAX_BYTES) {
-          this.queue.delete(id) // gone since, or too large to keep
+        if (!hand || !json) {
+          this.queue.delete(id) // gone since
           continue
         }
+        if (bytes(json) > RECORD_MAX_BYTES) {
+          // Never sendable: kept here, and said so (blocked), never
+          // silently counted as saved.
+          this.queue.delete(id)
+          this.blocked.set(id, json)
+          continue
+        }
+        versions.set(id, json)
         rows.push({
           user_id: this.userId,
           id,
@@ -453,8 +571,15 @@ export class PracticeSync {
           else throw error
         } else
           for (const row of rows) {
-            this.sent.set(row.id, JSON.stringify(row.record))
-            this.queue.delete(row.id)
+            // The account has the version this request carried. A newer
+            // one noted while it was on its way (the graded record after a
+            // provisional one) stays queued and goes next (audit F08).
+            const sentJson = versions.get(row.id)!
+            this.sent.set(row.id, sentJson)
+            this.blocked.delete(row.id)
+            const now = this.latest?.hands.find((h) => h.id === row.id)
+            if (!now || JSON.stringify(now) === sentJson)
+              this.queue.delete(row.id)
           }
       }
       if (this.queue.size && !this.capped) return this.sendOnce()
@@ -518,7 +643,13 @@ export class PracticeSync {
 
   private async sendLearning() {
     const raw = localStorage.getItem(LEARNING_KEY)
-    if (!raw || bytes(raw) > CURRICULUM_MAX_BYTES) {
+    if (!raw) {
+      this.learningDirty = false
+      return
+    }
+    // Over the account's size: it cannot go, and that is not "saved".
+    this.learningBlocked = bytes(raw) > CURRICULUM_MAX_BYTES
+    if (this.learningBlocked) {
       this.learningDirty = false
       return
     }

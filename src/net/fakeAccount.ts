@@ -23,6 +23,11 @@ export function fakeAccount({
     learning: learning ? { ...learning } : null,
     offline: false,
     calls: [] as string[],
+    /**
+     * While set, a hand upload waits for it before the account applies
+     * it: a request still on its way (audit F08's overlap).
+     */
+    hold: null as Promise<void> | null,
   }
   const down = () => ({
     data: null,
@@ -53,6 +58,7 @@ export function fakeAccount({
       upsert: async (rows: { id: string; record: HandRecord }[]) => {
         if (state.offline) return down()
         state.calls.push(`hands:${rows.map((r) => r.id).join(',')}`)
+        if (state.hold) await state.hold
         for (const { id, record } of rows) {
           const old = state.hands.get(id)
           if (old && old.graded !== false && record.graded === false) continue

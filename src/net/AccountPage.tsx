@@ -2,7 +2,7 @@
 // (Google, Apple) comes back to with ?code=…. Once the player is signed in,
 // a new account goes on to choose its name (#welcome/onboard); anyone else
 // goes back to where they were heading, or to the practice table.
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import {
   forgetAccount,
@@ -19,7 +19,13 @@ import { signOutHere, useAuth } from './auth'
 import { NotConfigured } from './AuthGate'
 import { loadPlayer, PLACEHOLDER } from './players'
 import { SignIn } from './SignIn'
-import { activeSync, clearLocalPractice } from './sync'
+import {
+  activeSync,
+  clearLocalPractice,
+  exportLocalPractice,
+  hasLocalWork,
+} from './sync'
+import type { SaveState } from './sync'
 import type { SignInMode } from './SignIn'
 import type { Online } from './supabase'
 
@@ -176,6 +182,19 @@ function CallbackFailed({
   )
 }
 
+/** Saves this browser's practice as a file the player keeps. */
+function downloadPractice() {
+  const blob = new Blob([exportLocalPractice()], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `deltadeck-practice-${new Date().toISOString().slice(0, 10)}.json`
+  document.body.append(link)
+  link.click()
+  link.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 0)
+}
+
 /** How long sign-out waits for the account service before going anyway. */
 export const SIGN_OUT_WAIT_MS = 3000
 
@@ -199,23 +218,44 @@ async function leave(online: Online | null) {
  */
 export function SignOut({ online }: { online: Online | null }) {
   const started = useRef(false)
-  const [unsent, setUnsent] = useState(false)
+  // Why sign-out waits for the player: anything but `saved` (audit F08,
+  // F10). With no running sync there is nothing to ask, and nothing is
+  // known to be on the account either: practice here is "unverified".
+  const [unsaved, setUnsaved] = useState<Exclude<SaveState, 'saved'> | null>(
+    null,
+  )
+  const [trying, setTrying] = useState(false)
+  const attempt = useCallback(async () => {
+    const sync = activeSync()
+    const state: SaveState = sync
+      ? await sync.flush(SIGN_OUT_WAIT_MS)
+      : hasLocalWork()
+        ? 'unverified'
+        : 'saved'
+    if (state === 'saved') await leave(online)
+    else setUnsaved(state)
+  }, [online])
   useEffect(() => {
     if (started.current) return
     started.current = true
-    void (async () => {
-      const sync = activeSync()
-      if (sync && !(await sync.flush(SIGN_OUT_WAIT_MS))) setUnsent(true)
-      else await leave(online)
-    })()
-  }, [online])
-  if (unsent)
+    void attempt()
+  }, [attempt])
+  if (unsaved)
     return (
       <div className="empty live-empty" role="alert">
-        <h3>Some practice is not saved to your account yet</h3>
+        <h3>
+          {unsaved === 'unverified'
+            ? 'We could not check what your account holds'
+            : 'Some practice is not saved to your account yet'}
+        </h3>
         <p>
-          We could not reach the server, so your latest hands or lessons are
-          only in this browser. Signing out now removes them from it.
+          {unsaved === 'unverified'
+            ? 'Your account could not be reached since this page opened, so the hands and lessons in this browser may not be on it.'
+            : unsaved === 'blocked'
+              ? 'Some of your practice is too large for your account, or over today’s limit, so it is only in this browser.'
+              : 'We could not reach the server, so your latest hands or lessons are only in this browser.'}{' '}
+          Signing out removes them from this browser. Download a copy to keep
+          them.
         </p>
         <div className="live-actions">
           <button
@@ -224,11 +264,26 @@ export function SignOut({ online }: { online: Online | null }) {
           >
             Stay signed in
           </button>
+          {unsaved !== 'blocked' && (
+            <button
+              className="btn btn-outline"
+              disabled={trying}
+              onClick={() => {
+                setTrying(true)
+                void attempt().finally(() => setTrying(false))
+              }}
+            >
+              {trying ? 'Trying…' : 'Try again'}
+            </button>
+          )}
+          <button className="btn btn-outline" onClick={downloadPractice}>
+            Download a copy
+          </button>
           <button
             className="btn btn-outline"
             onClick={() => void leave(online)}
           >
-            Sign out anyway
+            Discard and sign out
           </button>
         </div>
       </div>
