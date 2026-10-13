@@ -142,12 +142,16 @@ export async function applyRating(
       }
       const code = await codeOf(response)
       if (code !== '40001') {
-        logEvent('error', {
-          reason: 'archive',
-          rpc: 'apply_rating',
-          code: response.status,
-          detail: code,
-        })
+        // 55000: the match's hands are still being archived or verified
+        // (apply_rating's evidence gate, audit F07); the outbox retries, as
+        // expected, so it is not an error worth a line each time.
+        if (code !== '55000')
+          logEvent('error', {
+            reason: 'archive',
+            rpc: 'apply_rating',
+            code: response.status,
+            detail: code,
+          })
         return { ok: false, status: response.status, code }
       }
       // Stale: another match of one of these players was rated meanwhile.
