@@ -77,7 +77,7 @@ function RatingResult({
   if (!shown)
     return (
       <p className="live-rating" role="status">
-        Updating your rating…
+        Updating your rating once every hand is verified…
       </p>
     )
   return (

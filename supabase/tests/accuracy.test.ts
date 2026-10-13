@@ -189,6 +189,28 @@ describe('accuracy', () => {
     expect(await aggregate()).toEqual(before)
   })
 
+  it('an old hand the archive receives late displaces nothing (audit F13)', async () => {
+    const before = await aggregate()
+    // Played three days ago, held in a table's outbox through an outage,
+    // and archived only now: its arrival is the newest, its play is not.
+    const DELAYED = '88888888-8888-4888-8888-888888888888'
+    await match(DELAYED, 'finished', 1)
+    await db.exec(
+      `update public.hands set played_at = now() - interval '3 days' where match_id = '${DELAYED}'`,
+    )
+    await grade(`${DELAYED}:1`, [
+      { idx: 0, grade: 'best', accuracy: 100 },
+      { idx: 2, grade: 'best', accuracy: 100 },
+    ])
+    expect(await aggregate()).toEqual(before)
+    // Gone again, so the luck series below sees only its own matches.
+    await db.query('delete from public.matches where id = $1', [DELAYED])
+    await db.query(`select private.refresh_accuracy($1, 'hu-duplicate')`, [
+      ALICE,
+    ])
+    expect(await aggregate()).toEqual(before)
+  })
+
   it('is public: anon and any player read the same aggregate, while the raw grades stay hidden from them', async () => {
     const stored = await aggregate()
     expect(await aggregate('anon', '')).toEqual(stored)

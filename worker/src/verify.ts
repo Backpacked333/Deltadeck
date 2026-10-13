@@ -14,6 +14,7 @@ import {
 } from '../../src/engine/deck'
 import type { RevealedSlot } from '../../src/engine/deck'
 import { assertInvariants, isOver, replayHand } from '../../src/engine/hand'
+import { luckAdjusted } from '../../src/engine/luck'
 import type { HandState } from '../../src/engine/types'
 import type { HandRecordV1 } from '../../src/shared/protocol'
 import type { WorkerEnv } from './env'
@@ -53,9 +54,14 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 /**
  * Why `hand` is not what the table said it was: fixed words, never cards.
  * Empty when it replays from its deck to exactly its record, and the deck
- * matches the commitment players saw before the deal.
+ * matches the commitment players saw before the deal. `rated`: the hand of a
+ * rated match, whose luck adjustment is what the rating settles on, so it is
+ * recomputed here rather than taken from the table (audit F07).
  */
-export async function problemsWith(hand: AuditedHand): Promise<string[]> {
+export async function problemsWith(
+  hand: AuditedHand,
+  rated = false,
+): Promise<string[]> {
   const problems = new Set<string>()
   const { record } = hand
   if (
@@ -109,6 +115,27 @@ export async function problemsWith(hand: AuditedHand): Promise<string[]> {
       .filter((p) => p.shown && p.cards)
       .map((p) => ({ seat: p.seat, cards: p.cards }))
     if (!same(shown, record.shown)) problems.add('shown')
+  }
+
+  // The luck adjustment, from the replayed hand: the same pure function the
+  // table ran, on the hand as the deck and the moves make it, not on what
+  // the table wrote down. Field by field: the archive's jsonb does not keep
+  // the record's key order.
+  if (rated || record.luck) {
+    const luck = record.luck
+    try {
+      const expected = final?.result ? luckAdjusted(final) : null
+      if (
+        !luck ||
+        !expected ||
+        luck.allInAt !== expected.allInAt ||
+        !same(luck.equity, expected.equity) ||
+        !same(luck.adjustedBySeat, expected.netBySeat)
+      )
+        problems.add('luck')
+    } catch {
+      problems.add('luck')
+    }
   }
 
   // The public reveal opens exactly the board and shown hands.
@@ -165,7 +192,7 @@ export const retryDelay = (attempts: number) =>
 /** One hand: verified, failed (an incident), or not archived yet. */
 async function verifyArchived(
   env: WorkerEnv,
-  { matchId, handNo }: HandMessage,
+  { matchId, handNo, rated }: HandMessage,
 ): Promise<
   { state: 'missing' | 'failed' } | { state: 'verified'; hand: AuditedHand }
 > {
@@ -174,7 +201,7 @@ async function verifyArchived(
   if (!hand) return { state: 'missing' }
   // A redelivery after a success: nothing more to verify.
   if (hand.verified) return { state: 'verified', hand }
-  const problems = await problemsWith(hand)
+  const problems = await problemsWith(hand, rated === true)
   if (problems.length === 0) {
     await rpc(env, 'verify_hand', { id })
     logEvent('verified', { matchId, handNo })

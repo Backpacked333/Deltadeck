@@ -2215,6 +2215,9 @@ export class TableDO extends DurableObject<WorkerEnv> {
           leaves: reveal.leaves,
           reveal: slots,
           record,
+          // When it was played, which the archive's own arrival time is not
+          // once a call waits in the outbox (audit F13).
+          playedAt: new Date(this.clock()).toISOString(),
           deck: stored.deck,
           secret: stored.secret,
           holes,

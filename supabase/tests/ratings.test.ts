@@ -9,7 +9,14 @@
 import { readFileSync } from 'node:fs'
 import { PGlite } from '@electric-sql/pglite'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { migrationFiles, MIGRATIONS_DIR, SUPABASE_STUB } from './harness'
+import {
+  migrationFiles,
+  MIGRATIONS_DIR,
+  RATED_TEST_CONFIG,
+  seedRatedEvidence,
+  shares,
+  SUPABASE_STUB,
+} from './harness'
 
 const ALICE = '11111111-1111-4111-8111-111111111111'
 const BOB = '22222222-2222-4222-8222-222222222222'
@@ -40,11 +47,27 @@ const players = [
   { seat: 1, userId: BOB },
 ]
 
-/** A rated match between Alice (seat 0) and Bob, finished with `result`. */
-async function rated(id: string, result: object | null) {
-  const start = { id, kind: 'hu-rated', config: {}, players }
+/**
+ * A rated match between Alice (seat 0) and Bob, finished with `result`. A
+ * complete one gets the verified hands its adjusted totals rest on (audit
+ * F07; supabase/tests/rating-evidence.test.ts tests the gate itself).
+ */
+async function rated(
+  id: string,
+  result: { reason?: string; adjustedBySeat?: Record<number, number> } | null,
+  pair = players,
+) {
+  const start = {
+    id,
+    kind: 'hu-rated',
+    config: RATED_TEST_CONFIG,
+    players: pair,
+  }
   await recordMatch(start)
-  if (result) await recordMatch({ ...start, handNo: 40, timeouts: {}, result })
+  if (!result) return
+  await recordMatch({ ...start, handNo: 40, timeouts: {}, result })
+  if (result.reason === 'complete' && result.adjustedBySeat)
+    await seedRatedEvidence(db, id, pair, shares(result.adjustedBySeat[0]))
 }
 
 const win = (seat: 0 | 1) => ({
@@ -259,11 +282,7 @@ describe('the last match', () => {
       { seat: 0, userId: DAN },
       { seat: 1, userId: EVE },
     ]
-    const finish = async (id: string) => {
-      const start = { id, kind: 'hu-rated', config: {}, players: pair }
-      await recordMatch(start)
-      await recordMatch({ ...start, handNo: 40, timeouts: {}, result: win(0) })
-    }
+    const finish = (id: string) => rated(id, win(0), pair)
     const applyAt = (id: string, version: number, finishedAt: string) =>
       service(() =>
         db.query('select public.apply_rating($1::jsonb)', [

@@ -535,11 +535,26 @@ describe('match_players', () => {
   it('a rated heads-up match archived with full hand records still has two rows and rates', async () => {
     const M = 'cccccccc-0000-4000-8000-000000000009'
     const seats = { 0: ALICE, 1: BOB }
-    const start = { ...session(M, seats), kind: 'hu-rated', config: {} }
+    const start = {
+      ...session(M, seats),
+      kind: 'hu-rated',
+      config: { handsTotal: 2, blinds: { sb: 10, bb: 20 } },
+    }
     await call('record_match', start)
-    // Real hand records name both seats; they change no heads-up row.
-    for (const n of [1, 2])
-      await call('record_hand', hand(M, n, seats, { [ALICE]: 30, [BOB]: -30 }))
+    // Real hand records name both seats; they change no heads-up row. A
+    // rated hand carries its luck, and is verified before the match rates
+    // (audit F07).
+    for (const n of [1, 2]) {
+      const h = hand(M, n, seats, { [ALICE]: 30, [BOB]: -30 })
+      await call('record_hand', {
+        ...h,
+        record: { ...h.record, luck: { adjustedBySeat: { 0: 30, 1: -30 } } },
+      })
+    }
+    await db.query(
+      'update public.hands set verified = true where match_id = $1',
+      [M],
+    )
     await call('record_match', {
       ...start,
       handNo: 2,

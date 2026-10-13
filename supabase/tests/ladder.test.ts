@@ -7,7 +7,13 @@
 import { readFileSync } from 'node:fs'
 import { PGlite } from '@electric-sql/pglite'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { migrationFiles, MIGRATIONS_DIR, SUPABASE_STUB } from './harness'
+import {
+  migrationFiles,
+  MIGRATIONS_DIR,
+  RATED_TEST_CONFIG,
+  seedRatedEvidence,
+  SUPABASE_STUB,
+} from './harness'
 
 let db: PGlite
 
@@ -179,13 +185,24 @@ describe('the ladder', () => {
     )
     const [{ at, last }] = rows
     await db.query(
-      `insert into public.matches (id, kind, status, config, finished_at) values ($1, 'hu-rated', 'finished', '{}', $2)`,
-      [id, at],
+      `insert into public.matches (id, kind, status, config, result, finished_at)
+       values ($1, 'hu-rated', 'finished', $3, '{"reason": "complete"}', $2)`,
+      [id, at, JSON.stringify({ ...RATED_TEST_CONFIG, handsTotal: 1 })],
     )
     await db.query(
-      `insert into public.match_players (match_id, user_id, seat, outcome)
-       values ($1, $2, 0, 'win'), ($1, $3, 1, 'loss')`,
+      `insert into public.match_players (match_id, user_id, seat, outcome, adjusted_chips)
+       values ($1, $2, 0, 'win', 100), ($1, $3, 1, 'loss', -100)`,
       [id, uid(1), uid(7)],
+    )
+    // The verified hand the result rests on (audit F07).
+    await seedRatedEvidence(
+      db,
+      id,
+      [
+        { seat: 0, userId: uid(1) },
+        { seat: 1, userId: uid(7) },
+      ],
+      [100],
     )
     await db.query('select public.apply_rating($1::jsonb)', [
       JSON.stringify({
@@ -228,6 +245,45 @@ describe('the ladder', () => {
       ['pl7', 1],
       ['pl6', 1],
     ])
+  })
+
+  it('the trend is each match’s own change, whatever order the ratings were applied in (audit F12)', async () => {
+    const n = 5001
+    // Rated above everyone, so the first page has them.
+    await player(n, { rating: 2600 })
+    // Two matches this month, inside the last 30 days. The one played
+    // second was rated first (the other waited on its archive), so its
+    // "before" never saw the first match.
+    const base = `greatest(date_trunc('month', now()), now() - interval '2 days')`
+    const row = async (
+      kind: string,
+      played: string,
+      before: number,
+      after: number,
+    ) => {
+      const id = kind === 'match' ? crypto.randomUUID() : null
+      if (id)
+        await db.query(
+          `insert into public.matches (id, kind, status, config) values ($1, 'hu-rated', 'finished', '{}')`,
+          [id],
+        )
+      await db.query(
+        `insert into public.rating_history (user_id, format, kind, match_id, outcome,
+           before_rating, before_rd, before_sigma, after_rating, after_rd, after_sigma, model_version, played_at)
+         values ($1, 'hu-duplicate', $2, $3, $4, $5, 60, 0.06, $6, 60, 0.06, 'glicko2.v1', ${played})`,
+        [uid(n), kind, id, id ? 'win' : null, before, after],
+      )
+    }
+    await row('match', `${base} + interval '2 minutes'`, 1500, 1520)
+    await row('match', `${base} + interval '1 minute'`, 1520, 1535)
+    const trend = async (fn: 'ladder' | 'ladder_month') =>
+      (await page(fn, null, 100)).find((r) => r.user_id === uid(n))?.trend
+    expect(await trend('ladder_month')).toBe(35)
+    expect(await trend('ladder')).toBe(35)
+    // A reset is not something a match did.
+    await row('reset', `${base} + interval '3 minutes'`, 1535, 1500)
+    expect(await trend('ladder')).toBe(35)
+    expect(await trend('ladder_month')).toBe(35)
   })
 
   it('is read with the caller’s rights, by anyone; abandonment rate is public too', async () => {

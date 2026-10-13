@@ -108,6 +108,9 @@ describe('migrations', () => {
       '20261010130000_six_casual.sql',
       '20261011100000_practice_history.sql',
       '20261012000000_avatars.sql',
+      '20261013090000_hands_played_at.sql',
+      '20261013091000_rating_trend.sql',
+      '20261013092000_rating_evidence.sql',
     ])
   })
 })
@@ -205,6 +208,49 @@ describe('players', () => {
 })
 
 describe('hand records', () => {
+  it('keep when the table played them, never ahead of now (audit F13)', async () => {
+    const at = (id: string) =>
+      db
+        .query<{
+          played_at: Date | null
+        }>('select played_at from public.hands where id = $1', [id])
+        .then((r) => r.rows[0].played_at)
+    const call = (payload: object) =>
+      as(
+        'service_role',
+        `select public.record_hand('${JSON.stringify(payload).replace(/'/g, "''")}'::jsonb)`,
+      )
+    // No nets: this test leaves the match's totals as it found them.
+    const quiet = (id: string, handNo: number) => ({
+      ...handPayload(id),
+      handNo,
+      netByUser: {},
+    })
+    await call({
+      ...quiet(`${MATCH}:41`, 41),
+      playedAt: '2026-10-01T12:00:00.000Z',
+    })
+    expect((await at(`${MATCH}:41`))!.toISOString()).toBe(
+      '2026-10-01T12:00:00.000Z',
+    )
+    // A table clock ahead of the database's is clamped to now.
+    await call({
+      ...quiet(`${MATCH}:42`, 42),
+      playedAt: '2999-01-01T00:00:00.000Z',
+    })
+    expect((await at(`${MATCH}:42`))!.getTime()).toBeLessThanOrEqual(
+      Date.now() + 1000,
+    )
+    // A call queued before the field existed: unknown, not invented.
+    await call(quiet(`${MATCH}:43`, 43))
+    expect(await at(`${MATCH}:43`)).toBeNull()
+    await db.query(`delete from public.hands where id in ($1, $2, $3)`, [
+      `${MATCH}:41`,
+      `${MATCH}:42`,
+      `${MATCH}:43`,
+    ])
+  })
+
   it('can only be written through record_hand by the service role', async () => {
     const payload = JSON.stringify(handPayload()).replace(/'/g, "''")
     await denied(
