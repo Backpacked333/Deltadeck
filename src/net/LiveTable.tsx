@@ -404,6 +404,18 @@ function LiveHand({
   rematch: () => void
 }) {
   const game = useMemo(() => toHeroGame(view, opponent), [view, opponent])
+  // The rail light drains the clock of whoever is to act.
+  const { clockOffset } = state
+  const clock = useMemo(
+    () =>
+      view.clock && !view.result && view.toAct !== null
+        ? {
+            clock: { ...view.clock, offset: clockOffset },
+            hero: view.toAct === view.you,
+          }
+        : null,
+    [view.clock, view.result, view.toAct, view.you, clockOffset],
+  )
   const runout = useLiveRunout(
     view,
     state.presentation,
@@ -484,7 +496,7 @@ function LiveHand({
   return (
     <>
       <div
-        className="live-hand-surface"
+        className="live-felt live-hand-surface"
         data-motion={
           ended ||
           state.resyncing ||
@@ -508,6 +520,37 @@ function LiveHand({
           onSkipGuided={noop}
           runout={runout}
           versus={{ opponent }}
+          clock={clock}
+        />
+        <ActionBar
+          game={game}
+          legal={legal}
+          yourTurn={yourTurn && !state.pending}
+          heroTurn={yourTurn}
+          paused={false}
+          raiseTo={raiseTo}
+          presets={presets}
+          math={{
+            revealed: false,
+            ready: false,
+            breakEven: legal.toCall / (game.pot + legal.toCall || 1),
+          }}
+          guess={{
+            show: false,
+            value: 0.5,
+            locked: null,
+            onChange: noop,
+            onLock: noop,
+            onSkip: noop,
+          }}
+          shortcuts={false}
+          onRaiseTo={(to) => setSizing({ id: decision, to })}
+          onAct={onAct}
+          onDeal={noop}
+          onReview={noop}
+          revealing={runout.revealing}
+          versus={{ opponent, next, rated: view.match.kind === 'hu-rated' }}
+          sending={sending}
         />
       </div>
       {runout.holding && !ended && (
@@ -515,36 +558,6 @@ function LiveHand({
           Result hold · next deal follows the table schedule.
         </p>
       )}
-      <ActionBar
-        game={game}
-        legal={legal}
-        yourTurn={yourTurn && !state.pending}
-        heroTurn={yourTurn}
-        paused={false}
-        raiseTo={raiseTo}
-        presets={presets}
-        math={{
-          revealed: false,
-          ready: false,
-          breakEven: legal.toCall / (game.pot + legal.toCall || 1),
-        }}
-        guess={{
-          show: false,
-          value: 0.5,
-          locked: null,
-          onChange: noop,
-          onLock: noop,
-          onSkip: noop,
-        }}
-        shortcuts={false}
-        onRaiseTo={(to) => setSizing({ id: decision, to })}
-        onAct={onAct}
-        onDeal={noop}
-        onReview={noop}
-        revealing={runout.revealing}
-        versus={{ opponent, next, rated: view.match.kind === 'hu-rated' }}
-        sending={sending}
-      />
       {ended?.outcomeBySeat ? (
         <MatchEnd
           result={ended}

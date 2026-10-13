@@ -1,11 +1,10 @@
-// Vector card art drawn in a 250×350 box. Everything here is original and
-// generated in code: suit shapes, pip layouts and geometric court portraits.
+// Card art drawn in a 250×350 box: suit shapes, pip layouts, the Pearl
+// face and the back are generated in code.
 import type { Card, Suit } from '../../lib/poker'
 import { rankName } from '../../lib/poker'
 
-const RED = 'var(--card-red, #c0392f)'
-const INK = 'var(--card-ink, #1d2a24)'
-const GOLD = '#c9a24a'
+const RED = 'var(--card-red, #d23c4b)'
+const INK = 'var(--card-ink, #17142a)'
 const suitColor = (suit: Suit) => (suit === 'h' || suit === 'd' ? RED : INK)
 
 /** A suit drawn in a 100×100 box, centered at (x, y) with the given size. */
@@ -130,124 +129,107 @@ const PIPS: Record<number, [number, number][]> = {
   ],
 }
 
+// The Pearl deck: a pearl face inside a thin frame, large corner indices
+// that read at table size, and pips drawn a little smaller and pulled in.
+// Kings, queens and jacks carry the English-pattern court figures (public
+// domain artwork, recoloured to the deck: public/cards/courts) in a gilded
+// double frame; every other mark is drawn here.
+const SUIT_WORDS = { s: 'spades', h: 'hearts', d: 'diamonds', c: 'clubs' }
+const COURT_WORDS: Record<number, string> = {
+  11: 'jack',
+  12: 'queen',
+  13: 'king',
+}
+/** The court figure behind a face card, cropped to its frame. */
+const courtArt = (card: Card) =>
+  `/cards/courts/${COURT_WORDS[card.rank]}_${SUIT_WORDS[card.suit]}.webp`
+
 function Index({ card, flip }: { card: Card; flip?: boolean }) {
   const label = rankName(card.rank)
+  const color = suitColor(card.suit)
+  const court = card.rank >= 11 && card.rank <= 13
   return (
     <g transform={flip ? 'rotate(180 125 175)' : undefined}>
-      <text
-        x={label === '10' ? 36 : 34}
-        y={66}
-        textAnchor="middle"
-        className="card-index"
-        fill={suitColor(card.suit)}
-        letterSpacing={label === '10' ? -4 : 0}
-      >
-        {label}
-      </text>
-      <SuitShape suit={card.suit} x={34} y={96} size={34} />
+      {court ? (
+        <>
+          <text
+            x={22}
+            y={58}
+            textAnchor="middle"
+            className="card-index card-index-court"
+            fill={color}
+          >
+            {label}
+          </text>
+          <SuitShape suit={card.suit} x={22} y={82} size={24} />
+        </>
+      ) : (
+        <>
+          <text
+            x={26}
+            y={76}
+            className="card-index"
+            fill={color}
+            fontSize={label === '10' ? 60 : 68}
+            letterSpacing={label === '10' ? -7 : -2}
+          >
+            {label}
+          </text>
+          <SuitShape suit={card.suit} x={45} y={108} size={30} />
+        </>
+      )}
     </g>
   )
 }
 
-/** One half of a court portrait; the card mirrors it like a real deck. */
-function CourtHalf({ card }: { card: Card }) {
-  const color = suitColor(card.suit)
-  const rank = card.rank
+/** The court figure in its gilded double frame (art box 40,39 170×272). */
+function Court({ card }: { card: Card }) {
+  const id = `qp-court-${card.rank}${card.suit}`
   return (
-    <g>
-      {/* robe with gold trim */}
-      <path
-        d="M84 172 C86 152 98 140 110 137 L140 137 C152 140 164 152 166 172 Z"
-        fill={color}
+    <>
+      <clipPath id={id}>
+        <rect x="40" y="39" width="170" height="272" rx="6" />
+      </clipPath>
+      <image
+        href={courtArt(card)}
+        x="23"
+        y="22"
+        width="204"
+        height="306"
+        preserveAspectRatio="none"
+        clipPath={`url(#${id})`}
       />
-      <path
-        d="M84 172 C86 152 98 140 110 137 L140 137 C152 140 164 152 166 172"
+      <rect
+        x="41.25"
+        y="40.25"
+        width="167.5"
+        height="269.5"
+        rx="5"
         fill="none"
-        stroke={GOLD}
+        stroke="#d4ad5c"
         strokeWidth="2.5"
       />
-      <path
-        d="M125 137 V172"
-        stroke={GOLD}
-        strokeWidth="2"
-        strokeOpacity="0.8"
-      />
-      <path
-        d="M108 136 L117 150 L125 138 L133 150 L142 136"
+      <rect
+        x="44.5"
+        y="43.5"
+        width="161"
+        height="263"
+        rx="3"
         fill="none"
-        stroke="#fff"
-        strokeWidth="3"
-        strokeLinejoin="round"
+        stroke="rgb(254 253 251 / 0.9)"
+        strokeWidth="4"
       />
-      <SuitShape suit={card.suit} x={108} y={160} size={16} fill="#fff" />
-      <SuitShape suit={card.suit} x={142} y={160} size={16} fill="#fff" />
-      {/* head */}
-      <ellipse cx="125" cy="114" rx="17" ry="20" fill="#f1d9bd" />
-      <path
-        d="M115 112 h6 M129 112 h6"
-        stroke={INK}
-        strokeWidth="2.4"
-        strokeLinecap="round"
+      <rect
+        x="46.5"
+        y="45.5"
+        width="157"
+        height="259"
+        rx="2"
+        fill="none"
+        stroke="rgb(212 173 92 / 0.45)"
+        strokeWidth="1"
       />
-      {rank === 13 && (
-        <>
-          {/* crown */}
-          <path
-            d="M104 98 L108 74 L117 88 L125 70 L133 88 L142 74 L146 98 Z"
-            fill={GOLD}
-            stroke="#8a6a24"
-            strokeWidth="1.5"
-            strokeLinejoin="round"
-          />
-          <circle cx="125" cy="86" r="3.5" fill={color} />
-          <path
-            d="M108 128 Q125 142 142 128 L142 122 Q125 134 108 122 Z"
-            fill="#8a6a24"
-          />
-        </>
-      )}
-      {rank === 12 && (
-        <>
-          {/* tiara and hair */}
-          <path
-            d="M106 106 C104 88 114 80 125 80 C136 80 146 88 144 106 C140 96 134 92 125 92 C116 92 110 96 106 106 Z"
-            fill={INK}
-          />
-          <path
-            d="M108 90 Q125 72 142 90"
-            fill="none"
-            stroke={GOLD}
-            strokeWidth="4"
-            strokeLinecap="round"
-          />
-          <circle cx="125" cy="78" r="4" fill={GOLD} />
-          <circle cx="114" cy="83" r="2.5" fill={GOLD} />
-          <circle cx="136" cy="83" r="2.5" fill={GOLD} />
-        </>
-      )}
-      {rank === 11 && (
-        <>
-          {/* cap and feather */}
-          <path
-            d="M104 100 C104 84 116 78 128 78 C142 78 150 86 148 98 Z"
-            fill={color}
-          />
-          <path
-            d="M104 100 L148 98"
-            stroke={GOLD}
-            strokeWidth="3"
-            strokeLinecap="round"
-          />
-          <path
-            d="M140 82 C150 70 162 66 170 68 C162 74 154 80 146 88"
-            fill="none"
-            stroke={GOLD}
-            strokeWidth="2.5"
-            strokeLinecap="round"
-          />
-        </>
-      )}
-    </g>
+    </>
   )
 }
 
@@ -262,22 +244,16 @@ export function CardFace({
   const pips = PIPS[card.rank]
   return (
     <svg viewBox="0 0 250 350" className="card-svg" aria-hidden="true">
+      <rect width="250" height="350" rx="22" fill="url(#qp-pearl)" />
       <rect
-        x="0"
-        y="0"
-        width="250"
-        height="350"
-        rx="18"
-        fill="var(--card-face, #fffefa)"
-      />
-      <rect
-        x="0"
-        y="0"
-        width="250"
-        height="350"
-        rx="18"
-        filter="url(#qp-grain)"
-        opacity="0.5"
+        x="11"
+        y="11"
+        width="228"
+        height="328"
+        rx="15"
+        fill="none"
+        stroke="rgb(23 20 42 / 0.08)"
+        strokeWidth="1.5"
       />
       {simple ? (
         <>
@@ -294,15 +270,16 @@ export function CardFace({
         </>
       ) : (
         <>
+          {card.rank >= 11 && card.rank <= 13 && <Court card={card} />}
           <Index card={card} />
           <Index card={card} flip />
           {pips?.map(([x, y], i) => (
             <SuitShape
               key={i}
               suit={card.suit}
-              x={x}
-              y={y}
-              size={46}
+              x={125 + (x - 125) * 0.86}
+              y={175 + (y - 175) * 0.9}
+              size={40}
               flip={y > 175}
             />
           ))}
@@ -311,50 +288,24 @@ export function CardFace({
               <circle
                 cx="125"
                 cy="175"
-                r="62"
+                r="70"
+                fill="none"
+                stroke="url(#qp-light)"
+                strokeWidth="2.5"
+              />
+              <circle
+                cx="125"
+                cy="175"
+                r="60"
                 fill="none"
                 stroke={color}
-                strokeOpacity="0.18"
-                strokeWidth="2"
+                strokeOpacity="0.08"
               />
               <SuitShape
                 suit={card.suit}
                 x={125}
                 y={175}
-                size={card.suit === 's' ? 104 : 92}
-              />
-            </>
-          )}
-          {card.rank >= 11 && card.rank <= 13 && (
-            <>
-              <rect
-                x="56"
-                y="62"
-                width="138"
-                height="226"
-                rx="10"
-                fill={color}
-                fillOpacity="0.07"
-                stroke={color}
-                strokeWidth="2.5"
-              />
-              <clipPath id={`court-${card.rank}${card.suit}`}>
-                <rect x="58" y="64" width="134" height="222" rx="8" />
-              </clipPath>
-              <g clipPath={`url(#court-${card.rank}${card.suit})`}>
-                <CourtHalf card={card} />
-                <g transform="rotate(180 125 175)">
-                  <CourtHalf card={card} />
-                </g>
-              </g>
-              <line
-                x1="58"
-                y1="175"
-                x2="192"
-                y2="175"
-                stroke={color}
-                strokeOpacity="0.35"
-                strokeWidth="1.5"
+                size={card.suit === 's' ? 86 : 78}
               />
             </>
           )}
@@ -364,47 +315,56 @@ export function CardFace({
   )
 }
 
+/** The odds arc from the felt, mirrored, on a void back. */
 export function CardBack() {
+  const arcs = Array.from({ length: 6 }, (_, i) => {
+    const r = 34 + i * 15
+    const opacity = 0.9 - i * 0.13
+    return (
+      <g key={i} fill="none" stroke="url(#qp-light)" strokeWidth="2">
+        <path
+          d={`M${125 - r} 175 A${r} ${r} 0 0 1 ${125 + r} 175`}
+          strokeOpacity={opacity}
+        />
+        <path
+          d={`M${125 - r} 175 A${r} ${r} 0 0 0 ${125 + r} 175`}
+          strokeOpacity={opacity * 0.35}
+        />
+      </g>
+    )
+  })
   return (
     <svg viewBox="0 0 250 350" className="card-svg" aria-hidden="true">
+      <rect width="250" height="350" rx="22" fill="#0f0d1f" />
       <rect
-        width="250"
-        height="350"
-        rx="18"
-        fill="var(--card-back-2, #1b4c3c)"
-      />
-      <rect
-        x="10"
-        y="10"
-        width="230"
-        height="330"
-        rx="12"
-        fill="url(#qp-lattice)"
-      />
-      <rect
-        x="10"
-        y="10"
-        width="230"
-        height="330"
-        rx="12"
+        x="12"
+        y="12"
+        width="226"
+        height="326"
+        rx="14"
         fill="none"
-        stroke="rgba(255,255,255,0.55)"
-        strokeWidth="3"
+        stroke="url(#qp-light)"
+        strokeOpacity="0.55"
+        strokeWidth="2"
       />
-      <circle
-        cx="125"
-        cy="175"
-        r="44"
-        fill="var(--card-back-2, #1b4c3c)"
-        stroke={GOLD}
-        strokeWidth="3"
+      <line
+        x1="26"
+        y1="175"
+        x2="224"
+        y2="175"
+        stroke="rgb(255 255 255 / 0.08)"
+        strokeWidth="1.5"
       />
-      <SuitShape suit="s" x={125} y={175} size={52} fill={GOLD} />
+      {arcs}
+      <SuitShape suit="s" x={125} y={165} size={26} fill="#fff" />
     </svg>
   )
 }
 
-/** Shared SVG defs (grain filter, back lattice). Render once per page. */
+/**
+ * Shared SVG defs (the pearl face, the light gradient, the brand's spade).
+ * Render once per page.
+ */
 export function CardDefs() {
   return (
     <svg
@@ -415,31 +375,20 @@ export function CardDefs() {
       focusable="false"
     >
       <defs>
-        <filter id="qp-grain" x="0" y="0" width="100%" height="100%">
-          <feTurbulence
-            type="fractalNoise"
-            baseFrequency="0.9"
-            numOctaves="2"
-            seed="7"
-          />
-          <feColorMatrix values="0 0 0 0 0.35  0 0 0 0 0.3  0 0 0 0 0.2  0 0 0 0.09 0" />
-          <feComposite in2="SourceGraphic" operator="in" />
-        </filter>
-        <pattern
-          id="qp-lattice"
-          width="20"
-          height="20"
-          patternUnits="userSpaceOnUse"
-          patternTransform="rotate(45)"
-        >
-          <rect width="20" height="20" fill="var(--card-back-1, #2b6e57)" />
-          <path
-            d="M0 10 H20 M10 0 V20"
-            stroke="rgba(255,255,255,0.13)"
-            strokeWidth="2"
-          />
-          <circle cx="10" cy="10" r="2.2" fill="rgba(255,255,255,0.2)" />
-        </pattern>
+        <linearGradient id="qp-pearl" x1="0" y1="0" x2="0.4" y2="1">
+          <stop offset="0" stopColor="var(--card-face, #fefdfb)" />
+          <stop offset="1" stopColor="var(--card-face-2, #efedf4)" />
+        </linearGradient>
+        <linearGradient id="qp-brand" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#ffe49a" />
+          <stop offset="0.55" stopColor="#e07aa8" />
+          <stop offset="1" stopColor="#8f8cff" />
+        </linearGradient>
+        <linearGradient id="qp-light" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stopColor="#6f8cff" />
+          <stop offset="0.5" stopColor="#e07aa8" />
+          <stop offset="1" stopColor="#f0c060" />
+        </linearGradient>
       </defs>
     </svg>
   )

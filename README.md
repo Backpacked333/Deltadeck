@@ -82,10 +82,11 @@ production or real two-device cloud sync.
 The bare URL is the home page: it always opens the landing page, and the logo leads back to it. The trainer is at `#table` (the Play tab). `#start` also opens the landing page. The one exception is a return from a sign-in redirect (`?code=…`) with no route to restore, which opens the app so the sign-in can finish. Signed-in visitors get "Play online" in place of the sign-up buttons.
 
 - **The challenge:** one of six curated hands against Atlas, played from preset buttons (keys `1`–`6`), each decision graded on the spot.
-  - With WebGL, it plays on a cinematic 3D table (`src/landing/stage/`, ADR-001): Atlas's likeliest hands rise as a cloud on the first decision, and a slow-motion verdict plays on the last.
+  - It plays on the trainer's table (the neon table below: `src/components/table/TableScene.tsx`), beside the headline, with the price printed on the odds arc and the equity left as the question.
+  - `?stage=3d` opts into the cinematic 3D table (`src/landing/stage/`, ADR-001), when WebGL is there: Atlas's likeliest hands rise as a cloud on the first decision, and a slow-motion verdict plays on the last.
   - The table is drawn physically: lacquered cards with real pip layouts and court panels, felt with fibre and sheen, a stitched leather rail, a varnished racetrack, clay chips with edge inserts and each player's stack, lit by one spotlight and a studio environment, through a lens pass (bloom, vignette, grain). All artwork is drawn at runtime; the page ships no images for it.
   - Quality adapts to frame time: tier 2 (full), 1 (phones: lower resolution, lighter lens) and 0 (no shadows or lens; software GPUs start here).
-  - Without WebGL, with reduced motion, or with `?motion=off`, it plays on the trainer's 2D table.
+  - Without WebGL, with reduced motion, or with `?motion=off`, even `?stage=3d` plays on the 2D table.
   - `?stageslow=<n>` slows the 3D clock and `?stagequality=0|1|2` pins the tier, for screenshots.
 - **The rest of the page:** below the hand it explains how DeltaDeck works and what a free account gives, with "Create free account" in the header and on the score card.
 - **The score card:** the accuracy, a percentile ranked by the Worker (against model players until a hand has 200 real scores), the luck of the cards shown apart from the decisions, and Atlas's reasoning. Its CTA, "Save your score and get rated", leads to sign-up and a three-step onboarding (`#welcome/onboard`).
@@ -142,11 +143,14 @@ The build is static: host `dist/` anywhere. There are no server routes or client
 
 New visitors get a welcome screen, a short spotlight tour, three **guided hands** (a big draw, a price-sensitive straight draw, a river bluff-catch) and then shuffled practice. **Learn** opens the full curriculum (below). Six short **quick lessons** with interactive widgets and quizzes (expected value, outs and pot odds, variance, ranges, options and insurance) sit inside it at `#learn/quick`.
 
-The app has light, dark and system themes, and a bottom-sheet lab on phones. It respects reduced-motion preferences and is keyboard-operable, with automated axe checks in both themes.
+The app is dark first: the default theme is dark, and light or following the system are a click on the header's theme button. It has a bottom-sheet lab on phones. It respects reduced-motion preferences and is keyboard-operable, with automated axe checks in both themes.
 
 ### Table feel and motion
 
-- **Cards and felt:** original vector card faces and court cards with a paper grain, a lit felt with a stitched leather rail, and chips that stack by denomination (1, 5, 25, 100, 500).
+- **The table** (`TableScene`): a lacquered oval seen in perspective on a void floor, with a woven felt printed with the odds arc (0 to 100, the price cut into it, lit to your equity once the lab shows it, your read as a gold bead), the betting line and the motto. The heads-up table, both live tables and the landing hero share it; the light theme draws it in white lacquer with ink markings.
+- **The rail light is the clock:** a neon band in the rail drains from the seat that is acting at a live table (hot once the time bank runs); in practice it is lit all round on your move, circles while Atlas thinks, and floods gold when you win.
+- **Cards and chips:** the Pearl deck (pearl faces, large corner indices, the English-pattern kings, queens and jacks from public-domain artwork recoloured to the deck in `public/cards/courts/`, a back that mirrors the odds arc) and ceramic chips that stack by denomination (1, 5, 25, 100, 500).
+- **Live tables:** on wide screens the six table is full bleed, its seats round the oval as glass plates with picture, school crest and stack, your cards held up in the middle and the action dock lying on the felt; the heads-up live table follows the same layout. Phones keep a compact grid.
 - **Choreography (Motion):** cards fly from the deck to their seats and lift as they turn over, and folded hands slide into the middle. When a hand ends all-in, both hands turn face up and the board is revealed one street at a time, with a pause before the river and equity bars that update after each card. Stacks, payouts and the review wait until the river lands.
 - **Atlas:** a drawn face that breathes and blinks, glances while it thinks, and has a sweeping ring around it. On phones its actions pop out as compact tags. The winner's side of the felt lights up.
 - **Lab:** meters, markers and EV bars move on springs, the Best tag glides between actions, tabs crossfade, and jargon (equity, break-even, EV, range) carries a definition on hover, focus or tap.

@@ -141,6 +141,11 @@ describe('LiveTable', () => {
     expect(table).not.toHaveTextContent('Atlas')
     expect(screen.getByText('Hand 1 of 20')).toBeInTheDocument()
     expect(screen.getByText('Your move')).toBeInTheDocument()
+    const surface = table.closest('.live-felt')
+    expect(surface).toHaveClass('live-hand-surface')
+    expect(surface?.querySelector(':scope > .action-bar')).toContainElement(
+      screen.getByRole('button', { name: /Call 10/ }),
+    )
     // No lab, no read prompt, no EV, and no practice controls.
     expect(screen.queryByText(/EV/)).toBeNull()
     for (const name of [/Pause table/, 'Hand history', 'Table settings'])
@@ -187,6 +192,9 @@ describe('LiveTable', () => {
     act(() => socket.emit(frame('welcome', 3, 0, folded)))
     expect(screen.getByText('You fold · bob wins')).toBeInTheDocument()
     expect(screen.getByText('Next hand in a few seconds.')).toBeInTheDocument()
+    expect(
+      screen.getByRole('region', { name: 'Poker table' }).closest('.live-felt'),
+    ).toHaveAttribute('data-motion', 'caught-up')
     expect(screen.queryByRole('button', { name: /Deal next hand/ })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Review hand' })).toBeNull()
   })
