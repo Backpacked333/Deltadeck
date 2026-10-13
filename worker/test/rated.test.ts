@@ -116,7 +116,20 @@ async function timeOut(matchId: string, seats: Record<SeatId, Client>) {
 }
 
 async function nextHand(matchId: string, alice: Client, handNo: number) {
-  await elapse(matchId, NEXT_HAND_MS)
+  const hold = await runInDurableObject(
+    stub(matchId),
+    async (table: TableDO, state) => {
+      const completion = await state.storage.get<{
+        schedule: { earliestNextDealAt: number }
+      }>('lastCompletion')
+      return Math.max(
+        NEXT_HAND_MS,
+        (completion?.schedule.earliestNextDealAt ?? table.clock()) -
+          table.clock(),
+      )
+    },
+  )
+  await elapse(matchId, hold)
   await alice.next(isState(handNo))
 }
 
@@ -345,7 +358,7 @@ describe('a player who leaves a rated match', () => {
     ).toBe(1)
   })
 
-  it('gives a player back from away a fresh clock for a turn still pending', async () => {
+  it('resolves an expired away turn before reconnect, without reviving its deadline', async () => {
     const { matchId, seats } = await rated()
     await move(matchId, seats, passive) // Bob to act
     await leave(matchId, seats[1])
@@ -355,10 +368,7 @@ describe('a player who leaves a rated match', () => {
     await setClock(matchId, T0 + GRACE_MS + 30_000)
     const back = await connect(matchId, BOB)
     await back.next((f) => f.t === 'welcome')
-    // 20 s + his 20 s of bank left, from now: not from when the turn began.
-    await elapse(matchId, 39_999)
-    expect(await actionsOf(matchId)).toBe(2)
-    await elapse(matchId, 1)
+    // Receipt-time reconciliation consumes the already-expired decision.
     expect(await actionsOf(matchId)).toBe(3)
   })
 

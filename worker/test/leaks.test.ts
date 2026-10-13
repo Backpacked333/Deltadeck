@@ -11,7 +11,6 @@ import { seededDeck } from '../../src/engine/testing'
 import type { ServerMsg } from '../../src/shared/protocol'
 import type { TableController } from '../src/controller'
 import { RATED_CONFIG } from '../src/rated'
-import { NEXT_HAND_MS } from '../src/table'
 import type { InitBody, TableDO } from '../src/table'
 import {
   bySeat,
@@ -19,6 +18,7 @@ import {
   createTable,
   DEV_SECRET,
   elapse,
+  elapseToNextDeal,
   freezeClock,
   isState,
   move,
@@ -92,10 +92,10 @@ describe('every frame a seat receives', () => {
     await play(matchId, clients, 1)
     await alice.next((f) => f.t === 'reveal' && f.handNo === 1)
     // Hand 2 ends with a fold before the flop: nobody shows.
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await alice.next(isState(2))
     await play(matchId, clients, 2, true)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await alice.next((f) => f.t === 'match_end')
     await bob.next((f) => f.t === 'match_end')
 
@@ -193,14 +193,14 @@ describe('every frame of a rated match', () => {
     await alice.next((f) => f.t === 'reveal' && f.handNo === 1)
     // Hands 2 to 4: Bob times out three times in a row and forfeits.
     const away = RATED_CONFIG.decisionMs + RATED_CONFIG.bankMs
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await alice.next(isState(2))
     await elapse(matchId, away)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await alice.next(isState(3))
     await move(matchId, clients, () => ({ type: 'raise', to: 60 }))
     await elapse(matchId, away)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await alice.next(isState(4))
     await elapse(matchId, away)
     await alice.next((f) => f.t === 'match_end')
@@ -253,7 +253,7 @@ describe('a seat before showdown', () => {
     await alice.next(isState(1))
     await play(matchId, { 0: alice, 1: bob }, 1)
     // Finish the match so both accounts are free for the next table.
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await alice.next((f) => f.t === 'match_end')
     return alice
   }
@@ -286,6 +286,8 @@ describe('a seat before showdown', () => {
         const text = JSON.stringify(f)
           .replaceAll(f.matchId, '<match>')
           .replace(/[0-9a-f]{64}/g, '<commitment>')
+          .replace(/"activationId":"[^"]+"/g, '"activationId":"<activation>"')
+          .replace(/"membershipGeneration":\d+/g, '"membershipGeneration":1')
         out.push(text)
       }
       return out

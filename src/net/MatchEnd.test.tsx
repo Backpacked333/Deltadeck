@@ -128,7 +128,7 @@ describe('the rating change at the end', () => {
       onRematch: vi.fn(),
     }
     const { rerender } = render(<MatchEnd {...props} />)
-    expect(screen.getByText('Updating your rating…')).toBeInTheDocument()
+    expect(screen.getByText(/Rating pending/)).toBeInTheDocument()
     rerender(
       <MatchEnd
         {...props}

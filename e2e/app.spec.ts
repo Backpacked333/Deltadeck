@@ -40,7 +40,9 @@ test('records results that survive a reload', async ({ page }) => {
   )
   await page.getByRole('button', { name: /Progress/ }).click()
   await expect(page.getByText(/1 hands recorded/)).toBeVisible()
-  await expect(page.getByText('Luck versus skill')).toBeVisible()
+  await expect(
+    page.getByRole('heading', { name: 'Results and model coverage' }),
+  ).toBeVisible()
 })
 
 test('analyst views, the 3D terrain and GL context cleanup', async ({

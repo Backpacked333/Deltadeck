@@ -21,6 +21,7 @@ export type OverviewPage =
   | 'foundations'
   | 'atlas'
   | 'connections'
+  | 'targeted'
 export type LearningRoute =
   | { kind: 'table' }
   | { kind: 'overview'; page: OverviewPage }
@@ -67,6 +68,7 @@ export function parseLearningRoute(hash: string): LearningRoute {
       'foundations',
       'atlas',
       'connections',
+      'targeted',
     ])
   )
     return { kind: 'overview', page: (page || 'path') as OverviewPage }

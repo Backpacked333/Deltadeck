@@ -108,6 +108,11 @@ describe('migrations', () => {
       '20261010130000_six_casual.sql',
       '20261011100000_practice_history.sql',
       '20261012000000_avatars.sql',
+      '20261012010000_learning_revisions.sql',
+      '20261012020000_verified_settlement.sql',
+      '20261012030000_learning_evidence.sql',
+      '20261012040000_learning_measurement.sql',
+      '20261012050000_rating_write_privileges.sql',
     ])
   })
 })

@@ -132,6 +132,7 @@ export type Question = QuestionBase &
   )
 export interface CaseRecord {
   id: string
+  familyId?: string
   unitId: UnitId
   contentVersion: number
   rubricVersion: number
@@ -180,6 +181,8 @@ export type ExperimentPhase =
   | 'reflected'
   | 'archived'
 export interface AttemptSnapshot {
+  effort?: import('./effort').EffortSnapshot
+  assessmentIssueId?: string
   id: string
   unitId?: UnitId
   experienceId?: ExperienceId

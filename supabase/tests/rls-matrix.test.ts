@@ -241,6 +241,31 @@ const TABLES: Record<string, Spec> = {
   ),
 }
 
+// Protected RPC-backed tables: no synthetic direct-write fixtures.
+// Owner filtering and RPC behavior are exercised in the dedicated SQL suites.
+const PROTECTED: Record<
+  string,
+  { authenticated?: string[]; service_role?: string[] }
+> = {
+  'public.learning_sync_scopes': { authenticated: ['SELECT'] },
+  'public.learning_revisions': { authenticated: ['SELECT'] },
+  'public.learning_mutations': {},
+  'public.learning_evidence_events': { authenticated: ['SELECT'] },
+  'public.learning_evidence_evaluations': { authenticated: ['SELECT'] },
+  'public.learning_assessment_issues': { authenticated: ['SELECT'] },
+  'public.learning_pilot_protocols': {
+    service_role: ['SELECT', 'INSERT', 'UPDATE'],
+  },
+  'public.learning_pilot_assignments': {
+    authenticated: ['SELECT'],
+    service_role: ['SELECT', 'INSERT', 'UPDATE'],
+  },
+  'private.hand_archive_sources': {},
+  'private.hand_verifications': {},
+  'private.terminal_proofs': {},
+  'private.settlement_certificates': {},
+  'private.settlement_jobs': {},
+}
 const D = 'denied' as const
 const PUBLIC_READ = {
   anon: [1, D, D, D],
@@ -299,13 +324,13 @@ const EXPECTED: Record<string, Record<Who, Cell[]>> = {
   // The accuracy on every profile: anyone reads it, only the server's
   // refresh writes it (supabase/tests/accuracy.test.ts).
   'public.accuracy': { ...PUBLIC_READ, ...SERVICE },
-  // Ratings are public; only apply_rating writes them (ratings.test.ts).
-  'public.ratings': { ...PUBLIC_READ, ...SERVICE },
-  // Append-only for everyone: even the server's update and delete stop at
-  // the trigger (which raises its own error, so the cell reads 'allowed').
+  // F07: public reads; service writes must use the definer-owned rating gate
+  // or abandonment accounting, never direct DML (verified-settlement.test.ts).
+  'public.ratings': { ...PUBLIC_READ, service: [1, D, D, D] },
+  // F07: deny before append-only triggers, including forged history inserts.
   'public.rating_history': {
     ...PUBLIC_READ,
-    service: [1, 'ok', 'allowed', 'allowed'],
+    service: [1, D, D, D],
   },
   // The earlier app's learning tables: strictly per owner.
   'public.profiles': { ...OWN_ONLY, ...SERVICE },
@@ -326,12 +351,17 @@ const EXPECTED: Record<string, Record<Who, Cell[]>> = {
   },
   // Practice history on the account: strictly per owner. The learning state
   // is replaced, never deleted (practice-history.test.ts covers the guards).
-  'public.practice_hands': { ...OWN_ONLY, ...SERVICE },
+  'public.practice_hands': {
+    anon: [D, D, D, D],
+    self: [1, D, D, D],
+    other: [0, D, D, D],
+    service: [1, D, D, D],
+  },
   'public.learning_state': {
     anon: [D, D, D, D],
-    self: [1, 'ok', 1, D],
-    other: [0, D, 0, D],
-    ...SERVICE,
+    self: [1, D, D, D],
+    other: [0, D, D, D],
+    service: [1, D, D, D],
   },
   // Picture reports: a player adds them in their own name only, and nobody
   // but the server reads, changes or deletes one (avatars.test.ts).
@@ -401,8 +431,30 @@ describe('the access matrix', () => {
       `select schemaname || '.' || tablename t from pg_tables
        where schemaname in ('public', 'private') order by 1`,
     )
-    expect(rows.map((r) => r.t)).toEqual(Object.keys(TABLES).sort())
+    expect(rows.map((r) => r.t)).toEqual(
+      [...Object.keys(TABLES), ...Object.keys(PROTECTED)].sort(),
+    )
     expect(Object.keys(EXPECTED).sort()).toEqual(Object.keys(TABLES).sort())
+  })
+
+  it('F07–F10 protected source and certificate tables have exactly the allowed grants', async () => {
+    for (const [table, roles] of Object.entries(PROTECTED))
+      for (const role of ['anon', 'authenticated', 'service_role'] as const)
+        for (const permission of [
+          'SELECT',
+          'INSERT',
+          'UPDATE',
+          'DELETE',
+          'TRUNCATE',
+        ]) {
+          const { rows } = await db.query<{ allowed: boolean }>(
+            'select has_table_privilege($1,$2,$3) allowed',
+            [role, table, permission],
+          )
+          expect(rows[0].allowed, `${table} ${role} ${permission}`).toBe(
+            role !== 'anon' && !!roles[role]?.includes(permission),
+          )
+        }
   })
 
   it('has RLS on every table a browser role could reach', async () => {
@@ -451,44 +503,79 @@ describe('functions', () => {
       )
     ).rows
 
-  it('pin search_path and keep every security definer away from browsers', async () => {
+  it('pin search_path and allow only the named account-scoped security definers to browsers', async () => {
     const all = await fns()
-    expect(all.map((f) => f.name)).toEqual([
-      'private.count_abandonment',
-      'private.learning_state_newer',
-      'private.player_accuracy',
-      'private.practice_hands_guard',
-      'private.rating_change',
-      'private.refresh_accuracy',
-      'private.refresh_finished_match',
-      'private.refuse_change',
-      'private.school_for',
-      'private.set_player_school',
-      'public.abandonment_rate',
-      'public.apply_rating',
-      'public.audit_hand',
-      'public.clear_learning_progress',
-      'public.handle_new_player',
-      'public.ladder',
-      'public.ladder_month',
-      'public.rated_luck',
-      'public.record_challenge_claim',
-      'public.record_grades',
-      'public.record_hand',
-      'public.record_incident',
-      'public.record_match',
-      'public.remove_avatar',
-      'public.report_avatar',
-      'public.reserve_coach_request',
-      'public.set_avatar',
-      'public.set_player_school',
-      'public.verify_hand',
-    ])
+    expect(all.map((f) => f.name)).toEqual(
+      [
+        'private.apply_rating_pre_certificate',
+        'private.check_assessment_issue',
+        'private.check_certificate',
+        'private.export_learning_pilot_pre_measurement',
+        'private.hand_source',
+        'private.invalidate_settlement',
+        'private.record_hand_pre_certificate',
+        'private.settlement_source',
+        'private.source_token',
+        'private.count_abandonment',
+        'private.learning_state_newer',
+        'private.player_accuracy',
+        'private.practice_hands_guard',
+        'private.rating_change',
+        'private.refresh_accuracy',
+        'private.refresh_finished_match',
+        'private.refuse_change',
+        'private.school_for',
+        'private.set_player_school',
+        'public.abandonment_rate',
+        'public.apply_rating',
+        'public.audit_settlement',
+        'public.clear_learning_scope_v1',
+        'public.export_learning_pilot_v1',
+        'public.ingest_learning_evidence_v1',
+        'public.issue_learning_assessment_v1',
+        'public.learning_pilot_consent_v1',
+        'public.purge_learning_evidence_generation_v1',
+        'public.read_learning_evidence_v1',
+        'public.read_learning_sync_v1',
+        'public.record_settlement_verdict',
+        'public.record_terminal',
+        'public.settlement_candidates',
+        'public.verify_hand_v2',
+        'public.write_learning_revision_v1',
+        'public.audit_hand',
+        'public.clear_learning_progress',
+        'public.handle_new_player',
+        'public.ladder',
+        'public.ladder_month',
+        'public.rated_luck',
+        'public.record_challenge_claim',
+        'public.record_grades',
+        'public.record_hand',
+        'public.record_incident',
+        'public.record_match',
+        'public.remove_avatar',
+        'public.report_avatar',
+        'public.reserve_coach_request',
+        'public.set_avatar',
+        'public.set_player_school',
+        'public.verify_hand',
+      ].sort(),
+    )
     for (const f of all) {
       expect(f.config, f.name).toContain('search_path=""')
       if (f.definer) {
         expect(f.anon, `${f.name} anon`).toBe(false)
-        expect(f.authenticated, `${f.name} authenticated`).toBe(false)
+        expect(f.authenticated, `${f.name} authenticated`).toBe(
+          [
+            'public.clear_learning_scope_v1',
+            'public.read_learning_sync_v1',
+            'public.write_learning_revision_v1',
+            'public.ingest_learning_evidence_v1',
+            'public.read_learning_evidence_v1',
+            'public.learning_pilot_consent_v1',
+            'public.issue_learning_assessment_v1',
+          ].includes(f.name),
+        )
       }
     }
   })

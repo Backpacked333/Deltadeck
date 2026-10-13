@@ -1,14 +1,15 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { rememberAuthReturn } from '../lib/authReturn'
 import { seedSession, TEST_SESSION_KEY } from '../test/session'
 import { signedIn } from '../lib/account'
 import { emptyProgress } from '../lib/storage'
 import type { HandRecord } from '../lib/storage'
-import { fakeAccount } from './fakeAccount'
-import { PracticeSync } from './sync'
+import { revisionService } from './syncTestHarness'
+import { activeSync, PracticeSync } from './sync'
+import { startEvidenceBootstrap } from './evidenceBootstrap'
 import { AccountPage, AuthCallback, SignOut } from './AccountPage'
 import type { Online } from './supabase'
 
@@ -57,6 +58,14 @@ const unsentHand = {
   guided: false,
   at: 1,
 } as HandRecord
+afterEach(() => { activeSync()?.stop(); vi.restoreAllMocks() })
+async function prepared() {
+  const account = revisionService()
+  const sync = new PracticeSync(account.client, 'u1', { merge: () => {}, reloadLearning: () => {} })
+  sync.note({ ...emptyProgress(), owner: 'u1' })
+  await sync.start(); await sync.flush(1000)
+  return { account, sync }
+}
 
 describe('AccountPage', () => {
   it('sends a signed-in player on to where they were going', async () => {
@@ -155,7 +164,66 @@ describe('AuthCallback', () => {
 })
 
 describe('SignOut', () => {
+  it('retries the same account sync when initialization finishes after sign-out mounts', async () => {
+    seedSession()
+    const replace = vi.fn(); vi.stubGlobal('location', { ...window.location, replace })
+    render(<SignOut online={online()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('unverified')
+    const { sync } = await prepared()
+    const flush = vi.spyOn(sync, 'flush')
+    await userEvent.click(screen.getByRole('button', { name: 'Wait and retry save' }))
+    await waitFor(() => expect(replace).toHaveBeenCalled())
+    expect(flush).toHaveBeenCalled()
+  })
+  it('exports the same account sync when initialization finishes after sign-out mounts', async () => {
+    seedSession()
+    const replace = vi.fn(); vi.stubGlobal('location', { ...window.location, replace })
+    render(<SignOut online={online()} />)
+    await screen.findByRole('alert')
+    const { sync } = await prepared()
+    const exporter = vi.spyOn(sync, 'exportAccount')
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:test'), revokeObjectURL: vi.fn() }))
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    await userEvent.click(screen.getByRole('button', { name: 'Export and sign out' }))
+    await screen.findByRole('button', { name: 'I saved the export — sign out' })
+    expect(exporter).toHaveBeenCalled()
+    expect(replace).not.toHaveBeenCalled()
+  })
+  it('never adopts another account initialized after sign-out mounts', async () => {
+    seedSession()
+    const replace = vi.fn(); vi.stubGlobal('location', { ...window.location, replace })
+    render(<SignOut online={online()} />)
+    await screen.findByRole('alert')
+    const account = revisionService()
+    const other = new PracticeSync(account.client, 'u2', { merge: () => {}, reloadLearning: () => {} })
+    const flush = vi.spyOn(other, 'flush')
+    const exporter = vi.spyOn(other, 'exportAccount')
+    const clear = vi.spyOn(other, 'clearDevice')
+    await userEvent.click(screen.getByRole('button', { name: 'Wait and retry save' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('The account changed')
+    await userEvent.click(screen.getByRole('button', { name: 'Export and sign out' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('The account changed')
+    expect(flush).not.toHaveBeenCalled()
+    expect(exporter).not.toHaveBeenCalled()
+    expect(clear).not.toHaveBeenCalled()
+    expect(replace).not.toHaveBeenCalled()
+  })
+  it('F10 failed pre-runtime evidence bootstrap prevents sign-out from clearing private work', async () => {
+    const { sync } = await prepared()
+    seedSession()
+    localStorage.setItem('quantpoker.learning.v2', '{"private":"retained"}')
+    const replace = vi.fn(); vi.stubGlobal('location', { ...window.location, replace })
+    const clear = vi.spyOn(sync, 'clearDevice')
+    await startEvidenceBootstrap(sync, false, async () => { throw new Error('Evidence chunk unavailable') })
+    render(<SignOut online={online()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('not verified')
+    expect(clear).not.toHaveBeenCalled()
+    expect(replace).not.toHaveBeenCalled()
+    expect(localStorage.getItem('quantpoker.learning.v2')).toBe('{"private":"retained"}')
+    expect(signedIn()).toBe(true)
+  })
   it('signs this browser out, forgets the account and starts at the home page', async () => {
+    await prepared()
     seedSession({ username: 'alice' })
     at('/#signout')
     const replace = vi.fn()
@@ -171,6 +239,7 @@ describe('SignOut', () => {
   })
 
   it("forgets this browser's practice: the account keeps it", async () => {
+    await prepared()
     seedSession()
     localStorage.setItem('quantpoker.progress.v2', '{"hands":[]}')
     localStorage.setItem('quantpoker.learning.v2', '{}')
@@ -186,7 +255,7 @@ describe('SignOut', () => {
     seedSession()
     const replace = vi.fn()
     vi.stubGlobal('location', { ...window.location, replace })
-    const account = fakeAccount()
+    const account = revisionService()
     const sync = new PracticeSync(account.client, 'u1', {
       merge: () => {},
       reloadLearning: () => {},
@@ -197,7 +266,7 @@ describe('SignOut', () => {
       sync.note({ ...emptyProgress(), owner: 'u1', hands: [unsentHand] })
       render(<SignOut online={online()} />)
       expect(await screen.findByRole('alert')).toHaveTextContent(
-        'not saved to your account yet',
+        'not verified',
       )
       expect(replace).not.toHaveBeenCalled()
       await userEvent.click(
@@ -212,6 +281,7 @@ describe('SignOut', () => {
   })
 
   it('still signs out when the account service cannot be reached', async () => {
+    await prepared()
     seedSession()
     const replace = vi.fn()
     vi.stubGlobal('location', { ...window.location, replace })
@@ -224,5 +294,56 @@ describe('SignOut', () => {
     render(<SignOut online={service} />)
     await waitFor(() => expect(replace).toHaveBeenCalled())
     expect(localStorage.getItem(TEST_SESSION_KEY)).toBeNull()
+  })
+
+  it('F10 initial-pull failure blocks leave; explicit discard requires second confirmation', async () => {
+    seedSession()
+    const { account, sync } = await prepared()
+    account.state.offline = true
+    sync.note({ ...emptyProgress(), owner: 'u1', hands: [unsentHand] })
+    const replace = vi.fn(); vi.stubGlobal('location', { ...window.location, replace })
+    render(<SignOut online={online()} />)
+    await screen.findByRole('alert')
+    await userEvent.click(screen.getByRole('button', { name: 'Discard unsaved work and sign out' }))
+    expect(replace).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm permanent discard and sign out' }))
+    await waitFor(() => expect(replace).toHaveBeenCalled())
+    expect(localStorage.getItem(TEST_SESSION_KEY)).toBeNull()
+  })
+  it('F10 export failure never clears data or exits; download requires explicit saved-file confirmation', async () => {
+    seedSession()
+    const { account, sync } = await prepared()
+    account.state.offline = true
+    sync.note({ ...emptyProgress(), owner: 'u1', hands: [unsentHand] })
+    const replace = vi.fn(); vi.stubGlobal('location', { ...window.location, replace })
+    const exporter = vi.spyOn(sync, 'exportAccount').mockRejectedValueOnce(new Error('export disk failed'))
+    render(<SignOut online={online()} />)
+    await screen.findByRole('alert')
+    await userEvent.click(screen.getByRole('button', { name: 'Export and sign out' }))
+    expect(await screen.findByText(/export disk failed/)).toBeInTheDocument()
+    expect(signedIn()).toBe(true); expect(replace).not.toHaveBeenCalled()
+    exporter.mockRestore()
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:test'), revokeObjectURL: vi.fn() }))
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    await userEvent.click(screen.getByRole('button', { name: 'Export and sign out' }))
+    await screen.findByRole('button', { name: 'I saved the export — sign out' })
+    expect(signedIn()).toBe(true); expect(replace).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByRole('button', { name: 'I saved the export — sign out' }))
+    await waitFor(() => expect(replace).toHaveBeenCalled())
+  })
+  it('F10 storage removal failure is a visible privacy failure, not completion', async () => {
+    seedSession(); await prepared()
+    const replace = vi.fn(); vi.stubGlobal('location', { ...window.location, replace })
+    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => { throw new Error('denied') })
+    render(<SignOut online={online()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Privacy cleanup failed')
+    expect(replace).not.toHaveBeenCalled()
+  })
+  it('F10 absence of initial account reconciliation is not saved', async () => {
+    seedSession()
+    const replace = vi.fn(); vi.stubGlobal('location', { ...window.location, replace })
+    render(<SignOut online={online()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('unverified')
+    expect(replace).not.toHaveBeenCalled()
   })
 })

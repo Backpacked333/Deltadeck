@@ -1,12 +1,97 @@
 import { useEffect, useRef, useState } from 'react'
 import { useReducedMotionConfig } from 'motion/react'
 import type { Game } from '../lib/poker'
+import type {
+  HandCompletionV1,
+  PresentationStateV1,
+  SeatView,
+} from '../shared/protocol'
 
 export type Runout = {
   /** Board cards currently shown (the engine has already dealt all five). */
   visible: number
   /** True while an all-in runout is still being revealed. */
   revealing: boolean
+}
+
+/** Schedule age uses two server timestamps, then only local monotonic elapsed. */
+export function completionPhase(
+  completion: HandCompletionV1,
+  serverNow: number,
+  elapsed: number,
+  reduced = false,
+) {
+  const age =
+    Math.max(0, serverNow - completion.completedAt) + Math.max(0, elapsed)
+  const { beats, earliestNextDealAt } = completion.schedule
+  const due = beats.filter((beat) => beat.offsetMs <= age)
+  const initial =
+    completion.schedule.shape === 'all_in_preflop'
+      ? 0
+      : completion.schedule.shape === 'all_in_flop'
+        ? 3
+        : completion.schedule.shape === 'all_in_turn'
+          ? 4
+          : completion.final.board.length
+  const visible = reduced
+    ? completion.final.board.length
+    : (due.at(-1)?.boardCount ?? initial)
+  const revealing = visible < completion.final.board.length
+  return {
+    visible,
+    revealing,
+    holding: !revealing && age < earliestNextDealAt - completion.completedAt,
+  }
+}
+
+export function useLiveRunout(
+  view: SeatView | null,
+  presentation: PresentationStateV1 | null,
+  receivedAt: number | undefined,
+  epoch: number,
+) {
+  const reduced = useReducedMotionConfig()
+  const [now, setNow] = useState(() => performance.now())
+  const completion = presentation?.completion
+  const current =
+    !!completion &&
+    !!view?.result &&
+    completion.hand.matchId === view.matchId &&
+    completion.hand.handNo === view.handNo &&
+    !presentation?.currentDecision
+  useEffect(() => {
+    if (!current || reduced) return
+    const timer = window.setInterval(() => {
+      const at = performance.now()
+      setNow(at)
+      if (
+        completion &&
+        receivedAt !== undefined &&
+        presentation &&
+        presentation.serverNow + at - receivedAt >=
+          completion.schedule.earliestNextDealAt
+      )
+        window.clearInterval(timer)
+    }, 80)
+    const wake = () => setNow(performance.now())
+    document.addEventListener('visibilitychange', wake)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', wake)
+    }
+  }, [current, completion, presentation, receivedAt, epoch, reduced])
+  if (!current || receivedAt === undefined)
+    return {
+      visible: view?.board.length ?? 0,
+      revealing: false,
+      holding: false,
+    }
+  return completionPhase(
+    completion,
+    presentation.serverNow,
+    Math.max(now, performance.now()) - receivedAt,
+    !!reduced,
+  )
 }
 
 const STEP_MS = 900

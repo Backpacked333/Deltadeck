@@ -23,6 +23,7 @@ import type { InitBody } from './table'
 import { HANDS_DLQ } from './queues'
 import { handsPerDay } from './stats'
 import { consumeDeadLetters, consumeHands } from './verify'
+import { catchUpSettlements } from './settlement'
 
 export { LobbyDO } from './lobby'
 export { ScoreDO } from './scores'
@@ -271,6 +272,9 @@ export default {
   async queue(batch: MessageBatch, env: WorkerEnv) {
     if (batch.queue === HANDS_DLQ) await consumeDeadLetters(batch, env)
     else await consumeHands(batch, env)
+  },
+  async scheduled(event: ScheduledController, env: WorkerEnv) {
+    await catchUpSettlements(env, event.scheduledTime)
   },
 } satisfies ExportedHandler<WorkerEnv>
 

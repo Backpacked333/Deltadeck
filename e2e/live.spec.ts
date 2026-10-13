@@ -237,7 +237,7 @@ test('keyboard loop at a six-seat table', async ({ browser }) => {
   expect(taken).toEqual([])
 
   // Out of the hand on 1,230, below 100 bb: Rebuy, by keyboard, sends
-  // the bare message, and the table's answer takes it away.
+  // a scoped command, and the table's answer takes it away.
   const own = page.getByRole('group', { name: /^Seat 1:/ })
   await expect(own).toContainText('1,230')
   const rebuy = page.getByRole('button', { name: /^Rebuy/ })
@@ -266,12 +266,9 @@ test('keyboard loop at a six-seat table', async ({ browser }) => {
   await page.getByRole('button', { name: 'Stand up' }).focus()
   await page.keyboard.press('Enter')
   await expect(page.getByText('Pick an empty seat to play.')).toBeVisible()
-  expect(table.received.filter((m) => m.t !== 'act')).toEqual([
-    { t: 'rebuy' },
-    { t: 'sit_out' },
-    { t: 'sit_in' },
-    { t: 'stand' },
-  ])
+  expect(
+    table.received.filter((m) => m.t === 'seat_command').map((m) => m.kind),
+  ).toEqual(['rebuy', 'sit_out', 'sit_in', 'stand'])
   await me.close()
 })
 
@@ -305,7 +302,14 @@ test('a stand mid-hand at a six-seat table keeps the seat until the hand ends', 
   await expect(page.getByText(/ to act$/)).toBeVisible()
   await expect(page.getByRole('button', { name: 'Stand up' })).toHaveCount(0)
   expect(await serious()).toEqual([])
-  expect(table.received).toEqual([{ t: 'stand' }])
+  expect(table.received).toEqual([
+    expect.objectContaining({
+      t: 'seat_command',
+      kind: 'stand',
+      v: 1,
+      tableId: SIX_TABLE,
+    }),
+  ])
   // The others finish the hand and the seat frees.
   table.release()
   await expect(page.getByText('Pick an empty seat to play.')).toBeVisible()
@@ -336,16 +340,23 @@ test.describe('six tables through the real lobby', () => {
   test.afterEach(async () => {
     const players = opened.map((o) => o.p)
     opened = []
-    for (const p of players) {
-      const stand = p.page.getByRole('button', { name: 'Stand up' })
-      if (await stand.isVisible().catch(() => false))
-        await stand.click().catch(() => {})
+    try {
+      await expect(async () => {
+        for (const p of players) {
+          const stand = p.page.getByRole('button', { name: 'Stand up' })
+          // Another player's stand can stale this command. A fresh snapshot
+          // re-enables the control for a new request, not an unsafe replay.
+          if (await stand.isVisible()) {
+            if (await stand.isEnabled()) await stand.click({ timeout: 2000 })
+          }
+        }
+        for (const p of players)
+          await expect(p.page.getByRole('group', { name: /\(you\)$/ }))
+            .toHaveCount(0, { timeout: 1000 })
+      }).toPass({ timeout: 60_000, intervals: [100, 250, 500] })
+    } finally {
+      await Promise.all(players.map((p) => p.close()))
     }
-    for (const p of players)
-      await expect(p.page.getByRole('group', { name: /\(you\)$/ }))
-        .toHaveCount(0, { timeout: 60_000 })
-        .catch(() => {})
-    for (const p of players) await p.close()
   })
 
   test('Quick sit seats a player at a six-seat table from the keyboard, and the lobby lists it', async ({

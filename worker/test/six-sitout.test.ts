@@ -32,6 +32,7 @@ import {
   connect,
   createTable,
   elapse,
+  elapseToNextDeal,
   freezeClock,
   isState,
   move,
@@ -151,7 +152,7 @@ async function nextHand(
   const handNo = ended.config.handNo
   const first = Object.values(clients)[0]
   await first.next((f) => f.t === 'reveal' && f.handNo === handNo)
-  await elapse(matchId, NEXT_HAND_MS)
+  await elapseToNextDeal(matchId)
   await first.next(isState(handNo + 1))
   return (await peek(matchId)).hand!
 }
@@ -317,7 +318,7 @@ describe('sitting out at a six table', () => {
     expect(statusOf(await sitOut(clients[4]), 4)).toBe('sitting_out')
     // Sitting out again changes nothing.
     expect(statusOf(await sitOut(clients[4]), 4)).toBe('sitting_out')
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     const { match, hand } = await peek(matchId)
     expect(match.status).toBe('waiting')
     expect(hand!.config.handNo).toBe(2)
@@ -348,7 +349,7 @@ describe('sitting out at a six table', () => {
     let roster = (await seated(matchId)).find((p) => p.seat === 4)!
     expect(roster).toMatchObject({ status: 'playing', timeouts: 1 })
     await clients[0].next((f) => f.t === 'reveal' && f.handNo === 2)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await clients[0].next(isState(3))
 
     // Hand 3: button 2, small blind 4, big blind 0. Seat 2 calls and seat
@@ -417,7 +418,7 @@ describe('sitting out at a six table', () => {
     await playOut(matchId, clients, fold)
     await clients[0].next((f) => f.t === 'reveal' && f.handNo === 1)
     await sitOut(clients[2])
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).match.status).toBe('waiting')
     await sitIn(clients[2])
     await clients[2].next(isState(2))
@@ -479,7 +480,7 @@ describe('standing up a player who sits out', () => {
     const players = { 0: clients[0], 2: clients[2] }
     await playOut(matchId, { ...players, 4: clients[4] }, fold)
     await clients[0].next((f) => f.t === 'reveal' && f.handNo === 2)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await clients[0].next(isState(3))
 
     // From hand 3 the big blind goes round seats 0 and 2 alone: hands 4,
@@ -569,7 +570,7 @@ describe('standing up a player who sits out', () => {
       kind: 'sitout',
       at: t + FIVE_MINUTES,
     })
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).match.status).toBe('waiting')
     await elapse(matchId, FIVE_MINUTES - NEXT_HAND_MS - 1)
     expect((await seated(matchId)).map((p) => p.seat)).toEqual([0, 2])
@@ -643,7 +644,7 @@ describe('standing up a player who sits out', () => {
     // seat 0 sits out too.
     const t = await clockOf(matchId)
     await sitOut(clients[2])
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).match.status).toBe('waiting')
     await elapse(matchId, 60_000 - NEXT_HAND_MS)
     await sitOut(clients[0])
@@ -702,7 +703,7 @@ describe('standing up a player who sits out', () => {
       } else expect(statusOf(await sitIn(toggler), 4)).toBe('playing')
       expect(statusOf(await sitOut(toggler), 4)).toBe('sitting_out')
       from = toggler.frames.length
-      await elapse(matchId, NEXT_HAND_MS)
+      await elapseToNextDeal(matchId)
       await clients[0].next(isState(n + 1))
       const { hand } = await peek(matchId)
       expect(hand!.config.seats.map((s) => s.seat)).toEqual([0, 2])
@@ -729,7 +730,7 @@ describe('standing up a player who sits out', () => {
     // Seat 2 stands between hands, so seat 0 waits alone. It sits out,
     // and four minutes later sits in: nobody is there to deal it in.
     await answer(clients[2], { t: 'stand' })
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).match.status).toBe('waiting')
     const t = await clockOf(matchId)
     await sitOut(clients[0])
@@ -826,7 +827,7 @@ describe('heads-up timeouts', () => {
     // Hand 1: seat 0, the button, runs out of time facing the big blind.
     await timeOut(matchId)
     await seats[0].next((f) => f.t === 'reveal' && f.handNo === 1)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await seats[0].next(isState(2))
     // Hand 2: seat 1 calls, and seat 0 runs out of time again: two in a
     // row. Heads-up nobody sits out; seat 0 is still dealt in.
@@ -890,7 +891,7 @@ describe('a busted player at a six table', () => {
 
     // Hand 3 deals seats 0 and 2 only.
     await clients[0].next((f) => f.t === 'reveal' && f.handNo === 2)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await clients[0].next(isState(3))
     expect((await peek(matchId)).hand!.config.seats.map((s) => s.seat)).toEqual(
       [0, 2],
@@ -945,7 +946,7 @@ describe('a busted player at a six table', () => {
     })
     rigged.holes = { 0: 'As Ad', 2: '7c 2h' }
     const seen = watcher.frames.length
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     const two = (await peek(matchId)).hand!
     expect(two.config).toMatchObject({ handNo: 2, button: 2, sb: 2, bb: 0 })
     expect(two.actions).toEqual([])
@@ -986,7 +987,7 @@ describe('a busted player at a six table', () => {
     await move(matchId, clients, () => ({ type: 'call' }))
     expect(bySeat((await peek(matchId)).hand!.players, 4).stack).toBe(0)
     await clients[0].next((f) => f.t === 'reveal' && f.handNo === 2)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     await clients[0].next(isState(3))
     // Big blinds 0, 2, 0, 2, 0, 2 from hand 3: hands 4, 6 and 8 start
     // orbits. It is seated, with nothing, until hand 8 is dealt.
@@ -1014,9 +1015,9 @@ describe('a busted player at a six table', () => {
     await move(other, two, () => ({ type: 'call' }))
     expect(bySeat((await peek(other)).hand!.players, 2).stack).toBe(0)
     await two[0].next((f) => f.t === 'reveal' && f.handNo === 1)
-    await elapse(other, NEXT_HAND_MS)
+    const hold = await elapseToNextDeal(other)
     expect((await peek(other)).match.status).toBe('waiting')
-    await elapse(other, FIVE_MINUTES - NEXT_HAND_MS - 1)
+    await elapse(other, FIVE_MINUTES - hold - 1)
     expect((await seated(other)).map((p) => p.seat)).toEqual([0, 2])
     await elapse(other, 1)
     expect((await seated(other)).map((p) => p.seat)).toEqual([0])
@@ -1233,7 +1234,7 @@ describe('a bad stored sit-out count', () => {
     await playOut(matchId, clients, fold)
     await clients[0].next((f) => f.t === 'reveal' && f.handNo === 1)
     await sitOut(clients[2])
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).match.status).toBe('waiting')
     // Its stored time goes bad: not a number, so no deadline can be read
     // from it. The table looks at once, sets it to now and records it.
@@ -1343,7 +1344,7 @@ describe('sit-out frames', () => {
     await move(matchId, clients, () => ({ type: 'call' }))
     expect(await sitIn(clients[4])).toMatchObject({ code: 'no_chips' })
     await clients[0].next((f) => f.t === 'reveal' && f.handNo === 2)
-    await elapse(matchId, NEXT_HAND_MS)
+    await elapseToNextDeal(matchId)
     expect((await peek(matchId)).match.status).toBe('waiting')
     // Seat 2 sits in: two to deal in, so hand 3 deals at once.
     expect(statusOf(await sitIn(clients[2]), 2)).toBe('playing')
@@ -1356,7 +1357,7 @@ describe('sit-out frames', () => {
     expect(analysisKeys(all)).toEqual([])
     // The socket without a seat heard every status change, never a hand.
     for (const f of watcher.frames) {
-      expect(['welcome', 'state', 'error']).toContain(f.t)
+      expect(['welcome', 'state', 'error', 'command_outcome']).toContain(f.t)
       if (f.t === 'welcome' || f.t === 'state') expect(f.view).toBeNull()
     }
     const statuses = watcher.frames.flatMap((f) =>

@@ -1,3 +1,8 @@
+.qp-targeted-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-block: 16px; }
+.qp-targeted-skills { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 20px; margin-block: 24px; }
+.qp-targeted-skills article { padding: 18px; border: 1px solid var(--border, #d1d5d1); border-radius: 12px; }
+.qp-targeted pre { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.qp-targeted ol { line-height: 2; }
 .curriculum-workspace {
   min-width: 0;
   overflow-wrap: anywhere;

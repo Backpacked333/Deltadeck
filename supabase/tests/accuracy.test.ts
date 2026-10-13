@@ -155,7 +155,7 @@ describe('accuracy', () => {
     // stay the newest.
     await match(OLD, 'finished', 1)
     await db.exec(
-      `update public.hands set created_at = now() - interval '1 day' where match_id = '${OLD}'`,
+      `update public.matches set played_at = now() - interval '1 day' where id = '${OLD}'`,
     )
     await db.exec(`
       insert into public.hand_grades (hand_id, seat, idx, user_id, format, grade, ev_lost, accuracy, pot, model_version, created_at)
@@ -179,7 +179,7 @@ describe('accuracy', () => {
     const STALE = '99999999-9999-4999-8999-999999999999'
     await match(STALE, 'finished', 1)
     await db.exec(
-      `update public.hands set created_at = now() - interval '2 days' where match_id = '${STALE}'`,
+      `update public.matches set played_at = now() - interval '2 days' where id = '${STALE}'`,
     )
     await grade(`${STALE}:1`, [
       { idx: 0, grade: 'best', accuracy: 100 },

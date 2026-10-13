@@ -1007,7 +1007,21 @@ describe('heads-up banks', () => {
     await nextHand(matchId, seats, fold)
     const { match } = await peek(matchId)
     expect(Object.keys(match).sort()).toEqual(
-      ['config', 'handNo', 'id', 'net', 'players', 'status', 'v'].sort(),
+      [
+        'activation',
+        'config',
+        'firstPresenceAt',
+        'handNo',
+        'id',
+        'memberships',
+        'net',
+        'players',
+        'seatEpochs',
+        'startDeadlineAt',
+        'startedAt',
+        'status',
+        'v',
+      ].sort(),
     )
     const { config, players } = match as unknown as {
       config: object

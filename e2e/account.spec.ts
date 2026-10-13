@@ -137,6 +137,17 @@ test('signing out from the menu goes home and locks practice again', async ({
 
   await page.getByRole('button', { name: 'Account: carol' }).click()
   await page.getByRole('link', { name: 'Sign out' }).click()
+  // This legacy service fixture has no revision RPCs. F10 must refuse to
+  // imply a save, and leaving requires an explicit second confirmation.
+  await expect(
+    page.getByRole('heading', { name: 'Your account save is not verified' }),
+  ).toBeVisible()
+  await page
+    .getByRole('button', { name: 'Discard unsaved work and sign out' })
+    .click()
+  await page
+    .getByRole('button', { name: 'Confirm permanent discard and sign out' })
+    .click()
   // Sign out reloads the landing, whose 3D stage can take longer than the
   // 5 s default to draw on a busy runner.
   await expect(page.getByRole('heading', { name: /misprice/ })).toBeVisible({

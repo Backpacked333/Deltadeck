@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type RefObject } from 'react'
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react'
 import { useHash } from '../lib/navigation'
 import { LiveHandBridge, type LiveHand } from './components/LiveHandBridge'
 import './palette.css'
@@ -44,6 +51,12 @@ import { registry } from './core/registry'
 import { evidenceState } from './core/assessment'
 import { FoundationWorkspace } from './components/FoundationWorkspace'
 import { LearningDataTools } from './components/LearningDataTools'
+import {
+  attachLearningSession,
+  startLearningEvidence,
+} from './learning/runtime'
+
+const LearningWorkspace = lazy(() => import('./learning/LearningWorkspace'))
 
 type Page = 'path' | 'map' | 'lab' | 'notebook' | 'module'
 const stages = [
@@ -796,6 +809,10 @@ export default function Curriculum({
 }) {
   const hash = useHash()
   const learning = useLearningSession(session)
+  useEffect(() => {
+    startLearningEvidence()
+    return attachLearningSession(learning)
+  }, [learning])
   const route = parseLearningRoute(hash)
   const foundationPage =
     route.kind === 'unit' ||
@@ -1094,7 +1111,16 @@ export default function Curriculum({
             {learning.recovery || learning.conflict || page === 'notebook' ? (
               <LearningDataTools session={learning} />
             ) : null}
-            {foundationPage ? (
+            <p>
+              <a href="#learn/targeted">
+                Self-study evidence and targeted-practice pilot
+              </a>
+            </p>
+            {hash === '#learn/targeted' ? (
+              <Suspense fallback={<p>Loading evidence workspace…</p>}>
+                <LearningWorkspace session={learning} />
+              </Suspense>
+            ) : foundationPage ? (
               <FoundationWorkspace route={route} session={learning} />
             ) : page === 'path' ? (
               <LearningPath completed={progress.completed} />

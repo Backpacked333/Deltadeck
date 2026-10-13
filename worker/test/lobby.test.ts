@@ -16,6 +16,7 @@ import type { LobbyDO } from '../src/lobby'
 import { REGISTRY_STALE_MS, REPORT_MS } from '../src/registry'
 import type { TableEntry, TableReport } from '../src/registry'
 import { NEXT_HAND_MS } from '../src/table'
+import type { TableDO } from '../src/table'
 import { checkLobbyFrame, LOBBY_FRAME_KEYS } from './frames'
 import {
   connect,
@@ -31,6 +32,7 @@ import {
   setLobbyClock,
   sitDown,
   sixTable,
+  stub,
   token,
   tryConnect,
 } from './helpers'
@@ -70,6 +72,32 @@ const lobbyState = () =>
   })
 
 describe('the queue', () => {
+  it('F14 admission pause rejects rated queues while casual remains available', async () => {
+    const setPause = (value: string) =>
+      runInDurableObject(lobbyStub(env), (instance) => {
+        ;(
+          instance as unknown as {
+            env: { TRUST_PAUSE_RATED_ADMISSION?: string }
+          }
+        ).env.TRUST_PAUSE_RATED_ADMISSION = value
+      })
+    await setPause('true')
+    try {
+      const client = await lobby('pause-test')
+      client.send({ t: 'queue', kind: 'hu-rated' })
+      expect(await client.next((f) => f.t === 'error')).toMatchObject({
+        t: 'error',
+        code: 'rating_unavailable',
+        message: expect.stringContaining('paused'),
+      })
+      client.send({ t: 'queue', kind: 'hu-casual' })
+      expect(await client.next((f) => f.t === 'queued')).toMatchObject({
+        t: 'queued',
+      })
+    } finally {
+      await setPause('false')
+    }
+  })
   it('pairs two waiting players at one new table, both seated', async () => {
     const { matchId, la } = await pair('alice', 'bob')
     expect(matchId).toMatch(/^[0-9a-f-]{36}$/)
@@ -227,6 +255,10 @@ describe('one active table per account', () => {
       headers: { Authorization: `Bearer ${token('alice')}` },
     })
     const { matchId: invite } = (await created.json()) as { matchId: string }
+    // Exercise a legacy active pointer; new open invitations have none.
+    await runInDurableObject(lobbyStub(env), async (_: LobbyDO, state) => {
+      await state.storage.put('active:alice', invite)
+    })
     // The lobby takes other calls while it waits on a table: during its
     // first question to the invite (which holds nobody), alice sits at
     // another table and the claim lands.
@@ -347,7 +379,10 @@ describe('no-shows', () => {
 
   it('does nothing once both players are there', async () => {
     const { matchId } = await pair('alice', 'bob')
-    await freezeClock(matchId)
+    const at = await runInDurableObject(stub(matchId), (table: TableDO) =>
+      table.clock(),
+    )
+    await freezeClock(matchId, at)
     const alice = await connect(matchId, 'alice')
     await connect(matchId, 'bob')
     await alice.next(isState(1))
@@ -367,7 +402,11 @@ describe('rated pairing by rating', () => {
   /** Each account's rating, as the lobby reads it at queue time. */
   const ratings = (map: Record<string, number>) =>
     runInDurableObject(lobbyStub(env), (l: LobbyDO) => {
-      l.ratingOf = async (userId) => map[userId] ?? 1500
+      l.ratingOf = async (userId) => ({
+        status: 'rated',
+        rating: map[userId] ?? 1500,
+        version: 1,
+      })
     })
   const alarmAt = () =>
     runInDurableObject(lobbyStub(env), (_l: LobbyDO, state) =>
@@ -453,8 +492,12 @@ describe('rated pairing by rating', () => {
         const slow = l as LobbyDO & { finish?: () => void }
         l.ratingOf = (userId) =>
           userId === 'alice'
-            ? new Promise((done) => (slow.finish = () => done(1500)))
-            : Promise.resolve(1500)
+            ? new Promise(
+                (done) =>
+                  (slow.finish = () =>
+                    done({ status: 'rated', rating: 1500, version: 1 })),
+              )
+            : Promise.resolve({ status: 'rated', rating: 1500, version: 1 })
       })
       const reading = () =>
         runInDurableObject(

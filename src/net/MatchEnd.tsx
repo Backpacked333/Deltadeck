@@ -77,7 +77,7 @@ function RatingResult({
   if (!shown)
     return (
       <p className="live-rating" role="status">
-        Updating your rating…
+        Rating pending — gameplay is complete; verified settlement has not arrived.
       </p>
     )
   return (

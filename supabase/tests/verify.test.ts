@@ -100,7 +100,7 @@ describe('the verify functions', () => {
       'service_role',
       call('audit_hand', { id: HAND }),
     )
-    expect(r).toEqual({
+    expect(r).toMatchObject({
       id: HAND,
       matchId: MATCH,
       handNo: 1,

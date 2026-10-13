@@ -12,6 +12,8 @@ import { PGlite } from '@electric-sql/pglite'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { migrationFiles, MIGRATIONS_DIR, SUPABASE_STUB } from './harness'
 
+import { certifiedRatingFixture } from './rating-fixture'
+
 const ALICE = '11111111-1111-4111-8111-111111111111'
 const BOB = '22222222-2222-4222-8222-222222222222'
 const CAROL = '33333333-3333-4333-8333-333333333333'
@@ -532,7 +534,7 @@ describe('match_players', () => {
     ])
   })
 
-  it('a rated heads-up match archived with full hand records still has two rows and rates', async () => {
+  it('F07 a legacy rated archive keeps two rows but only a verified match rates', async () => {
     const M = 'cccccccc-0000-4000-8000-000000000009'
     const seats = { 0: ALICE, 1: BOB }
     const start = { ...session(M, seats), kind: 'hu-rated', config: {} }
@@ -560,18 +562,30 @@ describe('match_players', () => {
       { user_id: ALICE, seat: 0, net_chips: 60, timeouts: 0, outcome: 'win' },
       { user_id: BOB, seat: 1, net_chips: -60, timeouts: 1, outcome: 'loss' },
     ])
+    // A legacy archive cannot acquire a certificate by assertion alone.
+    await expect(
+      call('apply_rating', { matchId: M, format: 'hu-duplicate', players: [] }),
+    ).rejects.toMatchObject({ code: 'P0002' })
+    const certifiedId = 'dddddddd-0000-4000-8000-000000000002'
+    const certificate = await certifiedRatingFixture(
+      db,
+      certifiedId,
+      BOB,
+      ALICE,
+    )
     await call('apply_rating', {
-      matchId: M,
+      matchId: certifiedId,
+      ...certificate,
       format: 'hu-duplicate',
       modelVersion: 'glicko2.v1',
       players: [
-        { userId: ALICE, outcome: 'win', version: 0, rating: 1600 },
-        { userId: BOB, outcome: 'loss', version: 0, rating: 1400 },
+        { userId: ALICE, seat: 1, outcome: 'win', version: 0, rating: 1600 },
+        { userId: BOB, seat: 0, outcome: 'loss', version: 0, rating: 1400 },
       ].map((r) => ({ ...r, rd: 300, sigma: 0.06 })),
     })
     const { rows: history } = await db.query(
       'select user_id, outcome from public.rating_history where match_id = $1 order by user_id',
-      [M],
+      [certifiedId],
     )
     expect(history).toEqual([
       { user_id: ALICE, outcome: 'win' },

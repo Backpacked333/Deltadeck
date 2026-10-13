@@ -18,7 +18,8 @@ import type {
   SeatedView,
   SeatView,
 } from '../shared/protocol'
-import { useRunout } from '../state/runout'
+import { useLiveRunout } from '../state/runout'
+import { CommandStatus, LastHand, StartStatus } from './TrustState'
 import { PlayerAvatar, SchoolCrest } from './Avatar'
 import { inviteLink } from './api'
 import type { Identity } from './api'
@@ -75,6 +76,9 @@ export function LiveTable({
     sitIn,
     answer,
     rtt,
+    retryCommand,
+    checkCommand,
+    cancelStart,
   } = useTable(matchId, identity.getToken)
   const { taking, arrived } = useSitOnArrival(
     matchId,
@@ -85,6 +89,12 @@ export function LiveTable({
     setQuickSit,
   )
   const { status, table, view, seat } = state
+  if (state.cancellation?.phase === 'cancelled')
+    return (
+      <div className="empty live-empty">
+        <StartStatus state={state} cancel={cancelStart} />
+      </div>
+    )
 
   // While a quick-sit hands off to the next page, this one says only that
   // it is taking a seat: no closed or elsewhere page on the way out.
@@ -159,6 +169,8 @@ export function LiveTable({
         stand={stand}
         sitOut={sitOut}
         sitIn={sitIn}
+        retryCommand={retryCommand}
+        checkCommand={checkCommand}
       />
     )
   if (!table || seat === null)
@@ -172,6 +184,8 @@ export function LiveTable({
   return (
     <div className="play-column live-table">
       <MatchBar table={table} seat={seat} view={view} state={state} rtt={rtt} />
+      <CommandStatus state={state} retry={retryCommand} check={checkCommand} />
+      <StartStatus state={state} cancel={cancelStart} />
       {view && isSeated(view) ? (
         <LiveHand
           view={view}
@@ -402,9 +416,17 @@ function LiveHand({
         : null,
     [view.clock, view.result, view.toAct, view.you, clockOffset],
   )
-  const runout = useRunout(game)
+  const runout = useLiveRunout(
+    view,
+    state.presentation,
+    state.frameTiming?.at,
+    state.presentationEpoch,
+  )
   const yourTurn =
-    !game.result && view.toAct === view.you && state.status === 'open'
+    !game.result &&
+    view.toAct === view.you &&
+    state.status === 'open' &&
+    !state.resyncing
   // The server's legal moves when it is our turn; otherwise what we would
   // face, so the bar can show it greyed out.
   const legal = view.legal ?? legalActions({ ...game, turn: 0 })
@@ -473,10 +495,18 @@ function LiveHand({
 
   return (
     <>
-      {/* The table and its dock together: on wide screens the dock lies on
-          the felt (live.css). */}
-      <div className="live-felt">
+      <div
+        className="live-felt live-hand-surface"
+        data-motion={
+          ended ||
+          state.resyncing ||
+          (game.result && !runout.revealing && !runout.holding)
+            ? 'caught-up'
+            : undefined
+        }
+      >
         <Table
+          key={`${view.matchId}:${view.handNo}:${state.ownControl?.scope?.seatGeneration ?? 0}:${state.presentationEpoch}`}
           game={game}
           style="balanced"
           bubble={null}
@@ -523,6 +553,11 @@ function LiveHand({
           sending={sending}
         />
       </div>
+      {runout.holding && !ended && (
+        <p className="live-phase" role="status">
+          Result hold · next deal follows the table schedule.
+        </p>
+      )}
       {ended?.outcomeBySeat ? (
         <MatchEnd
           result={ended}
@@ -549,6 +584,13 @@ function LiveHand({
             <a href="#lobby">Back to the lobby</a>
           </div>
         )
+      )}
+      <LastHand completion={state.completion} />
+      {ended && !state.hands[view.handNo]?.record && (
+        <p role="status">
+          Review unavailable — the hand record has not arrived. Your result is
+          still shown above.
+        </p>
       )}
       <HandReviews state={state} you={view.you} />
       {flash && (

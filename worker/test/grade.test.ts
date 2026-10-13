@@ -30,7 +30,6 @@ import { forgetUsernames } from '../src/auth'
 import { HU_FORMAT } from '../src/grade'
 import worker from '../src/index'
 import { RATED_CONFIG } from '../src/rated'
-import { NEXT_HAND_MS } from '../src/table'
 import type { InitBody, TableDO } from '../src/table'
 import type { AuditedHand, HandMessage } from '../src/verify'
 import { HANDS_QUEUE } from '../src/verify'
@@ -38,6 +37,7 @@ import {
   connect,
   createTable,
   elapse,
+  elapseToNextDeal,
   freezeClock,
   isState,
   move,
@@ -99,10 +99,23 @@ beforeAll(() => {
             deck: p.deck,
             secret: p.secret,
             holes: p.holes,
+            kind: 'hu-rated',
+            archive: structuredClone(p),
+            sourceToken: `source:${p.id}`,
           })
           return new Response(null, { status: 204 })
         case 'audit_hand':
           return Response.json(fake.hands.get(p.id) ?? null)
+        case 'verify_hand_v2':
+          expect(p.sourceToken).toBe(`source:${p.id}`)
+          fake.hands.get(p.id)!.verification = {
+            version: p.version,
+            recordDigest: p.recordDigest,
+            archiveDigest: p.archiveDigest,
+          }
+          fake.verified.push(p.id)
+          fake.hands.get(p.id)!.verified = true
+          return new Response(null, { status: 204 })
         case 'verify_hand':
           fake.verified.push(p.id)
           fake.hands.get(p.id)!.verified = true
@@ -187,7 +200,7 @@ function recorder() {
 
 /** A rated hand's archive (and so its grading) is released as the next starts. */
 async function nextHand(matchId: string, alice: Client, handNo: number) {
-  await elapse(matchId, NEXT_HAND_MS)
+  await elapseToNextDeal(matchId)
   await alice.next(isState(handNo))
 }
 
@@ -386,12 +399,16 @@ describe('what is graded', () => {
     ])
 
     const casualQueue = recorder()
-    const matchId = await createTable(ALICE, 1)
+    const casualA = '33333333-3333-4333-8333-333333333333'
+    const casualB = '34444444-4444-4444-8444-444444444444'
+    NAMES[casualA] = 'casual_alice'
+    NAMES[casualB] = 'casual_bob'
+    const matchId = await createTable(casualA, 1)
     await routeQueue(matchId, casualQueue.queue)
     await freezeClock(matchId)
     const seats: Record<SeatId, Client> = {
-      0: await connect(matchId, ALICE),
-      1: await connect(matchId, BOB),
+      0: await connect(matchId, casualA),
+      1: await connect(matchId, casualB),
     }
     await seats[0].next(isState(1))
     await move(matchId, seats, fold)
