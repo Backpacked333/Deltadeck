@@ -16,7 +16,7 @@ import {
   GAME_ID_RE,
   normaliseCode,
   REQUEST_ID_RE,
-} from './gameCode'
+} from './gameCode.ts'
 
 export const PROTOCOL = 'qp.v1'
 /** Largest client frame the server will parse. */
