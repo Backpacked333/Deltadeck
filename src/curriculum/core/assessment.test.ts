@@ -3,6 +3,7 @@ import {
   backwardClock,
   evaluateCase,
   evidenceState,
+  freshCase,
   recordEvidence,
 } from './assessment'
 import { emptyStore, compactStore } from './persistence'
@@ -207,7 +208,7 @@ describe('device-clock review schedule and evidence states', () => {
     expect(evidenceState(s, 'f03', 1, 1, clockAt(13))).toBe('retained')
     expect(evidenceState(s, 'f03', 2, 1, clockAt(13))).toBe('refresh-suggested')
   })
-  it('resets streak and retries after1day on a failed or assisted review', () => {
+  it('resets streak and retries after1day on a failed review; an assisted one is practice and moves nothing (audit F15)', () => {
     let s = recordEvidence(emptyStore(fixedClock), submitted(), fixedClock)
     s = recordEvidence(s, submitted(reviews[0], {}, 3, s), clockAt(3))
     const failed = submitted(reviews[1], { answers: {} }, 13, s)
@@ -220,9 +221,11 @@ describe('device-clock review schedule and evidence states', () => {
       14,
       s,
     )
+    const schedule = s.reviewSchedule
     s = recordEvidence(s, hinted, clockAt(14))
-    expect(s.reviewSchedule.f03?.dueAt).toBe(clockAt(15)().toISOString())
-    expect(s.reviewSchedule.f03?.streak).toBe(0)
+    expect(s.reviewSchedule).toEqual(schedule)
+    // Its receipt is kept, and is not evidence.
+    expect(s.receipts.at(-1)).toMatchObject({ unaided: false, eligible: false })
   })
   it('does not count the same review variant twice and is idempotent on re-record', () => {
     let s = recordEvidence(emptyStore(fixedClock), submitted(), fixedClock)
@@ -232,7 +235,26 @@ describe('device-clock review schedule and evidence states', () => {
     const repeat = submitted(reviews[0], {}, 13, s)
     expect(repeat.evaluation?.eligible).toBe(false)
     s = recordEvidence(s, repeat, clockAt(13))
-    expect(s.reviewSchedule.f03?.streak).toBe(0)
+    // Not counted, and not a lapse either: the streak stands (audit F15).
+    expect(s.reviewSchedule.f03?.streak).toBe(1)
+    expect(s.reviewSchedule.f03?.dueAt).toBe(clockAt(13)().toISOString())
+  })
+  it('once the review bank is used up, reviewing again resets nothing (audit F15)', () => {
+    let s = recordEvidence(emptyStore(fixedClock), submitted(), fixedClock)
+    s = recordEvidence(s, submitted(reviews[0], {}, 3, s), clockAt(3))
+    s = recordEvidence(s, submitted(reviews[1], {}, 13, s), clockAt(13))
+    expect(evidenceState(s, 'f03', 1, 1, clockAt(13))).toBe('retained')
+    const ids = reviews.map((c) => c.id)
+    const version = () => 1
+    for (const [i, c] of reviews.slice(2).entries())
+      s = recordEvidence(s, submitted(c, {}, 43 + i, s), clockAt(43 + i))
+    expect(freshCase(s, ids, version)).toBeUndefined()
+    // Reviewing again can only repeat a seen case: practice, no reset.
+    const again = submitted(reviews[0], {}, 80, s)
+    expect(again.evaluation?.unaided).toBe(false)
+    const before = s.reviewSchedule
+    s = recordEvidence(s, again, clockAt(80))
+    expect(s.reviewSchedule).toEqual(before)
   })
   it('does not turn a backward clock or detail compaction into false retention', () => {
     const s = recordEvidence(emptyStore(fixedClock), submitted(), fixedClock)
